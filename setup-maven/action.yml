@@ -37,3 +37,41 @@ runs:
         wget -q "$url"
         tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+    - name: Configure settings.xml (resolve SNAPSHOT deps from central-snapshots)
+      shell: bash
+      # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream
+      # io.vidocq.* SNAPSHOTs. central-snapshots is publicly readable (no credentials).
+      # deploy-maven later overwrites this file with the same repos + the deploy servers.
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.m2
+        cat > ~/.m2/settings.xml <<'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <settings>
+          <profiles>
+            <profile>
+              <id>vidocq-snapshots</id>
+              <repositories>
+                <repository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </repository>
+              </repositories>
+              <pluginRepositories>
+                <pluginRepository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </pluginRepository>
+              </pluginRepositories>
+            </profile>
+          </profiles>
+          <activeProfiles>
+            <activeProfile>vidocq-snapshots</activeProfile>
+          </activeProfiles>
+        </settings>
+        EOF

@@ -50,6 +50,30 @@ runs:
               <password>${CENTRAL_PASSWORD}</password>
             </server>
           </servers>
+          <profiles>
+            <profile>
+              <id>vidocq-snapshots</id>
+              <repositories>
+                <repository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </repository>
+              </repositories>
+              <pluginRepositories>
+                <pluginRepository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </pluginRepository>
+              </pluginRepositories>
+            </profile>
+          </profiles>
+          <activeProfiles>
+            <activeProfile>vidocq-snapshots</activeProfile>
+          </activeProfiles>
         </settings>
         EOF
 
