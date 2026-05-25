@@ -1,0 +1,79 @@
+name: 'Notify Slack (ViBot)'
+description: 'Poste une notification [ViBot] sur Slack via webhook entrant. Silencieux si le webhook est absent (sauf status=failure).'
+
+inputs:
+  webhook-url:
+    description: 'URL du webhook Slack entrant (SLACK_WEBHOOK_URL)'
+    required: true
+  status:
+    description: 'success | failure'
+    required: true
+  repo:
+    description: 'Slug du repo (github.repository)'
+    default: ''
+  ref:
+    description: 'Branche / ref (github.ref_name)'
+    default: ''
+  run-url:
+    description: 'URL du run CI'
+    default: ''
+  version:
+    description: '(success, optionnel) version du projet'
+    default: ''
+  sha:
+    description: '(success, optionnel) SHA du commit'
+    default: ''
+  commit-message:
+    description: '(success, optionnel) message du commit'
+    default: ''
+  commit-author:
+    description: '(success, optionnel) auteur du commit'
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Notify Slack
+      shell: bash
+      env:
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        STATUS: ${{ inputs.status }}
+        REPO: ${{ inputs.repo }}
+        REF: ${{ inputs.ref }}
+        RUN_URL: ${{ inputs.run-url }}
+        VERSION: ${{ inputs.version }}
+        SHA: ${{ inputs.sha }}
+        COMMIT_MSG: ${{ inputs.commit-message }}
+        COMMIT_AUTHOR: ${{ inputs.commit-author }}
+      run: |
+        set -euo pipefail
+        if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+          if [ "$STATUS" = "failure" ]; then
+            echo "❌ SLACK_WEBHOOK_URL absent — impossible de notifier l'échec" >&2
+            exit 1
+          fi
+          echo "ℹ️ SLACK_WEBHOOK_URL absent — notif success skipped"
+          exit 0
+        fi
+        export SHORT_SHA="${SHA:0:7}"
+        payload=$(node <<'JS'
+        const s = process.env.STATUS;
+        const repo = process.env.REPO, ref = process.env.REF, runUrl = process.env.RUN_URL;
+        let text;
+        if (s === 'failure') {
+          text = `[ViBot]: ❌ *Build CI échoué* — \`${repo}\`@${ref}\n<${runUrl}|Voir le run>`;
+        } else {
+          const v = process.env.VERSION ? ` (v${process.env.VERSION})` : '';
+          const subject = (process.env.COMMIT_MSG || '').split('\n')[0];
+          const author = process.env.COMMIT_AUTHOR ? ` par *${process.env.COMMIT_AUTHOR}*` : '';
+          const line = process.env.SHORT_SHA
+            ? `\n> \`${process.env.SHORT_SHA}\`${author}${subject ? ` — _${subject}_` : ''}`
+            : '';
+          text = `[ViBot]: ✅ *Build CI réussi* — \`${repo}\`@${ref}${v}${line}\n<${runUrl}|Voir le run>`;
+        }
+        process.stdout.write(JSON.stringify({ text }));
+        JS
+        )
+        curl -fsS -X POST "$SLACK_WEBHOOK_URL" \
+          -H 'Content-Type: application/json' \
+          -d "$payload"
