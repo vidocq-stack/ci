@@ -1,45 +1,49 @@
-# Vidocq CI — composite actions partagées
+# Vidocq CI — shared composite actions
 
-Composite actions Forgejo/Codeberg mutualisant les étapes de CI répétées dans les
-sous-projets Vidocq. **Ce repo n'est pas un projet Maven** : il ne se build pas, ne se
-teste pas, ne se publie nulle part. Il fournit seulement des actions réutilisables via
-`uses: Vidocq/ci/<action>@<ref>`.
+Forgejo/Codeberg composite actions factoring out the repeated CI steps of the Vidocq
+sub-projects. **This repo is not a Maven project**: it is never built, tested or published.
+It only provides reusable actions consumed via `uses: https://codeberg.org/Vidocq/ci/<action>@<ref>`.
 
-> Repo **public** à dessein : il ne contient aucun secret, et un repo public évite que le
-> runner ait à s'authentifier pour cloner l'action depuis les repos privés.
+> ⚠️ On Codeberg/Forgejo, reference these actions by **absolute URL**
+> (`https://codeberg.org/Vidocq/ci/<action>@v1`). A relative `Vidocq/ci/...@v1` is resolved
+> against the default actions registry (code.forgejo.org), not codeberg.org → 404.
+
+> Repo is **public** on purpose: it holds no secrets, and a public repo means runners do not
+> need to authenticate to clone the action from private repos.
 
 ## Actions
 
-| Action | Rôle | Inputs notables (tous surchargeables) |
-|--------|------|----------------------------------------|
-| `setup-maven` | Installe Temurin + Maven, les met dans le PATH | `java-version` (25), `maven-version` (4.0.0-rc-5), `distribution` (temurin), `cache` (maven) |
-| `run-tck` | Lance un TCK Maven ou un script shell custom | `command` (shell prioritaire), `module` (-pl), `profile` (tck), `pre-install` (true), `maven-args` (-B -ntp) |
-| `notify-slack` | Notification `[ViBot]` sur Slack | `webhook-url` (requis), `status` (success/failure), `repo`, `ref`, `run-url`, `version`/`sha`/`commit-*` (succès) |
-| `deploy-maven` | settings.xml + import GPG + deploy Central (SNAPSHOT/RELEASE selon version) | `central-username`, `central-password`, `gpg-private-key`, `gpg-passphrase`, `snapshot-profile` (snapshot), `release-profile` (release) |
+| Action | Purpose | Notable inputs (all overridable) |
+|--------|---------|----------------------------------|
+| `setup-maven` | Install Temurin + Maven, put them on the PATH | `java-version` (25), `maven-version` (4.0.0-rc-5), `distribution` (temurin), `cache` (maven) |
+| `run-tck` | Run a Maven TCK, or a custom shell script | `command` (custom shell, wins), `module` (-pl), `profile` (tck), `pre-install` (true), `maven-args` (-B -ntp) |
+| `notify-slack` | `[ViBot]` Slack notification | `webhook-url` (required), `status` (success/failure/pr-open/pr-merged/pr-validated), plus repo/ref/run-url and commit/PR fields |
+| `deploy-maven` | settings.xml + GPG import + Central deploy (SNAPSHOT/RELEASE by version) | `central-username`, `central-password`, `gpg-private-key`, `gpg-passphrase`, `snapshot-profile`, `release-profile` |
+| `update-dep-graph` | Extract `io.vidocq.*` deps and push them into GestionProjet/data | `bot-token` (required), `repo` (required), `base-url`, `graph-repo`, `branch` |
 
-## Exemples
+## Examples
 
 ```yaml
-# Maven 3.9 pour un TCK qui l'exige :
-- uses: Vidocq/ci/setup-maven@v1
+# Maven 3.9 for a TCK that requires it:
+- uses: https://codeberg.org/Vidocq/ci/setup-maven@v1
   with: { maven-version: 3.9.9 }
-- uses: Vidocq/ci/run-tck@v1
-  with: { module: mon-module-tck }
+- uses: https://codeberg.org/Vidocq/ci/run-tck@v1
+  with: { module: my-tck-module }
 
-# TCK hors-reactor via script :
-- uses: Vidocq/ci/run-tck@v1
+# Out-of-reactor TCK via a script:
+- uses: https://codeberg.org/Vidocq/ci/run-tck@v1
   with: { command: "./run-official-tck-restful-4.0.sh all", pre-install: "false" }
 ```
 
 ## Secrets
 
-Une composite action **n'hérite pas** des `secrets.*` : ils doivent être passés
-explicitement via `with:` (mappés en `inputs`, puis ré-exportés en `env:` dans les steps).
-Les secrets restent gérés au niveau **organisation** Codeberg.
+A composite action **does not inherit** `secrets.*`: they must be passed explicitly via
+`with:` (mapped to `inputs`, then re-exported as `env:` inside the steps). Secrets stay
+managed at the Codeberg **organisation** level.
 
-## Versionnement
+## Versioning
 
-- Référencer un **tag mobile `@v1`** (re-pointé sur chaque évolution rétrocompatible).
-- Épingler `@vX.Y.Z` pour un repo qui veut figer.
-- Breaking change → `v2`, migration repo par repo.
-- `@main` réservé aux phases de validation (pilote).
+- Reference a **mobile tag `@v1`** (re-pointed on each backward-compatible change).
+- Pin `@vX.Y.Z` for a repo that wants to freeze.
+- Breaking change → `v2`, migrate repo by repo.
+- `@main` is reserved for validation phases (pilot).

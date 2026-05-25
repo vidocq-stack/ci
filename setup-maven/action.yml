@@ -1,18 +1,18 @@
 name: 'Setup Java + Maven'
-description: 'Installe Temurin + Maven (versions surchargeables) et les met dans le PATH'
+description: 'Install Temurin + Maven (both versions overridable) and put them on the PATH'
 
 inputs:
   java-version:
-    description: 'Version du JDK Temurin'
+    description: 'Temurin JDK version'
     default: '25'
   distribution:
-    description: 'Distribution JDK passée à setup-java'
+    description: 'JDK distribution passed to setup-java'
     default: 'temurin'
   maven-version:
-    description: 'Version de Maven à installer (ex. 4.0.0-rc-5 ou 3.9.9 ; le préfixe majeur choisit maven-3/ vs maven-4/)'
+    description: 'Maven version to install (e.g. 4.0.0-rc-5 or 3.9.9; the major prefix selects maven-3/ vs maven-4/)'
     default: '4.0.0-rc-5'
   cache:
-    description: 'Cache de dépendances de setup-java (maven, gradle, sbt... ou vide pour désactiver)'
+    description: 'setup-java dependency cache (maven, gradle, sbt... or empty to disable)'
     default: 'maven'
 
 runs:
@@ -33,7 +33,7 @@ runs:
         set -euo pipefail
         major="${MAVEN_VERSION%%.*}"
         url="https://dlcdn.apache.org/maven/maven-${major}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-        echo "Téléchargement de Maven ${MAVEN_VERSION} depuis ${url}"
+        echo "Downloading Maven ${MAVEN_VERSION} from ${url}"
         wget -q "$url"
         tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"

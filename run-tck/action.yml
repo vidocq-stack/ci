@@ -1,21 +1,21 @@
 name: 'Run TCK'
-description: 'Lance un TCK Maven paramétré (module/profil) ou un script shell custom. Maven doit déjà être dans le PATH (cf. setup-maven).'
+description: 'Run a parameterized Maven TCK (module/profile) or a custom shell script. Maven must already be on the PATH (see setup-maven).'
 
 inputs:
   command:
-    description: 'Commande shell custom à exécuter pour le TCK (prioritaire si non vide, ex. "./run-official-tck-restful-4.0.sh all")'
+    description: 'Custom shell command to run the TCK (takes precedence when non-empty, e.g. "./run-official-tck-restful-4.0.sh all")'
     default: ''
   module:
-    description: 'Module Maven ciblé via -pl (vide = reactor complet)'
+    description: 'Maven module targeted via -pl (empty = whole reactor)'
     default: ''
   profile:
-    description: 'Profil Maven activé pour le TCK'
+    description: 'Maven profile enabled for the TCK'
     default: 'tck'
   pre-install:
-    description: 'Lancer "mvn install -DskipTests" avant le TCK'
+    description: 'Run "mvn install -DskipTests" before the TCK'
     default: 'true'
   maven-args:
-    description: 'Arguments Maven communs'
+    description: 'Common Maven args'
     default: '-B -ntp'
 
 runs:
@@ -32,15 +32,15 @@ runs:
       run: |
         set -euo pipefail
         if [ "$TCK_PRE_INSTALL" = "true" ]; then
-          echo "Pré-install : mvn $MVN_ARGS install -DskipTests"
+          echo "Pre-install: mvn $MVN_ARGS install -DskipTests"
           mvn $MVN_ARGS install -DskipTests
         fi
         if [ -n "$TCK_COMMAND" ]; then
-          echo "TCK via commande custom : $TCK_COMMAND"
+          echo "TCK via custom command: $TCK_COMMAND"
           bash -c "$TCK_COMMAND"
         else
           PL=""
           [ -n "$TCK_MODULE" ] && PL="-pl $TCK_MODULE"
-          echo "TCK via Maven : mvn $MVN_ARGS $PL -P$TCK_PROFILE test"
+          echo "TCK via Maven: mvn $MVN_ARGS $PL -P$TCK_PROFILE test"
           mvn $MVN_ARGS $PL -P"$TCK_PROFILE" test
         fi

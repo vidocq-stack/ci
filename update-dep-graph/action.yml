@@ -1,0 +1,43 @@
+name: 'Update Vidocq dependency graph'
+description: 'Extract io.vidocq.* dependencies of the current repo and push them into Vidocq/GestionProjet/data via the shared scripts.'
+
+inputs:
+  bot-token:
+    description: 'Token with write access to GestionProjet (VIDOCQ_BOT_TOKEN)'
+    required: true
+  repo:
+    description: 'Repository slug (github.repository)'
+    required: true
+  base-url:
+    description: 'Forge base URL hosting GestionProjet'
+    default: 'https://codeberg.org'
+  graph-repo:
+    description: 'owner/name of the dependency-graph repo'
+    default: 'Vidocq/GestionProjet'
+  branch:
+    description: 'Branch of the graph repo to read scripts from'
+    default: 'main'
+
+runs:
+  using: composite
+  steps:
+    - name: Update dependency graph
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.bot-token }}
+        REPO: ${{ inputs.repo }}
+        BASE_URL: ${{ inputs.base-url }}
+        GRAPH_REPO: ${{ inputs.graph-repo }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || \
+          (apt-get update && apt-get install -y --no-install-recommends python3 curl ca-certificates)
+        raw="${BASE_URL}/${GRAPH_REPO}/raw/branch/${BRANCH}/scripts"
+        curl -fsSL -o /tmp/extract_deps.sh     -H "Authorization: token $TOKEN" "$raw/extract_deps.sh"
+        curl -fsSL -o /tmp/update_data_file.sh -H "Authorization: token $TOKEN" "$raw/update_data_file.sh"
+        chmod +x /tmp/extract_deps.sh /tmp/update_data_file.sh
+        /tmp/extract_deps.sh "$PWD" "$REPO" > /tmp/deps.json
+        echo "Extracted dependencies:"; cat /tmp/deps.json
+        GRAPH_REPO_URL="${BASE_URL}/${GRAPH_REPO}.git" \
+          /tmp/update_data_file.sh --repo "$REPO" --data-json /tmp/deps.json --token "$TOKEN"

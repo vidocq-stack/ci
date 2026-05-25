@@ -1,27 +1,27 @@
 name: 'Deploy to Maven Central'
-description: 'Configure settings.xml + importe la clé GPG + déploie : SNAPSHOT via maven-deploy-plugin (central-snapshots), RELEASE via central-publishing. Maven doit déjà être dans le PATH.'
+description: 'Write settings.xml + import GPG key + deploy: SNAPSHOT via maven-deploy-plugin (central-snapshots), RELEASE via central-publishing. Maven must already be on the PATH.'
 
 inputs:
   central-username:
-    description: 'Identifiant Sonatype Central Portal'
+    description: 'Sonatype Central Portal username'
     required: true
   central-password:
-    description: 'Mot de passe / token Sonatype Central Portal'
+    description: 'Sonatype Central Portal password / token'
     required: true
   gpg-private-key:
-    description: 'Clé privée GPG (armored, idéalement encodée base64)'
+    description: 'GPG private key (armored, ideally base64-encoded)'
     required: true
   gpg-passphrase:
-    description: 'Passphrase de la clé GPG'
+    description: 'GPG key passphrase'
     required: true
   snapshot-profile:
-    description: 'Profil Maven pour les déploiements SNAPSHOT'
+    description: 'Maven profile for SNAPSHOT deployments'
     default: 'snapshot'
   release-profile:
-    description: 'Profil Maven pour les déploiements RELEASE'
+    description: 'Maven profile for RELEASE deployments'
     default: 'release'
   maven-args:
-    description: 'Arguments Maven communs'
+    description: 'Common Maven args'
     default: '-B -ntp'
 
 runs:
@@ -60,20 +60,20 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-          echo "❌ gpg-private-key absent ou vide" >&2; exit 1
+          echo "❌ gpg-private-key is empty or missing" >&2; exit 1
         fi
-        # La clé peut être stockée en base64 (recommandé, évite les retours-ligne mangés)
-        # ou en ASCII-armored brut. On tente d'abord le décodage base64, sinon import tel quel.
+        # The key may be stored base64-encoded (recommended, avoids mangled newlines)
+        # or as raw ASCII-armored text. Try base64 decode first, otherwise import as-is.
         if echo "$GPG_PRIVATE_KEY" | base64 -d 2>/dev/null | gpg --batch --import 2>/dev/null; then
-          echo "✅ clé GPG importée (base64)"
+          echo "✅ GPG key imported (base64)"
         else
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
         fi
         if ! gpg --list-secret-keys --with-colons | grep -q '^sec'; then
-          echo "❌ Aucune clé privée GPG importée — gpg-private-key doit contenir la clé armored (idéalement base64 de 'gpg --export-secret-keys --armor')" >&2
+          echo "❌ No GPG private key imported — gpg-private-key must contain the armored key (ideally base64 of 'gpg --export-secret-keys --armor')" >&2
           exit 1
         fi
-        # Mode loopback pour que maven-gpg-plugin puisse injecter la passphrase.
+        # Loopback mode so maven-gpg-plugin can inject the passphrase.
         echo 'allow-loopback-pinentry' > ~/.gnupg/gpg-agent.conf 2>/dev/null || \
           (mkdir -p ~/.gnupg && chmod 700 ~/.gnupg && echo 'allow-loopback-pinentry' > ~/.gnupg/gpg-agent.conf)
         gpgconf --kill gpg-agent || true
@@ -89,9 +89,9 @@ runs:
         set -euo pipefail
         VERSION=$(mvn -q -DforceStdout -N help:evaluate -Dexpression=project.version)
         if [[ "$VERSION" == *-SNAPSHOT ]]; then
-          echo "Version $VERSION → publish SNAPSHOT vers central-snapshots (maven-deploy-plugin)"
+          echo "Version $VERSION → publishing SNAPSHOT to central-snapshots (maven-deploy-plugin)"
           mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy -DskipTests
         else
-          echo "Version $VERSION → publish RELEASE via central-publishing-maven-plugin"
+          echo "Version $VERSION → publishing RELEASE via central-publishing-maven-plugin"
           mvn $MVN_ARGS -P"$RELEASE_PROFILE" deploy -DskipTests -Dgpg.passphrase="$GPG_PASSPHRASE"
         fi

@@ -1,33 +1,51 @@
 name: 'Notify Slack (ViBot)'
-description: 'Poste une notification [ViBot] sur Slack via webhook entrant. Silencieux si le webhook est absent (sauf status=failure).'
+description: 'Post a [ViBot] notification to Slack via an incoming webhook. Silent when the webhook is missing for status=success; fails otherwise.'
 
 inputs:
   webhook-url:
-    description: 'URL du webhook Slack entrant (SLACK_WEBHOOK_URL)'
+    description: 'Slack incoming webhook URL (SLACK_WEBHOOK_URL)'
     required: true
   status:
-    description: 'success | failure'
+    description: 'success | failure | pr-open | pr-merged | pr-validated'
     required: true
   repo:
-    description: 'Slug du repo (github.repository)'
+    description: 'Repository slug (github.repository)'
     default: ''
   ref:
-    description: 'Branche / ref (github.ref_name)'
+    description: 'Branch / ref (github.ref_name)'
     default: ''
   run-url:
-    description: 'URL du run CI'
+    description: 'CI run URL'
     default: ''
   version:
-    description: '(success, optionnel) version du projet'
+    description: '(success, optional) project version'
     default: ''
   sha:
-    description: '(success, optionnel) SHA du commit'
+    description: '(success, optional) commit SHA'
     default: ''
   commit-message:
-    description: '(success, optionnel) message du commit'
+    description: '(success, optional) commit message'
     default: ''
   commit-author:
-    description: '(success, optionnel) auteur du commit'
+    description: '(success, optional) commit author'
+    default: ''
+  pr-number:
+    description: '(pr-*, optional) pull request number'
+    default: ''
+  pr-title:
+    description: '(pr-*, optional) pull request title'
+    default: ''
+  pr-author:
+    description: '(pr-*, optional) pull request author'
+    default: ''
+  pr-url:
+    description: '(pr-*, optional) pull request URL'
+    default: ''
+  merged-by:
+    description: '(pr-merged, optional) who merged the PR'
+    default: ''
+  base-ref:
+    description: '(pr-merged, optional) base branch of the PR'
     default: ''
 
 runs:
@@ -45,31 +63,53 @@ runs:
         SHA: ${{ inputs.sha }}
         COMMIT_MSG: ${{ inputs.commit-message }}
         COMMIT_AUTHOR: ${{ inputs.commit-author }}
+        PR_NUM: ${{ inputs.pr-number }}
+        PR_TITLE: ${{ inputs.pr-title }}
+        PR_AUTHOR: ${{ inputs.pr-author }}
+        PR_URL: ${{ inputs.pr-url }}
+        PR_MERGED_BY: ${{ inputs.merged-by }}
+        BASE_REF: ${{ inputs.base-ref }}
       run: |
         set -euo pipefail
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-          if [ "$STATUS" = "failure" ]; then
-            echo "❌ SLACK_WEBHOOK_URL absent — impossible de notifier l'échec" >&2
-            exit 1
+          if [ "$STATUS" = "success" ]; then
+            echo "ℹ️ SLACK_WEBHOOK_URL missing — success notification skipped"
+            exit 0
           fi
-          echo "ℹ️ SLACK_WEBHOOK_URL absent — notif success skipped"
-          exit 0
+          echo "❌ SLACK_WEBHOOK_URL missing — cannot send '$STATUS' notification" >&2
+          exit 1
         fi
         export SHORT_SHA="${SHA:0:7}"
         payload=$(node <<'JS'
         const s = process.env.STATUS;
         const repo = process.env.REPO, ref = process.env.REF, runUrl = process.env.RUN_URL;
+        const prNum = process.env.PR_NUM, prTitle = process.env.PR_TITLE;
+        const prAuthor = process.env.PR_AUTHOR, prUrl = process.env.PR_URL;
         let text;
-        if (s === 'failure') {
-          text = `[ViBot]: ❌ *Build CI échoué* — \`${repo}\`@${ref}\n<${runUrl}|Voir le run>`;
-        } else {
-          const v = process.env.VERSION ? ` (v${process.env.VERSION})` : '';
-          const subject = (process.env.COMMIT_MSG || '').split('\n')[0];
-          const author = process.env.COMMIT_AUTHOR ? ` par *${process.env.COMMIT_AUTHOR}*` : '';
-          const line = process.env.SHORT_SHA
-            ? `\n> \`${process.env.SHORT_SHA}\`${author}${subject ? ` — _${subject}_` : ''}`
-            : '';
-          text = `[ViBot]: ✅ *Build CI réussi* — \`${repo}\`@${ref}${v}${line}\n<${runUrl}|Voir le run>`;
+        switch (s) {
+          case 'failure':
+            text = `[ViBot]: ❌ *CI build failed* — \`${repo}\`@${ref}\n<${runUrl}|View run>`;
+            break;
+          case 'pr-open':
+            text = `[ViBot]: 📬 *PR opened* on \`${repo}\`#${prNum} by *${prAuthor}*\n> ${prTitle}\n<${prUrl}|View PR>`;
+            break;
+          case 'pr-merged': {
+            const mergedBy = process.env.PR_MERGED_BY || prAuthor;
+            text = `[ViBot]: 🎉 *PR merged* into \`${repo}\`@${process.env.BASE_REF} (#${prNum}, author *${prAuthor}*, merged by *${mergedBy}*)\n> ${prTitle}\n<${prUrl}|View PR>`;
+            break;
+          }
+          case 'pr-validated':
+            text = `[ViBot]: ✅ *PR validated* — \`${repo}\`#${prNum} by *${prAuthor}*\n> ${prTitle}\n<${prUrl}|View PR>`;
+            break;
+          default: { // success
+            const v = process.env.VERSION ? ` (v${process.env.VERSION})` : '';
+            const subject = (process.env.COMMIT_MSG || '').split('\n')[0];
+            const author = process.env.COMMIT_AUTHOR ? ` by *${process.env.COMMIT_AUTHOR}*` : '';
+            const line = process.env.SHORT_SHA
+              ? `\n> \`${process.env.SHORT_SHA}\`${author}${subject ? ` — _${subject}_` : ''}`
+              : '';
+            text = `[ViBot]: ✅ *CI build passed* — \`${repo}\`@${ref}${v}${line}\n<${runUrl}|View run>`;
+          }
         }
         process.stdout.write(JSON.stringify({ text }));
         JS
