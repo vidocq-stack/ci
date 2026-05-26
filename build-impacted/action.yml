@@ -1,0 +1,205 @@
+name: 'Build impacted downstream consumers'
+description: >
+  Resolve the transitive downstream consumers of the current repo from the Vidocq
+  dependency graph, then rebuild each one — in topological order — against the PR
+  artifacts already installed in the local Maven repository. No staging registry:
+  the producer (and every rebuilt consumer) is resolved straight from ~/.m2.
+  Java + Maven must already be on the PATH (run ci/setup-maven first), and the
+  producer must already have been installed locally with `producer-version`.
+
+inputs:
+  producer-slug:
+    description: 'Forge slug of the repo under PR, e.g. Vidocq/vauban (pass ${{ github.repository }})'
+    required: true
+  producer-version:
+    description: 'Release-style PR version of the producer, already installed in ~/.m2 (no -SNAPSHOT)'
+    required: true
+  version-suffix:
+    description: 'Suffix appended to each consumer base version, e.g. PR42.abc1234 (no -SNAPSHOT)'
+    required: true
+  bot-token:
+    description: 'Codeberg token: clone consumer repos + query the API (org secret VIDOCQ_BOT_TOKEN)'
+    required: true
+  graph-ref:
+    description: 'Branch of Vidocq/GestionProjet to read the graph + resolver from'
+    default: 'main'
+  maven-args:
+    description: 'Common Maven args for every consumer build'
+    default: '-B -ntp'
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve impacted consumers (topological order, Codeberg-filtered)
+      shell: bash
+      env:
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        GRAPH_REF: ${{ inputs.graph-ref }}
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
+           || ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+          apt-get update && apt-get install -y --no-install-recommends python3 jq curl git ca-certificates
+        fi
+
+        # Forge slug -> data file name: Vidocq/vauban -> Vidocq_vauban.json
+        DATA_FILE="${PRODUCER_SLUG/\//_}.json"
+        RAW="https://codeberg.org/Vidocq/GestionProjet/raw/branch/${GRAPH_REF}"
+        echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph ref=$GRAPH_REF"
+
+        auth=(-H "Authorization: token ${BOT_TOKEN}")
+        curl -fsSL "${auth[@]}" -o /tmp/inverted.json     "$RAW/graph/inverted.json"
+        curl -fsSL "${auth[@]}" -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
+        curl -fsSL "${auth[@]}" -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
+
+        # Artifacts this repo produces (source of truth kept by update-dep-graph).
+        ARTIFACTS=$(python3 - <<'PY'
+        import json
+        d = json.load(open("/tmp/data.json"))
+        print(" ".join(sorted({f"{p['groupId']}:{p['artifactId']}" for p in d.get("produces", [])})))
+        PY
+        )
+        if [ -z "$ARTIFACTS" ]; then
+          echo "No io.vidocq.* artifact in data/${DATA_FILE} — graph out of sync?" >&2
+          exit 1
+        fi
+        echo "Produces: $ARTIFACTS"
+
+        # --ordered = producer-before-consumer topological order (required for the
+        # sequential rebuild: each level installs locally before the next consumes it).
+        MATRIX=$(python3 /tmp/resolve_impact.py \
+          --graph /tmp/inverted.json --changed $ARTIFACTS --format matrix --ordered)
+        echo "Ordered matrix (raw): $MATRIX"
+
+        # Keep only consumers that already exist on Codeberg. The migrated graph still
+        # lists historical/not-yet-migrated consumers; each rejoins automatically once
+        # created — no manual flag. Order is preserved (jq keeps array order).
+        : > /tmp/impacted.txt
+        for r in $(echo "$MATRIX" | jq -r '.include[].repo'); do
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "${auth[@]}" \
+            "https://codeberg.org/api/v1/repos/$r")
+          if [ "$code" = "200" ]; then
+            echo "  keep $r"
+            echo "$r" >> /tmp/impacted.txt
+          else
+            echo "  drop $r (not on Codeberg yet, HTTP $code)"
+          fi
+        done
+        echo "Impacted consumers to rebuild: $(wc -l < /tmp/impacted.txt)"
+
+    - name: Rebuild impacted consumers against local PR artifacts
+      shell: bash
+      env:
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        PRODUCER_VERSION: ${{ inputs.producer-version }}
+        VERSION_SUFFIX: ${{ inputs.version-suffix }}
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        MVN_ARGS: ${{ inputs.maven-args }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -s /tmp/impacted.txt ]; then
+          echo "No impacted consumer on Codeberg — nothing to rebuild."
+          exit 0
+        fi
+
+        # short-name (lowercase last slug segment) -> PR version already in local ~/.m2.
+        # Seeded with the producer; each rebuilt consumer is added so the next level
+        # resolves it from local M2 instead of central-snapshots.
+        declare -A PRV
+        producer_short="${PRODUCER_SLUG##*/}"; producer_short="${producer_short,,}"
+        PRV["$producer_short"]="$PRODUCER_VERSION"
+
+        WORK="${RUNNER_TEMP:-/tmp}/downstream"
+        mkdir -p "$WORK"
+
+        read_base_version() {
+          # Echo the root pom version with any -SNAPSHOT suffix stripped.
+          python3 - "$1" <<'PY'
+        import re, sys, xml.etree.ElementTree as ET
+        root = ET.parse(sys.argv[1]).getroot()
+        ns = root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
+        v = root.find(f"{{{ns}}}version") if ns else root.find("version")
+        if v is None or not v.text:
+            sys.stderr.write("root <version> not found\n"); sys.exit(1)
+        print(re.sub(r"-SNAPSHOT$", "", v.text.strip()))
+        PY
+        }
+
+        sync_plugin_descriptors() {
+          # versions:set does not touch resources; maven-plugin modules embed a
+          # plugin.xml with a hardcoded <version> that must follow the new version.
+          python3 - "$1" <<'PY'
+        import re, sys, xml.etree.ElementTree as ET
+        from pathlib import Path
+        repo = Path(sys.argv[1])
+        rp = ET.parse(repo / "pom.xml").getroot()
+        ns = rp.tag[1:].split("}", 1)[0] if rp.tag.startswith("{") else ""
+        v = rp.find(f"{{{ns}}}version") if ns else rp.find("version")
+        version = v.text.strip()
+        n = 0
+        for pom in repo.rglob("pom.xml"):
+            if "target" in pom.parts:
+                continue
+            try:
+                r = ET.parse(pom).getroot()
+            except ET.ParseError:
+                continue
+            pns = r.tag[1:].split("}", 1)[0] if r.tag.startswith("{") else ""
+            pkg = r.find(f"{{{pns}}}packaging") if pns else r.find("packaging")
+            if pkg is None or (pkg.text or "").strip() != "maven-plugin":
+                continue
+            px = pom.parent / "src/main/resources/META-INF/maven/plugin.xml"
+            if not px.is_file():
+                continue
+            content = px.read_text(encoding="utf-8")
+            new = re.sub(r"(<artifactId>[^<]+</artifactId>\s*\n\s*<version>)[^<]+(</version>)",
+                         rf"\g<1>{version}\g<2>", content, count=1)
+            if new != content:
+                px.write_text(new, encoding="utf-8"); n += 1
+        print(f"  plugin.xml synced: {n}")
+        PY
+        }
+
+        while IFS= read -r slug; do
+          [ -z "$slug" ] && continue
+          short="${slug##*/}"; short="${short,,}"
+          dir="$WORK/$short"
+          echo "::group::Rebuild $slug (depends on: ${!PRV[*]})"
+
+          git clone --quiet --depth 1 \
+            "https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git" "$dir"
+          pushd "$dir" >/dev/null
+
+          # 1) Pin every upstream rebuilt in this run to its local PR version.
+          #    -D<prop>=<val> on the CLI does not reliably override <version>${prop}</version>
+          #    resolution, so we physically rewrite the property in every reactor pom.
+          for up in "${!PRV[@]}"; do
+            if grep -rqlF "<${up}.version>" --include=pom.xml .; then
+              echo "  set ${up}.version=${PRV[$up]}"
+              mvn $MVN_ARGS versions:set-property \
+                -Dproperty="${up}.version" -DnewVersion="${PRV[$up]}" \
+                -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
+            fi
+          done
+
+          # 2) Give this consumer its own release-style PR version so the next level
+          #    resolves it from local M2 (release = immutable, never re-fetched).
+          base=$(read_base_version pom.xml)
+          cver="${base}-${VERSION_SUFFIX}"
+          echo "  consumer version: $cver"
+          mvn $MVN_ARGS versions:set \
+            -DnewVersion="$cver" -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
+          sync_plugin_descriptors .
+
+          # 3) install (runs unit + integration tests) -> available for downstream levels.
+          mvn $MVN_ARGS install </dev/null
+
+          PRV["$short"]="$cver"
+          popd >/dev/null
+          rm -rf "$dir"        # keep the M2, drop the checkout
+          echo "::endgroup::"
+        done < /tmp/impacted.txt
+
+        echo "All impacted consumers rebuilt OK against the PR artifacts."
