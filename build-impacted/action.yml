@@ -49,9 +49,12 @@ runs:
         echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph ref=$GRAPH_REF"
 
         auth=(-H "Authorization: token ${BOT_TOKEN}")
-        curl -fsSL "${auth[@]}" -o /tmp/inverted.json     "$RAW/graph/inverted.json"
-        curl -fsSL "${auth[@]}" -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
-        curl -fsSL "${auth[@]}" -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
+        # Retry on transient Codeberg failures (504 gateway timeout, dropped connections).
+        # --retry-all-errors retries on HTTP 5xx too, not just connection errors.
+        retry_curl=(--retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15)
+        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/inverted.json     "$RAW/graph/inverted.json"
+        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
+        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
 
         # Artifacts this repo produces (source of truth kept by update-dep-graph).
         ARTIFACTS=$(python3 - <<'PY'
@@ -77,8 +80,9 @@ runs:
         # created — no manual flag. Order is preserved (jq keeps array order).
         : > /tmp/impacted.txt
         for r in $(echo "$MATRIX" | jq -r '.include[].repo'); do
-          code=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "${auth[@]}" \
-            "https://codeberg.org/api/v1/repos/$r")
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15 \
+            "${auth[@]}" "https://codeberg.org/api/v1/repos/$r")
           if [ "$code" = "200" ]; then
             echo "  keep $r"
             echo "$r" >> /tmp/impacted.txt
@@ -113,6 +117,23 @@ runs:
 
         WORK="${RUNNER_TEMP:-/tmp}/downstream"
         mkdir -p "$WORK"
+
+        clone_with_retry() {
+          # git has no built-in retry; Codeberg occasionally returns 504 on clone under load.
+          # Retry with exponential backoff, cleaning the dest between attempts. The token in the
+          # URL is stripped from log output (${url##*@}).
+          local url="$1" dest="$2" attempt=1 max=5 delay=5
+          while :; do
+            rm -rf "$dest"
+            if git clone --quiet --depth 1 "$url" "$dest"; then return 0; fi
+            if [ "$attempt" -ge "$max" ]; then
+              echo "::error::git clone failed after ${max} attempts: ${url##*@}" >&2
+              return 1
+            fi
+            echo "  clone attempt ${attempt}/${max} failed (${url##*@}); retrying in ${delay}s..." >&2
+            sleep "$delay"; attempt=$((attempt + 1)); delay=$((delay * 2))
+          done
+        }
 
         read_base_version() {
           # Echo the root pom version with any -SNAPSHOT suffix stripped.
@@ -168,8 +189,7 @@ runs:
           dir="$WORK/$short"
           echo "::group::Rebuild $slug (depends on: ${!PRV[*]})"
 
-          git clone --quiet --depth 1 \
-            "https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git" "$dir"
+          clone_with_retry "https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git" "$dir"
           pushd "$dir" >/dev/null
 
           # 1) Pin every upstream rebuilt in this run to its local PR version.
