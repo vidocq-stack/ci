@@ -21,6 +21,7 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 | `deploy-maven` | settings.xml + GPG import + Central deploy (SNAPSHOT/RELEASE by version) | `central-username`, `central-password`, `gpg-private-key`, `gpg-passphrase`, `snapshot-profile`, `release-profile` |
 | `build-impacted` | PR-only: rebuild the transitive downstream consumers (topological order) against the producer's local PR artifacts — no staging registry | `producer-slug` (required), `producer-version` (required), `version-suffix` (required), `bot-token` (required), `graph-ref` (main), `maven-args` (-B -ntp) |
 | `update-dep-graph` | Extract `io.vidocq.*` deps and push them into GestionProjet/data | `bot-token` (required), `repo` (required), `base-url`, `graph-repo`, `branch` |
+| `trigger-docs-rebuild` | POST a `workflow_dispatch` to `vidocq-docs/build.yml` so the Antora site is rebuilt & redeployed. Use after a push on `main` that touched `docs/**`. | `bot-token` (required), `source-repo` (required), `base-url`, `docs-repo`, `workflow`, `ref` |
 
 ## Examples
 
@@ -45,6 +46,37 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
     producer-version: 0.1.0-PR42.abc1234
     version-suffix: PR42.abc1234
     bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+
+# Trigger vidocq-docs rebuild from a dedicated workflow filtered on docs/**:
+# (see notify-docs.yml below — wired into every sub-project)
+- uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@v1
+  with:
+    bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+    source-repo: ${{ github.repository }}
+```
+
+### Per-repo wiring — `notify-docs.yml`
+
+Add this workflow once per sub-project. It fires only when a `main` push touches
+`docs/**` and dispatches `vidocq-docs/build.yml` — no other CI overhead.
+
+```yaml
+name: Notify docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+
+jobs:
+  notify-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@v1
+        with:
+          bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          source-repo: ${{ github.repository }}
 ```
 
 ## Secrets

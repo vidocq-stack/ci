@@ -1,0 +1,62 @@
+name: 'Trigger vidocq-docs rebuild'
+description: 'POST a workflow_dispatch to vidocq-docs Forgejo Actions to rebuild & redeploy the Antora site. Use after a push on main that touched docs/**.'
+
+inputs:
+  bot-token:
+    description: 'Forgejo token with write access to the docs repo (VIDOCQ_BOT_TOKEN)'
+    required: true
+  source-repo:
+    description: 'Repository slug that triggered the rebuild (github.repository) — passed as workflow input for traceability'
+    required: true
+  base-url:
+    description: 'Forge base URL hosting vidocq-docs'
+    default: 'https://codeberg.org'
+  docs-repo:
+    description: 'owner/name of the docs repo'
+    default: 'Vidocq/vidocq-docs'
+  workflow:
+    description: 'Workflow filename to dispatch in the docs repo'
+    default: 'build.yml'
+  ref:
+    description: 'Branch / ref of the docs repo to build'
+    default: 'main'
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch vidocq-docs rebuild
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.bot-token }}
+        SOURCE_REPO: ${{ inputs.source-repo }}
+        BASE_URL: ${{ inputs.base-url }}
+        DOCS_REPO: ${{ inputs.docs-repo }}
+        WORKFLOW: ${{ inputs.workflow }}
+        REF: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        command -v curl >/dev/null 2>&1 || \
+          (apt-get update && apt-get install -y --no-install-recommends curl ca-certificates)
+
+        url="${BASE_URL}/api/v1/repos/${DOCS_REPO}/actions/workflows/${WORKFLOW}/dispatches"
+        body=$(printf '{"ref":"%s","inputs":{"source":"%s"}}' "$REF" "$SOURCE_REPO")
+
+        echo "[trigger-docs-rebuild] POST $url"
+        echo "[trigger-docs-rebuild] body: $body"
+
+        http=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' \
+          -X POST "$url" \
+          -H "Authorization: token $TOKEN" \
+          -H 'Content-Type: application/json' \
+          -H 'Accept: application/json' \
+          -d "$body")
+
+        echo "[trigger-docs-rebuild] HTTP $http"
+        cat /tmp/dispatch.out || true
+        echo
+
+        # Forgejo returns 204 on success, 422 if the workflow doesn't declare workflow_dispatch.
+        case "$http" in
+          2*) echo "[trigger-docs-rebuild] dispatched OK"; exit 0 ;;
+          *)  echo "[trigger-docs-rebuild] dispatch failed (HTTP $http)" >&2; exit 1 ;;
+        esac
