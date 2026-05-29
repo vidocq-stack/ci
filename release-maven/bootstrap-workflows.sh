@@ -134,6 +134,18 @@ on:
       next_dev_version:
         description: "Next dev version (e.g. 0.2.0-SNAPSHOT). Must end with -SNAPSHOT."
         required: true
+      dry_run:
+        description: "Dry-run: build + sign + bundle without commit/tag/push/upload."
+        type: choice
+        required: true
+        default: "false"
+        options: ["false", "true"]
+      auto_publish:
+        description: "Promote: 'manual' (default; click Publish on Sonatype Portal) or 'auto' (publish + wait for repo1.maven.org)."
+        type: choice
+        required: true
+        default: "manual"
+        options: ["manual", "auto"]
 EOF
 
   if (( ${#deps[@]} > 0 )); then
@@ -163,6 +175,9 @@ jobs:
         with:
           release-version:  \${{ inputs.release_version }}
           next-dev-version: \${{ inputs.next_dev_version }}
+          dry-run:          \${{ inputs.dry_run }}
+          # Map 'manual'/'auto' → 'false'/'true' so the action.yml input stays boolean.
+          auto-publish:     \${{ inputs.auto_publish == 'auto' && 'true' || 'false' }}
 EOF
 
   if (( ${#deps[@]} > 0 )); then

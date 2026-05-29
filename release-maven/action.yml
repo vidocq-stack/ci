@@ -52,6 +52,21 @@ inputs:
   wait-interval-seconds:
     description: 'Polling interval for Central propagation. Default 60s.'
     default: '60'
+  dry-run:
+    description: |
+      "true" → skip release:prepare/perform; instead run `mvn -P release verify`
+      to validate the build, signing, and bundle generation without committing,
+      tagging, pushing, or uploading anything to Central. Useful as a smoke test
+      before the real release.
+    default: 'false'
+  auto-publish:
+    description: |
+      "true" → after the bundle is uploaded and Sonatype validates it, publish
+      it automatically (no manual click on central.sonatype.com required), and
+      wait-for-Central polls repo1.maven.org until propagation.
+      "false" (default) → bundle stays in state VALIDATED on the Portal, waiting
+      for a human to click "Publish". wait-for-Central is skipped in that case.
+    default: 'false'
   java-version:
     description: 'Temurin JDK version'
     default: '25'
@@ -102,4 +117,6 @@ runs:
         RELEASE_PROFILE:       ${{ inputs.release-profile }}
         WAIT_TIMEOUT_SECONDS:  ${{ inputs.wait-timeout-seconds }}
         WAIT_INTERVAL_SECONDS: ${{ inputs.wait-interval-seconds }}
+        DRY_RUN:               ${{ inputs.dry-run }}
+        AUTO_PUBLISH:          ${{ inputs.auto-publish }}
       run: bash "${{ github.action_path }}/release.sh"

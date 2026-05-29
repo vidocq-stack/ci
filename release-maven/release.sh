@@ -9,6 +9,8 @@
 #   BOT_NAME, BOT_EMAIL
 #   RELEASE_PROFILE                (default: release)
 #   WAIT_TIMEOUT_SECONDS, WAIT_INTERVAL_SECONDS
+#   DRY_RUN                        "true" → no commit/tag/push/upload (smoke test)
+#   AUTO_PUBLISH                   "true" → bundle published auto on Central; "false" → manual click required
 #
 # Flow:
 #   1. pre-checks (clean tree, branch=main, env present, version format)
@@ -16,9 +18,16 @@
 #   3. import GPG key (base64 or armored)
 #   4. apply overrides (lock io.vidocq.* SNAPSHOTs in <parent> + <dependency>)
 #   5. fail-fast if any io.vidocq.* SNAPSHOT remains
-#   6. git commit "release: lock io.vidocq.* deps for X" (if anything changed)
-#   7. mvn release:prepare + release:perform (signs, deploys, autoPublish=true)
-#   8. poll repo1.maven.org for every deployable module's .pom until 200 OK
+#   6. If DRY_RUN:
+#         a. `mvn -P release verify` (compile + tests + sign + bundle, NO upload)
+#         b. show bundle contents
+#         c. STOP — never touch git, never upload
+#      Else:
+#         a. git commit "release: lock io.vidocq.* deps for X" (if anything changed)
+#         b. mvn release:prepare + release:perform — signs, uploads bundle
+#            (autoPublish=$AUTO_PUBLISH via -Dcentral.publishing.autoPublish)
+#         c. If AUTO_PUBLISH: poll repo1.maven.org until each module's .pom is visible
+#            else: print the central.sonatype.com URL to click manually
 
 set -euo pipefail
 
@@ -43,6 +52,10 @@ step_precheck() {
               CENTRAL_USERNAME CENTRAL_PASSWORD \
               GPG_PRIVATE_KEY GPG_PASSPHRASE GPG_KEY_ID
 
+  # Default the two new toggles if unset (e.g. when sourced standalone).
+  : "${DRY_RUN:=false}"
+  : "${AUTO_PUBLISH:=false}"
+
   [[ "$RELEASE_VERSION" != *-SNAPSHOT ]] \
     || die "RELEASE_VERSION must not end with -SNAPSHOT, got '$RELEASE_VERSION'"
   [[ "$NEXT_DEV_VERSION" == *-SNAPSHOT ]] \
@@ -56,7 +69,16 @@ step_precheck() {
 
   git config user.name  "${BOT_NAME:-Vidocq CI Bot}"
   git config user.email "${BOT_EMAIL:-ci@vidocq.dev}"
-  ok "pre-checks passed (branch=$branch, clean, release=$RELEASE_VERSION → $NEXT_DEV_VERSION)"
+  local mode="real release"
+  [[ "$DRY_RUN" == "true" ]] && mode="DRY-RUN (no commit/upload)"
+  ok "pre-checks passed (branch=$branch, clean, $RELEASE_VERSION → $NEXT_DEV_VERSION, $mode)"
+  if [[ "$DRY_RUN" != "true" ]]; then
+    if [[ "$AUTO_PUBLISH" == "true" ]]; then
+      info "AUTO_PUBLISH=true → bundle will be published automatically after Sonatype validation"
+    else
+      info "AUTO_PUBLISH=false → bundle will stay in VALIDATED state, waiting for manual click on Portal"
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------- 2. settings.xml
@@ -353,16 +375,17 @@ step_commit_lock() {
 
 # ---------------------------------------------------------------- 7. maven release
 
+# Real release: prepare + perform with autoPublish forwarded into the forked
+# release:perform build via -Darguments.
 step_maven_release() {
   info "Running maven-release-plugin (prepare + perform)"
-  # GPG passphrase: passed both via -Dgpg.passphrase (for the signing executions
-  # configured in vidocq-parent's release profile) AND via env GPG_PASSPHRASE
-  # (so gpg --pinentry-mode=loopback picks it up if needed).
   export GPG_TTY=$(tty || echo /dev/null)
 
-  # Arguments propagated to the forked release:perform build:
   local release_args
-  release_args="-P${RELEASE_PROFILE} -Dgpg.passphrase=${GPG_PASSPHRASE} -Dgpg.keyname=${GPG_KEY_ID}"
+  release_args="-P${RELEASE_PROFILE}"
+  release_args="${release_args} -Dgpg.passphrase=${GPG_PASSPHRASE}"
+  release_args="${release_args} -Dgpg.keyname=${GPG_KEY_ID}"
+  release_args="${release_args} -Dcentral.publishing.autoPublish=${AUTO_PUBLISH}"
 
   mvn -B -ntp \
       -DreleaseVersion="${RELEASE_VERSION}" \
@@ -370,7 +393,41 @@ step_maven_release() {
       -Darguments="${release_args}" \
       release:prepare release:perform
 
-  ok "maven-release-plugin completed"
+  ok "maven-release-plugin completed (autoPublish=${AUTO_PUBLISH})"
+}
+
+# Dry-run: run `mvn -P release verify` to exercise the full build + signing +
+# bundle generation pipeline WITHOUT committing, tagging, pushing, or uploading
+# anything. The central-publishing-maven-plugin places the bundle under
+# target/central-publishing/ — we list it to make the result visible.
+step_dryrun_verify() {
+  info "DRY-RUN: mvn -P release verify (no commit, no upload)"
+  export GPG_TTY=$(tty || echo /dev/null)
+
+  # Bump the project version transiently so the bundle is generated with the
+  # release version, then restore before exit. We use versions:set so submodules
+  # follow. We do NOT commit any of this.
+  mvn -B -ntp versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=true
+
+  set +e
+  mvn -B -ntp -P "${RELEASE_PROFILE}" verify \
+      -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+      -Dgpg.keyname="${GPG_KEY_ID}" \
+      -Dcentral.publishing.autoPublish=false
+  local rc=$?
+  set -e
+
+  # Restore POMs (whether verify succeeded or not).
+  mvn -B -ntp versions:revert >/dev/null 2>&1 || true
+
+  if [[ "$rc" != "0" ]]; then
+    die "DRY-RUN failed during mvn verify (rc=$rc) — POMs restored, nothing pushed"
+  fi
+
+  info "Bundle artifacts (target/central-publishing or target/checkout):"
+  find . -path '*/target/central-publishing*' -name '*.zip' -print 2>/dev/null | head -20 || true
+  find . -path '*/target/*.asc' -print 2>/dev/null | head -10 || true
+  ok "DRY-RUN complete — POMs restored, no git or registry side-effects"
 }
 
 # ---------------------------------------------------------------- 8. wait Central
@@ -424,6 +481,13 @@ PY
 }
 
 step_wait_central() {
+  if [[ "$AUTO_PUBLISH" != "true" ]]; then
+    info "Skipping wait-for-Central (AUTO_PUBLISH=false → bundle awaiting manual Publish on the Portal)"
+    info "  → Go to: https://central.sonatype.com/publishing/deployments"
+    info "  → Locate the deployment for io.vidocq:* version ${RELEASE_VERSION}, click Publish."
+    info "  → Then verify https://repo1.maven.org/maven2/io/vidocq/... after ~15-30 min."
+    return 0
+  fi
   info "Waiting for Maven Central propagation (timeout=${WAIT_TIMEOUT_SECONDS}s, interval=${WAIT_INTERVAL_SECONDS}s)"
   local coords pom_url deadline now
   mapfile -t coords < <(list_deployable_coords | sort -u)
@@ -469,6 +533,23 @@ main() {
   step_import_gpg
   step_apply_overrides
   step_failfast_scan
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    # Dry-run path: never touches git, never uploads. The overrides have been
+    # applied in-memory in working tree (they were going to be commit_locked
+    # anyway in a real run) — that's fine for the verify because we revert
+    # the version with versions:revert right after, but we should NOT push.
+    # Reset the override changes to leave the working tree exactly as it was.
+    if ! git diff --quiet; then
+      info "DRY-RUN: reverting in-tree override changes (they would have been committed in a real run)"
+      git checkout -- . 2>/dev/null || true
+      git clean -fd 2>/dev/null || true
+    fi
+    step_dryrun_verify
+    ok "DRY-RUN ${RELEASE_VERSION} complete (no commit, no upload, no tag)"
+    return 0
+  fi
+
   step_commit_lock
   step_maven_release
   step_wait_central
