@@ -356,11 +356,53 @@ PY
     info "Override: ${key} → ${v}"
 
     # 1) Update <parent> if our root parent matches.
+    #    Preferred path: `mvn versions:update-parent` (validates via Maven repos).
+    #    Fallback: direct XML edit of pom.xml's <parent><version> — used when
+    #    the parent version has been UPLOADED but not yet PUBLISHED on Central
+    #    (typical when chaining a release immediately after an upstream one,
+    #    before the operator clicks "Publish" or the propagation completes).
     if [[ -n "$parent_g" && "$g" == "$parent_g" ]] \
        && { [[ -z "$a" ]] || [[ "$a" == "$parent_a" ]]; }; then
       info "  • <parent> ${parent_g}:${parent_a} → ${v}"
+      local up_log=/tmp/release-update-parent.$$.log
+      set +e
       mvn -B -ntp ${MVN_NET_FLAGS} versions:update-parent \
-          -DparentVersion="$v" -DallowSnapshots=false -DgenerateBackupPoms=false
+          -DparentVersion="$v" -DallowSnapshots=false -DgenerateBackupPoms=false 2>&1 | tee "$up_log"
+      local up_rc=${PIPESTATUS[0]}
+      set -e
+      if [[ "$up_rc" != "0" ]] || grep -q 'No versions found' "$up_log"; then
+        info "    ↻ mvn could not resolve ${parent_g}:${parent_a}:${v} on the configured repos"
+        info "    ↻ falling back to a direct XML edit of pom.xml's <parent><version>"
+        python3 - "$parent_g" "$parent_a" "$v" <<'PY'
+import sys, re, xml.etree.ElementTree as ET
+g, a, v = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open('pom.xml', encoding='utf-8').read()
+m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+if not m:
+    raise SystemExit("pom.xml has no xmlns")
+ns = m.group(1)
+ET.register_namespace('', ns)
+tree = ET.parse('pom.xml')
+root = tree.getroot()
+p = root.find(f'{{{ns}}}parent')
+if p is None:
+    print(f"      (root pom has no <parent>; nothing to do)")
+    raise SystemExit(0)
+pg = (p.findtext(f'{{{ns}}}groupId') or '').strip()
+pa = (p.findtext(f'{{{ns}}}artifactId') or '').strip()
+if pg != g or pa != a:
+    print(f"      (root <parent> is {pg}:{pa}, not {g}:{a}; nothing to do)")
+    raise SystemExit(0)
+ve = p.find(f'{{{ns}}}version')
+if ve is None:
+    raise SystemExit(0)
+old = (ve.text or '').strip()
+ve.text = v
+tree.write('pom.xml', encoding='utf-8', xml_declaration=True)
+print(f"      patched <parent><version>: {old} → {v}")
+PY
+      fi
+      rm -f "$up_log"
     fi
 
     # 2) Properties referenced by <dependency groupId=$g> blocks.
