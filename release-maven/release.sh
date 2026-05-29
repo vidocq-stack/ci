@@ -561,8 +561,16 @@ step_dryrun_verify() {
   # follow. We do NOT commit any of this.
   mvn -B -ntp ${MVN_NET_FLAGS} versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=true
 
+  # `clean verify` (not just `verify`): mvn-plugin descriptors and other
+  # generated metadata embedded into JARs read from target/ left over from
+  # earlier compiles, which still reference the pre-set version
+  # (vauban-maven-plugin failed the first dry-run with
+  #  "Plugin's descriptor contains the wrong version: 0.1.0-SNAPSHOT"
+  #  for /…/vauban-maven-plugin-0.1.0.jar). A clean before verify is the
+  # standard fix and matches what maven-release-plugin's preparationGoals
+  # already does for the real release path.
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} -P "${RELEASE_PROFILE}" verify \
+  mvn -B -ntp ${MVN_NET_FLAGS} -P "${RELEASE_PROFILE}" clean verify \
       -Dgpg.passphrase="${GPG_PASSPHRASE}" \
       -Dgpg.keyname="${GPG_KEY_ID}" \
       -Dcentral.publishing.autoPublish=false
