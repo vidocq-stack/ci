@@ -159,12 +159,7 @@ jobs:
           fetch-depth: 0
           token: \${{ secrets.VIDOCQ_BOT_TOKEN }}
 
-      # NOTE: we use the GitHub mirror (vidocq-stack/ci) instead of
-      # codeberg.org/Vidocq/ci because Codeberg rate-limits burst clones
-      # of the same repo (504 Gateway Timeout) and the Forgejo runner does
-      # not cache action repos. GitHub is the push-mirror of Codeberg
-      # (sync_on_commit + 8h fallback) and serves the same content + tag.
-      - uses: https://github.com/vidocq-stack/ci/release-maven@v1
+      - uses: https://codeberg.org/Vidocq/ci/release-maven@v1
         with:
           release-version:  \${{ inputs.release_version }}
           next-dev-version: \${{ inputs.next_dev_version }}
