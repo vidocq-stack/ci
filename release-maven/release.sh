@@ -541,7 +541,110 @@ PY
   ok "no residual io.vidocq.* SNAPSHOTs"
 }
 
-# ---------------------------------------------------------------- 6. commit lock
+# ---------------------------------------------------------------- 6. inject reactor parent <version>
+
+# Maven Model 4.1.0 lets a child <parent> omit <version>: it is inherited from
+# the parent module sitting in the same reactor. Tools that predate Model 4.1
+# (maven-release-plugin 3.1.1 in particular) still assume the element exists
+# and crash with `NullPointerException: Cannot invoke "CharSequence.length()"
+# because "this.text" is null` during `rewrite-poms-for-release` — they try to
+# overwrite the text of a <version> node that was never written.
+#
+# Inject a literal <version> in every <parent> that omits it AND whose
+# groupId:artifactId matches a POM in the current reactor. The injected value
+# is the version of that reactor POM (already in sync because mvn -B has been
+# happily resolving it implicitly until now). After release:prepare flips
+# versions to <RELEASE_VERSION>, these injected nodes get updated normally;
+# release:perform's tag then carries the explicit version, and the next-dev
+# commit increments them like any other child <parent>.
+step_inject_parent_versions() {
+  info "Injecting explicit <version> into reactor <parent> blocks (Model 4.1 compat)"
+  python3 <<'PY'
+import re, sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+
+poms = [p for p in Path('.').rglob('pom.xml')
+        if not any(part in ('target', 'node_modules')
+                   or (part != '.' and part.startswith('.'))
+                   for part in p.parts)]
+
+# Map artifactId -> (groupId, version) for every reactor POM. Resolve missing
+# fields by walking up: if a POM omits <groupId>/<version>, inherit from its
+# <parent>. (Maven 4.1 commonly omits both on submodules.)
+reactor = {}
+parsed = []
+for pom in poms:
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: continue
+    ns = m.group(1)
+    try:
+        tree = ET.parse(pom)
+    except ET.ParseError:
+        continue
+    parsed.append((pom, tree, ns))
+
+# Two-pass resolution so children whose parent sits later in the iteration
+# still get their version. Loop until stable.
+def coords(root, ns):
+    g = (root.findtext(f'{{{ns}}}groupId') or '').strip()
+    a = (root.findtext(f'{{{ns}}}artifactId') or '').strip()
+    v = (root.findtext(f'{{{ns}}}version') or '').strip()
+    p = root.find(f'{{{ns}}}parent')
+    if p is not None:
+        if not g: g = (p.findtext(f'{{{ns}}}groupId') or '').strip()
+        if not v: v = (p.findtext(f'{{{ns}}}version') or '').strip()
+    return g, a, v
+
+# Pass 1: collect directly-known coords.
+for pom, tree, ns in parsed:
+    g, a, v = coords(tree.getroot(), ns)
+    if a:
+        reactor[a] = (g, v)
+
+# Pass 2: inject <version> wherever a child <parent> targets a reactor POM
+# and has no <version> of its own.
+changed = 0
+for pom, tree, ns in parsed:
+    root = tree.getroot()
+    parent = root.find(f'{{{ns}}}parent')
+    if parent is None: continue
+    pg = (parent.findtext(f'{{{ns}}}groupId') or '').strip()
+    pa = (parent.findtext(f'{{{ns}}}artifactId') or '').strip()
+    pv_el = parent.find(f'{{{ns}}}version')
+    if pv_el is not None and (pv_el.text or '').strip():
+        continue                  # already explicit
+    if pa not in reactor:
+        continue                  # external parent (e.g. io.vidocq:vidocq-parent root) — leave alone
+    rg, rv = reactor[pa]
+    if pg and rg and pg != rg:
+        continue                  # groupId mismatch — not the reactor parent
+    if not rv:
+        continue                  # can't determine version
+    # Insert <version> right after <artifactId> for readability.
+    ET.register_namespace('', ns)
+    if pv_el is None:
+        ve = ET.SubElement(parent, f'{{{ns}}}version')
+        ve.text = rv
+        aid_el = parent.find(f'{{{ns}}}artifactId')
+        parent.remove(ve)
+        idx = list(parent).index(aid_el) + 1 if aid_el is not None else 0
+        parent.insert(idx, ve)
+    else:
+        pv_el.text = rv
+    tree.write(pom, encoding='utf-8', xml_declaration=True)
+    print(f"  • {pom}: injected <version>{rv}</version>")
+    changed += 1
+
+print(f"  ({changed} POM(s) patched)")
+PY
+  ok "reactor parent <version> injection done"
+}
+
+# ---------------------------------------------------------------- 7. commit lock
 
 step_commit_lock() {
   info "Committing lock (if any change)"
@@ -726,6 +829,7 @@ main() {
   step_reroute_ssh
   step_apply_overrides
   step_failfast_scan
+  step_inject_parent_versions
 
   if [[ "$DRY_RUN" == "true" ]]; then
     # Dry-run path: never touches git, never uploads. The overrides have been
