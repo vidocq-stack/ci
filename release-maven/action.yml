@@ -1,0 +1,78 @@
+name: 'Release to Maven Central'
+description: |
+  Orchestrate a full Maven Central release: lock io.vidocq.* SNAPSHOTs via overrides,
+  fail-fast if any remain, run maven-release-plugin (prepare + perform), and block until
+  every deployable artifact is visible on repo1.maven.org.
+
+  Caller must have already checked out the repo with fetch-depth: 0 and a token capable
+  of pushing tags + commits (typically secrets.VIDOCQ_BOT_TOKEN).
+
+inputs:
+  release-version:
+    description: 'Release version (e.g. 1.0.0, 0.1.0). Without -SNAPSHOT.'
+    required: true
+  next-dev-version:
+    description: 'Next development version (e.g. 0.2.0-SNAPSHOT). Must end with -SNAPSHOT.'
+    required: true
+  overrides:
+    description: |
+      Multiline list of "groupId:artifactId=version" entries to apply BEFORE release.
+      One per line. Used to lock io.vidocq.* SNAPSHOT deps (incl. <parent>) to their
+      release versions. Leave empty for projects with no inter-project SNAPSHOT deps
+      (e.g. vidocq-parent itself).
+    required: false
+    default: ''
+  central-username:
+    description: 'Sonatype Central Portal username (secrets.CENTRAL_USERNAME)'
+    required: true
+  central-password:
+    description: 'Sonatype Central Portal password/token (secrets.CENTRAL_PASSWORD)'
+    required: true
+  gpg-private-key:
+    description: 'GPG private key, ASCII-armored or base64-encoded (secrets.GPG_PRIVATE_KEY)'
+    required: true
+  gpg-passphrase:
+    description: 'GPG key passphrase (secrets.GPG_PASSPHRASE)'
+    required: true
+  gpg-key-id:
+    description: 'GPG key id (long format, secrets.GPG_KEY_ID). Used as --default-key.'
+    required: true
+  bot-name:
+    description: 'Git author name for the lock + bump commits'
+    default: 'Vidocq CI Bot'
+  bot-email:
+    description: 'Git author email for the lock + bump commits'
+    default: 'ci@vidocq.dev'
+  release-profile:
+    description: 'Maven profile activated during release:perform (must publish via central-publishing)'
+    default: 'release'
+  wait-timeout-seconds:
+    description: 'Max seconds to wait for Central propagation (per artifact). Default 3600 (60 min).'
+    default: '3600'
+  wait-interval-seconds:
+    description: 'Polling interval for Central propagation. Default 60s.'
+    default: '60'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Java + Maven
+      uses: https://codeberg.org/Vidocq/ci/setup-maven@v1
+
+    - name: Run release pipeline
+      shell: bash
+      env:
+        RELEASE_VERSION:       ${{ inputs.release-version }}
+        NEXT_DEV_VERSION:      ${{ inputs.next-dev-version }}
+        OVERRIDES:             ${{ inputs.overrides }}
+        CENTRAL_USERNAME:      ${{ inputs.central-username }}
+        CENTRAL_PASSWORD:      ${{ inputs.central-password }}
+        GPG_PRIVATE_KEY:       ${{ inputs.gpg-private-key }}
+        GPG_PASSPHRASE:        ${{ inputs.gpg-passphrase }}
+        GPG_KEY_ID:            ${{ inputs.gpg-key-id }}
+        BOT_NAME:              ${{ inputs.bot-name }}
+        BOT_EMAIL:             ${{ inputs.bot-email }}
+        RELEASE_PROFILE:       ${{ inputs.release-profile }}
+        WAIT_TIMEOUT_SECONDS:  ${{ inputs.wait-timeout-seconds }}
+        WAIT_INTERVAL_SECONDS: ${{ inputs.wait-interval-seconds }}
+      run: bash "${{ github.action_path }}/release.sh"
