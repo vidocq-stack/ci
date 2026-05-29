@@ -130,9 +130,11 @@ on:
     inputs:
       release_version:
         description: "Release version (e.g. 0.1.0). Without -SNAPSHOT."
+        type: string
         required: true
       next_dev_version:
         description: "Next dev version (e.g. 0.2.0-SNAPSHOT). Must end with -SNAPSHOT."
+        type: string
         required: true
       dry_run:
         description: "Dry-run: build + sign + bundle without commit/tag/push/upload."
@@ -155,6 +157,7 @@ EOF
       cat <<EOF
       ${key}:
         description: "${g} stable version (must be on Central)"
+        type: string
         required: true
 EOF
     done
