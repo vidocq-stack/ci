@@ -360,7 +360,12 @@ PY
     #    Fallback: direct XML edit of pom.xml's <parent><version> — used when
     #    the parent version has been UPLOADED but not yet PUBLISHED on Central
     #    (typical when chaining a release immediately after an upstream one,
-    #    before the operator clicks "Publish" or the propagation completes).
+    #    before the operator clicks "Publish" or the propagation completes),
+    #    OR — more subtly — when mvn finishes BUILD SUCCESS without writing
+    #    anything because the requested version is unknown to every configured
+    #    repo and `allowSnapshots=false` made it discard the local SNAPSHOT
+    #    candidate. The plugin treats "no resolvable upgrade" as a no-op, not
+    #    an error, so we have to detect it by re-reading the file.
     if [[ -n "$parent_g" && "$g" == "$parent_g" ]] \
        && { [[ -z "$a" ]] || [[ "$a" == "$parent_a" ]]; }; then
       info "  • <parent> ${parent_g}:${parent_a} → ${v}"
@@ -370,8 +375,35 @@ PY
           -DparentVersion="$v" -DallowSnapshots=false -DgenerateBackupPoms=false 2>&1 | tee "$up_log"
       local up_rc=${PIPESTATUS[0]}
       set -e
-      if [[ "$up_rc" != "0" ]] || grep -q 'No versions found' "$up_log"; then
-        info "    ↻ mvn could not resolve ${parent_g}:${parent_a}:${v} on the configured repos"
+      # Re-read what pom.xml's <parent><version> looks like now. If mvn was a
+      # silent no-op the value is still the original SNAPSHOT and we have to
+      # patch it ourselves.
+      local current_v
+      current_v=$(python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+try:
+    text = open('pom.xml', encoding='utf-8').read()
+except FileNotFoundError:
+    print(""); raise SystemExit(0)
+m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+if not m: print(""); raise SystemExit(0)
+ns = m.group(1)
+try: root = ET.fromstring(text)
+except ET.ParseError: print(""); raise SystemExit(0)
+p = root.find(f'{{{ns}}}parent')
+print((p.findtext(f'{{{ns}}}version') or '').strip() if p is not None else "")
+PY
+)
+      if [[ "$up_rc" != "0" ]] \
+         || grep -q 'No versions found' "$up_log" \
+         || [[ "$current_v" != "$v" ]]; then
+        if [[ "$current_v" != "$v" && "$up_rc" == "0" ]] \
+           && ! grep -q 'No versions found' "$up_log"; then
+          info "    ↻ mvn finished BUILD SUCCESS but left pom.xml unchanged"
+          info "    ↻ (parent version still ${current_v:-<empty>}, expected ${v})"
+        else
+          info "    ↻ mvn could not resolve ${parent_g}:${parent_a}:${v} on the configured repos"
+        fi
         info "    ↻ falling back to a direct XML edit of pom.xml's <parent><version>"
         python3 - "$parent_g" "$parent_a" "$v" <<'PY'
 import sys, re, xml.etree.ElementTree as ET
