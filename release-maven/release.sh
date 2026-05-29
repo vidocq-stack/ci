@@ -595,10 +595,33 @@ step_release_manual() {
   git commit -m "release: ${RELEASE_VERSION}"
   git tag -a "v${RELEASE_VERSION}" -m "Release ${RELEASE_VERSION}"
 
-  # 3. Sign + deploy through the `release` profile (gpg + central-publishing).
-  info "  → mvn -P${RELEASE_PROFILE} clean deploy (autoPublish=${AUTO_PUBLISH})"
+  # 3. Two-pass build.
+  #    Pass 1: `clean install` WITHOUT the release profile. Vanilla reactor
+  #    order (topological) → every consumer sees its producer's artifact in
+  #    ~/.m2 before it builds. Tests run here.
+  #    Pass 2: `deploy -P release -Dmaven.install.skip=true`. Activates
+  #    central-publishing-maven-plugin to sign + bundle + upload. v0.10.0
+  #    reorders the reactor (so the root pom collects everything for the
+  #    aggregated bundle); since every <dependency> already resolves from
+  #    the populated ~/.m2, the reorder no longer breaks inter-module
+  #    resolution. Tests are skipped — already covered in pass 1.
+  info "  → pass 1/2: mvn clean install (populate ~/.m2 in topological order)"
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" clean deploy \
+  mvn -B -ntp ${MVN_NET_FLAGS} clean install
+  local install_rc=$?
+  set -e
+  if [[ "$install_rc" != "0" ]]; then
+    info "  ↻ install failed — rolling back local commit + tag (nothing was pushed)"
+    git tag -d "v${RELEASE_VERSION}" >/dev/null 2>&1 || true
+    git reset --hard "${pre_release_sha}" >/dev/null
+    die "install failed (rc=${install_rc}) — local commit/tag undone, tree restored to ${pre_release_sha}"
+  fi
+
+  info "  → pass 2/2: mvn -P${RELEASE_PROFILE} deploy (sign + central-publishing, autoPublish=${AUTO_PUBLISH})"
+  set +e
+  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" deploy \
+      -DskipTests \
+      -Dmaven.install.skip=true \
       -Dgpg.passphrase="${GPG_PASSPHRASE}" \
       -Dgpg.keyname="${GPG_KEY_ID}" \
       -Dcentral.publishing.autoPublish="${AUTO_PUBLISH}"
