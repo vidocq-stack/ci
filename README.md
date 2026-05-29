@@ -5,7 +5,7 @@ sub-projects. **This repo is not a Maven project**: it is never built, tested or
 It only provides reusable actions consumed via `uses: https://codeberg.org/Vidocq/ci/<action>@<ref>`.
 
 > ⚠️ On Codeberg/Forgejo, reference these actions by **absolute URL**
-> (`https://codeberg.org/Vidocq/ci/<action>@v1`). A relative `Vidocq/ci/...@v1` is resolved
+> (`https://codeberg.org/Vidocq/ci/<action>@main`). A relative `Vidocq/ci/...@main` is resolved
 > against the default actions registry (code.forgejo.org), not codeberg.org → 404.
 
 > Repo is **public** on purpose: it holds no secrets, and a public repo means runners do not
@@ -27,20 +27,20 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 
 ```yaml
 # Maven 3.9 for a TCK that requires it:
-- uses: https://codeberg.org/Vidocq/ci/setup-maven@v1
+- uses: https://codeberg.org/Vidocq/ci/setup-maven@main
   with: { maven-version: 3.9.9 }
-- uses: https://codeberg.org/Vidocq/ci/run-tck@v1
+- uses: https://codeberg.org/Vidocq/ci/run-tck@main
   with: { module: my-tck-module }
 
 # Out-of-reactor TCK via a script:
-- uses: https://codeberg.org/Vidocq/ci/run-tck@v1
+- uses: https://codeberg.org/Vidocq/ci/run-tck@main
   with: { command: "./run-official-tck-restful-4.0.sh all", pre-install: "false" }
 
 # PR validation (single job): build the producer locally at a release-style PR
 # version, then rebuild every impacted downstream consumer against it:
-- uses: https://codeberg.org/Vidocq/ci/setup-maven@v1
+- uses: https://codeberg.org/Vidocq/ci/setup-maven@main
 - run: mvn -B -ntp install            # producer at <base>-PR<n>.<sha8>, into ~/.m2
-- uses: https://codeberg.org/Vidocq/ci/build-impacted@v1
+- uses: https://codeberg.org/Vidocq/ci/build-impacted@main
   with:
     producer-slug: ${{ github.repository }}
     producer-version: 0.1.0-PR42.abc1234
@@ -49,7 +49,7 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 
 # Trigger vidocq-docs rebuild from a dedicated workflow filtered on docs/**:
 # (see notify-docs.yml below — wired into every sub-project)
-- uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@v1
+- uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@main
   with:
     bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
     source-repo: ${{ github.repository }}
@@ -73,7 +73,7 @@ jobs:
   notify-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@v1
+      - uses: https://codeberg.org/Vidocq/ci/trigger-docs-rebuild@main
         with:
           bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
           source-repo: ${{ github.repository }}
@@ -87,7 +87,14 @@ managed at the Codeberg **organisation** level.
 
 ## Versioning
 
-- Reference a **mobile tag `@v1`** (re-pointed on each backward-compatible change).
-- Pin `@vX.Y.Z` for a repo that wants to freeze.
-- Breaking change → `v2`, migrate repo by repo.
-- `@main` is reserved for validation phases (pilot).
+- Consumers reference these actions via **`@main`** — the head of the only branch.
+- No mobile `@v1` / `@v2` tags. The retag dance was the source of repeated
+  desync incidents (silent `git push +refs/tags/v1` failures, a parasite
+  `v1` branch shadowing the tag) without ever buying a real freeze: every
+  commit on `main` to date has been a bug fix, not a breaking change.
+- A consumer that needs to **freeze** at a specific revision pins the SHA
+  directly: `uses: https://codeberg.org/Vidocq/ci/<action>@<sha>`.
+- If a genuinely incompatible change ever lands, we'll create a one-off
+  immutable `vX.Y.Z` semver tag **before** the breaking commit, migrate
+  consumers explicitly, and delete the tag once everyone is on the new
+  shape. No mobile aliases.

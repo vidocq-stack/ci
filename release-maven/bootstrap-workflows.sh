@@ -182,7 +182,7 @@ jobs:
           fetch-depth: 0
           token: \${{ secrets.VIDOCQ_BOT_TOKEN }}
 
-      - uses: https://codeberg.org/Vidocq/ci/release-maven@v1
+      - uses: https://codeberg.org/Vidocq/ci/release-maven@main
         with:
           release-version:  \${{ inputs.release_version }}
           next-dev-version: \${{ inputs.next_dev_version }}
@@ -214,7 +214,7 @@ EOF
 
       - name: Notify Slack — release success
         if: success()
-        uses: https://codeberg.org/Vidocq/ci/notify-slack@v1
+        uses: https://codeberg.org/Vidocq/ci/notify-slack@main
         with:
           webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
           status:           release-success
@@ -227,7 +227,7 @@ EOF
 
       - name: Notify Slack — release failure
         if: failure()
-        uses: https://codeberg.org/Vidocq/ci/notify-slack@v1
+        uses: https://codeberg.org/Vidocq/ci/notify-slack@main
         with:
           webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
           status:           release-failure
