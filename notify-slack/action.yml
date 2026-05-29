@@ -6,7 +6,7 @@ inputs:
     description: 'Slack incoming webhook URL (SLACK_WEBHOOK_URL)'
     required: true
   status:
-    description: 'success | failure | pr-open | pr-merged | pr-validated'
+    description: 'success | failure | pr-open | pr-merged | pr-validated | release-success | release-failure'
     required: true
   repo:
     description: 'Repository slug (github.repository)'
@@ -47,6 +47,15 @@ inputs:
   base-ref:
     description: '(pr-merged, optional) base branch of the PR'
     default: ''
+  release-version:
+    description: '(release-*, required for release statuses) released version, e.g. 1.0.0'
+    default: ''
+  next-dev-version:
+    description: '(release-success, optional) next development version, e.g. 1.1.0-SNAPSHOT'
+    default: ''
+  release-tag-url:
+    description: '(release-*, optional) URL to the git tag page'
+    default: ''
 
 runs:
   using: composite
@@ -69,11 +78,14 @@ runs:
         PR_URL: ${{ inputs.pr-url }}
         PR_MERGED_BY: ${{ inputs.merged-by }}
         BASE_REF: ${{ inputs.base-ref }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        NEXT_DEV_VERSION: ${{ inputs.next-dev-version }}
+        RELEASE_TAG_URL: ${{ inputs.release-tag-url }}
       run: |
         set -euo pipefail
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-          if [ "$STATUS" = "success" ]; then
-            echo "ℹ️ SLACK_WEBHOOK_URL missing — success notification skipped"
+          if [ "$STATUS" = "success" ] || [ "$STATUS" = "release-success" ]; then
+            echo "ℹ️ SLACK_WEBHOOK_URL missing — '$STATUS' notification skipped"
             exit 0
           fi
           echo "❌ SLACK_WEBHOOK_URL missing — cannot send '$STATUS' notification" >&2
@@ -101,6 +113,20 @@ runs:
           case 'pr-validated':
             text = `[ViBot]: ✅ *PR validated* — \`${repo}\`#${prNum} by *${prAuthor}*\n> ${prTitle}\n<${prUrl}|View PR>`;
             break;
+          case 'release-success': {
+            const rv = process.env.RELEASE_VERSION;
+            const nd = process.env.NEXT_DEV_VERSION;
+            const tagUrl = process.env.RELEASE_TAG_URL;
+            const nextLine = nd ? ` · next dev \`${nd}\`` : '';
+            const tagLine  = tagUrl ? ` · <${tagUrl}|tag v${rv}>` : '';
+            text = `[ViBot]: 🚀 *Released* \`${repo}\` *${rv}*${nextLine}${tagLine}\n<${runUrl}|View run>`;
+            break;
+          }
+          case 'release-failure': {
+            const rv = process.env.RELEASE_VERSION || '(unknown)';
+            text = `[ViBot]: 💥 *Release failed* — \`${repo}\` ${rv}\n<${runUrl}|View run>`;
+            break;
+          }
           default: { // success
             const v = process.env.VERSION ? ` (v${process.env.VERSION})` : '';
             const subject = (process.env.COMMIT_MSG || '').split('\n')[0];

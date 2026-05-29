@@ -203,6 +203,30 @@ EOF
           gpg-passphrase:   \${{ secrets.GPG_PASSPHRASE }}
           gpg-key-id:       \${{ secrets.GPG_KEY_ID }}
           bot-token:        \${{ secrets.VIDOCQ_BOT_TOKEN }}
+
+      - name: Notify Slack — release success
+        if: success()
+        uses: https://codeberg.org/Vidocq/ci/notify-slack@v1
+        with:
+          webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
+          status:           release-success
+          repo:             \${{ github.repository }}
+          ref:              \${{ github.ref_name }}
+          run-url:          \${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_number }}
+          release-version:  \${{ inputs.release_version }}
+          next-dev-version: \${{ inputs.next_dev_version }}
+          release-tag-url:  \${{ github.server_url }}/\${{ github.repository }}/src/tag/v\${{ inputs.release_version }}
+
+      - name: Notify Slack — release failure
+        if: failure()
+        uses: https://codeberg.org/Vidocq/ci/notify-slack@v1
+        with:
+          webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
+          status:           release-failure
+          repo:             \${{ github.repository }}
+          ref:              \${{ github.ref_name }}
+          run-url:          \${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_number }}
+          release-version:  \${{ inputs.release_version }}
 EOF
 }
 
