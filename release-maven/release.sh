@@ -65,7 +65,15 @@ step_precheck() {
   branch=$(git symbolic-ref --short HEAD)
   [[ "$branch" == "main" ]] || die "branch is '$branch'; release must run on main"
   dirty=$(git status --porcelain | wc -l | tr -d ' ')
-  [[ "$dirty" == "0" ]] || die "working tree is dirty ($dirty files); cannot release"
+  if [[ "$dirty" != "0" ]]; then
+    echo "❌ working tree is dirty ($dirty files):" >&2
+    git status --porcelain >&2
+    echo "" >&2
+    echo "Hint: these files were modified or created between actions/checkout and this step." >&2
+    echo "      Typically setup-java/setup-maven caches or .ci-action/ leak in. Add them" >&2
+    echo "      to .gitignore in the repo and retry." >&2
+    exit 1
+  fi
 
   git config user.name  "${BOT_NAME:-Vidocq CI Bot}"
   git config user.email "${BOT_EMAIL:-ci@vidocq.dev}"
