@@ -56,6 +56,9 @@ inputs:
   release-tag-url:
     description: '(release-*, optional) URL to the git tag page'
     default: ''
+  dry-run:
+    description: 'When truthy (true/1/yes), the notification is rendered with a big "🧪 DRY RUN 🧪" header (Slack Block Kit) and a contextual banner so the channel sees at a glance that no real publication / no real merge happened.'
+    default: 'false'
 
 runs:
   using: composite
@@ -81,6 +84,7 @@ runs:
         RELEASE_VERSION: ${{ inputs.release-version }}
         NEXT_DEV_VERSION: ${{ inputs.next-dev-version }}
         RELEASE_TAG_URL: ${{ inputs.release-tag-url }}
+        DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
@@ -137,7 +141,23 @@ runs:
             text = `[ViBot]: ✅ *CI build passed* — \`${repo}\`@${ref}${v}${line}\n<${runUrl}|View run>`;
           }
         }
-        process.stdout.write(JSON.stringify({ text }));
+        // When dry-run is truthy, wrap the message in Block Kit so a big
+        // "🧪 DRY RUN 🧪" header sits on top — `*bold*` alone doesn't grow
+        // the font; only Block Kit `header` blocks do.
+        const dry = /^(1|true|yes|on)$/i.test(process.env.DRY_RUN || '');
+        if (dry) {
+          process.stdout.write(JSON.stringify({
+            text: `[ViBot]: 🧪 DRY RUN — ${text.replace(/^\[ViBot\]:\s*/, '')}`,
+            blocks: [
+              { type: 'header', text: { type: 'plain_text', text: '🧪 DRY RUN 🧪', emoji: true } },
+              { type: 'context', elements: [ { type: 'mrkdwn', text: ':warning: *No real publication / no real merge.* This is a simulated CI run.' } ] },
+              { type: 'divider' },
+              { type: 'section', text: { type: 'mrkdwn', text } }
+            ]
+          }));
+        } else {
+          process.stdout.write(JSON.stringify({ text }));
+        }
         JS
         )
         curl -fsS -X POST "$SLACK_WEBHOOK_URL" \
