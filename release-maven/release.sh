@@ -37,6 +37,12 @@ die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 info() { printf '▸  %s\n' "$*"; }
 ok()   { printf '✅ %s\n' "$*"; }
 
+# Maven Resolver default connectTimeout is 10s and requestTimeout 30 min. On
+# the Forgejo runner (Foix), 10s is too short for the first cold downloads —
+# we see `HTTP connect timed out` on Maven Central even though the deps exist.
+# Bump both connect and request via Aether system properties on every mvn call.
+MVN_NET_FLAGS="-Daether.connector.connectTimeout=60000 -Daether.connector.requestTimeout=300000"
+
 require_env() {
   local v
   for v in "$@"; do
@@ -405,8 +411,10 @@ step_maven_release() {
   release_args="${release_args} -Dgpg.passphrase=${GPG_PASSPHRASE}"
   release_args="${release_args} -Dgpg.keyname=${GPG_KEY_ID}"
   release_args="${release_args} -Dcentral.publishing.autoPublish=${AUTO_PUBLISH}"
+  # Net flags forwarded into the release:perform forked build too:
+  release_args="${release_args} ${MVN_NET_FLAGS}"
 
-  mvn -B -ntp \
+  mvn -B -ntp ${MVN_NET_FLAGS} \
       -DreleaseVersion="${RELEASE_VERSION}" \
       -DdevelopmentVersion="${NEXT_DEV_VERSION}" \
       -Darguments="${release_args}" \
@@ -426,10 +434,10 @@ step_dryrun_verify() {
   # Bump the project version transiently so the bundle is generated with the
   # release version, then restore before exit. We use versions:set so submodules
   # follow. We do NOT commit any of this.
-  mvn -B -ntp versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=true
+  mvn -B -ntp ${MVN_NET_FLAGS} versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=true
 
   set +e
-  mvn -B -ntp -P "${RELEASE_PROFILE}" verify \
+  mvn -B -ntp ${MVN_NET_FLAGS} -P "${RELEASE_PROFILE}" verify \
       -Dgpg.passphrase="${GPG_PASSPHRASE}" \
       -Dgpg.keyname="${GPG_KEY_ID}" \
       -Dcentral.publishing.autoPublish=false
@@ -437,7 +445,7 @@ step_dryrun_verify() {
   set -e
 
   # Restore POMs (whether verify succeeded or not).
-  mvn -B -ntp versions:revert >/dev/null 2>&1 || true
+  mvn -B -ntp ${MVN_NET_FLAGS} versions:revert >/dev/null 2>&1 || true
 
   if [[ "$rc" != "0" ]]; then
     die "DRY-RUN failed during mvn verify (rc=$rc) — POMs restored, nothing pushed"
