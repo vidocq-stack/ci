@@ -110,9 +110,12 @@ for d in ordered: print(d)
 PY
 }
 
-# Run `mvn -N clean install` in every reactor module, in <modules> declaration
-# order. Each invocation handles a single POM (no recursion), so ~/.m2 fills
-# linearly and consumers always find their producers' artifacts.
+# Run `mvn -N -P release clean install` in every reactor module, in <modules>
+# declaration order. Each invocation handles a single POM (no recursion), so
+# ~/.m2 fills linearly and consumers always find their producers' artifacts.
+# The release profile is activated to pre-warm the cache (javadoc, source, gpg
+# plugins) and attach sources/javadocs at install time — the deploy step (pass
+# 2) then has nothing left to download.
 _install_modules_in_declaration_order() {
   local modules_in_order rc=0 module_dir rel
   modules_in_order=$(_walk_modules_in_declaration_order)
@@ -122,7 +125,10 @@ _install_modules_in_declaration_order() {
     [[ "$rel" == "." || -z "$rel" ]] && rel="<root>"
     info "    • install ${rel}"
     set +e
-    ( cd "$module_dir" && mvn -B -ntp ${MVN_NET_FLAGS} -N clean install )
+    ( cd "$module_dir" && mvn -B -ntp ${MVN_NET_FLAGS} -N -P"${RELEASE_PROFILE}" clean install \
+        -DskipTests \
+        -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+        -Dgpg.keyname="${GPG_KEY_ID}" )
     rc=$?
     set -e
     [[ "$rc" != "0" ]] && return "$rc"
@@ -674,16 +680,26 @@ step_set_version_and_commit() {
 
 # ---------------------------------------------------------------- 8. validate_build
 
-# Build the full reactor to validate the release-locked POMs. Try the standard
-# reactor first; if Maven 4 RC-5 mis-orders the DAG (consumers scheduled before
-# producers — visible as `Could not find artifact io.vidocq.*`), fall back to a
-# module-by-module install in <modules> declaration order.
+# Build the full reactor to validate the release-locked POMs and pre-warm
+# ~/.m2 for the deploy step. The release profile is activated here so every
+# release-time plugin (javadoc, source, gpg) is resolved and run during
+# install — without it, those plugins would be pulled at deploy time, when
+# any transient network glitch on the Forgejo runner (Foix has shown timeouts
+# fetching central transitives) aborts the upload after we already committed
+# and pushed the release branch.
+#
+# Try the standard reactor first; if Maven 4 RC-5 mis-orders the DAG (consumers
+# scheduled before producers — visible as `Could not find artifact io.vidocq.*`),
+# fall back to a module-by-module install in <modules> declaration order.
 step_validate_build() {
-  info "Validating build (reactor first)"
+  info "Validating build with -P${RELEASE_PROFILE} (reactor first, pre-warms ~/.m2 for deploy)"
   local log
   log=$(mktemp)
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} clean install -DskipTests 2>&1 | tee "$log"
+  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" clean install \
+      -DskipTests \
+      -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+      -Dgpg.keyname="${GPG_KEY_ID}" 2>&1 | tee "$log"
   local rc=${PIPESTATUS[0]}
   set -e
 
