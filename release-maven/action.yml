@@ -52,12 +52,39 @@ inputs:
   wait-interval-seconds:
     description: 'Polling interval for Central propagation. Default 60s.'
     default: '60'
+  java-version:
+    description: 'Temurin JDK version'
+    default: '25'
+  maven-version:
+    description: 'Maven version (used in https://dlcdn.apache.org/maven/maven-${major}/${version}/binaries/)'
+    default: '4.0.0-rc-5'
 
 runs:
   using: composite
   steps:
-    - name: Set up Java + Maven
-      uses: https://codeberg.org/Vidocq/ci/setup-maven@v1
+    # Setup Java + Maven inline rather than `uses: ci/setup-maven@v1` so the
+    # runner makes ONE clone of Vidocq/ci instead of two — under Codeberg
+    # rate-limiting (504 on burst clones after a force-tag) this is the
+    # difference between green and red.
+    - name: Set up Java ${{ inputs.java-version }} (temurin)
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+        cache: maven
+
+    - name: Install Maven ${{ inputs.maven-version }}
+      shell: bash
+      env:
+        MAVEN_VERSION: ${{ inputs.maven-version }}
+      run: |
+        set -euo pipefail
+        major="${MAVEN_VERSION%%.*}"
+        url="https://dlcdn.apache.org/maven/maven-${major}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+        echo "Downloading Maven ${MAVEN_VERSION} from ${url}"
+        wget -q "$url"
+        tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
+        echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
     - name: Run release pipeline
       shell: bash
