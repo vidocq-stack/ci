@@ -605,10 +605,62 @@ step_release_manual() {
   #    aggregated bundle); since every <dependency> already resolves from
   #    the populated ~/.m2, the reorder no longer breaks inter-module
   #    resolution. Tests are skipped — already covered in pass 1.
-  info "  → pass 1/2: mvn clean install (populate ~/.m2 in topological order)"
+  info "  → pass 1/2: install each module in <modules> declaration order"
+  # Maven 4 RC-5 + Model 4.1 mis-sorts the reactor DAG (consumers scheduled
+  # before producers), breaking inter-module compile resolution. Walk every
+  # parent's <modules> tree depth-first — that order is already topological
+  # by Vidocq convention (the maintainer lists producers before consumers)
+  # — and run an isolated `mvn -N` build in each module so ~/.m2 fills up
+  # linearly. -N skips re-recursion into <modules> (each call handles a
+  # single POM).
+  local modules_in_order
+  modules_in_order=$(python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+from pathlib import Path
+
+def parse(pom):
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return None, None
+    ns = m.group(1)
+    try:
+        return ET.parse(pom).getroot(), ns
+    except ET.ParseError:
+        return None, None
+
+def walk(pom_path, out, seen):
+    p = pom_path.resolve()
+    if p in seen: return
+    seen.add(p)
+    root, ns = parse(pom_path)
+    if root is None: return
+    out.append(str(pom_path.parent))
+    modules_el = root.find(f'{{{ns}}}modules')
+    if modules_el is None: return
+    for m in modules_el.findall(f'{{{ns}}}module'):
+        sub = (m.text or '').strip()
+        if not sub: continue
+        sub_pom = pom_path.parent / sub / 'pom.xml'
+        if sub_pom.exists():
+            walk(sub_pom, out, seen)
+
+ordered = []
+walk(Path('pom.xml'), ordered, set())
+for d in ordered: print(d)
+PY
+)
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} clean install
-  local install_rc=$?
+  local install_rc=0
+  local module_dir rel
+  while IFS= read -r module_dir; do
+    [[ -z "$module_dir" ]] && continue
+    rel="${module_dir#./}"
+    [[ "$rel" == "." || -z "$rel" ]] && rel="<root>"
+    info "    • install ${rel}"
+    ( cd "$module_dir" && mvn -B -ntp ${MVN_NET_FLAGS} -N clean install )
+    install_rc=$?
+    [[ "$install_rc" != "0" ]] && break
+  done <<< "$modules_in_order"
   set -e
   if [[ "$install_rc" != "0" ]]; then
     info "  ↻ install failed — rolling back local commit + tag (nothing was pushed)"
