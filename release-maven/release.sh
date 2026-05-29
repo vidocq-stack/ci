@@ -541,110 +541,7 @@ PY
   ok "no residual io.vidocq.* SNAPSHOTs"
 }
 
-# ---------------------------------------------------------------- 6. inject reactor parent <version>
-
-# Maven Model 4.1.0 lets a child <parent> omit <version>: it is inherited from
-# the parent module sitting in the same reactor. Tools that predate Model 4.1
-# (maven-release-plugin 3.1.1 in particular) still assume the element exists
-# and crash with `NullPointerException: Cannot invoke "CharSequence.length()"
-# because "this.text" is null` during `rewrite-poms-for-release` — they try to
-# overwrite the text of a <version> node that was never written.
-#
-# Inject a literal <version> in every <parent> that omits it AND whose
-# groupId:artifactId matches a POM in the current reactor. The injected value
-# is the version of that reactor POM (already in sync because mvn -B has been
-# happily resolving it implicitly until now). After release:prepare flips
-# versions to <RELEASE_VERSION>, these injected nodes get updated normally;
-# release:perform's tag then carries the explicit version, and the next-dev
-# commit increments them like any other child <parent>.
-step_inject_parent_versions() {
-  info "Injecting explicit <version> into reactor <parent> blocks (Model 4.1 compat)"
-  python3 <<'PY'
-import re, sys
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
-
-poms = [p for p in Path('.').rglob('pom.xml')
-        if not any(part in ('target', 'node_modules')
-                   or (part != '.' and part.startswith('.'))
-                   for part in p.parts)]
-
-# Map artifactId -> (groupId, version) for every reactor POM. Resolve missing
-# fields by walking up: if a POM omits <groupId>/<version>, inherit from its
-# <parent>. (Maven 4.1 commonly omits both on submodules.)
-reactor = {}
-parsed = []
-for pom in poms:
-    text = pom.read_text(encoding='utf-8', errors='replace')
-    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
-    if not m: continue
-    ns = m.group(1)
-    try:
-        tree = ET.parse(pom)
-    except ET.ParseError:
-        continue
-    parsed.append((pom, tree, ns))
-
-# Two-pass resolution so children whose parent sits later in the iteration
-# still get their version. Loop until stable.
-def coords(root, ns):
-    g = (root.findtext(f'{{{ns}}}groupId') or '').strip()
-    a = (root.findtext(f'{{{ns}}}artifactId') or '').strip()
-    v = (root.findtext(f'{{{ns}}}version') or '').strip()
-    p = root.find(f'{{{ns}}}parent')
-    if p is not None:
-        if not g: g = (p.findtext(f'{{{ns}}}groupId') or '').strip()
-        if not v: v = (p.findtext(f'{{{ns}}}version') or '').strip()
-    return g, a, v
-
-# Pass 1: collect directly-known coords.
-for pom, tree, ns in parsed:
-    g, a, v = coords(tree.getroot(), ns)
-    if a:
-        reactor[a] = (g, v)
-
-# Pass 2: inject <version> wherever a child <parent> targets a reactor POM
-# and has no <version> of its own.
-changed = 0
-for pom, tree, ns in parsed:
-    root = tree.getroot()
-    parent = root.find(f'{{{ns}}}parent')
-    if parent is None: continue
-    pg = (parent.findtext(f'{{{ns}}}groupId') or '').strip()
-    pa = (parent.findtext(f'{{{ns}}}artifactId') or '').strip()
-    pv_el = parent.find(f'{{{ns}}}version')
-    if pv_el is not None and (pv_el.text or '').strip():
-        continue                  # already explicit
-    if pa not in reactor:
-        continue                  # external parent (e.g. io.vidocq:vidocq-parent root) — leave alone
-    rg, rv = reactor[pa]
-    if pg and rg and pg != rg:
-        continue                  # groupId mismatch — not the reactor parent
-    if not rv:
-        continue                  # can't determine version
-    # Insert <version> right after <artifactId> for readability.
-    ET.register_namespace('', ns)
-    if pv_el is None:
-        ve = ET.SubElement(parent, f'{{{ns}}}version')
-        ve.text = rv
-        aid_el = parent.find(f'{{{ns}}}artifactId')
-        parent.remove(ve)
-        idx = list(parent).index(aid_el) + 1 if aid_el is not None else 0
-        parent.insert(idx, ve)
-    else:
-        pv_el.text = rv
-    tree.write(pom, encoding='utf-8', xml_declaration=True)
-    print(f"  • {pom}: injected <version>{rv}</version>")
-    changed += 1
-
-print(f"  ({changed} POM(s) patched)")
-PY
-  ok "reactor parent <version> injection done"
-}
-
-# ---------------------------------------------------------------- 7. commit lock
+# ---------------------------------------------------------------- 6. commit lock
 
 step_commit_lock() {
   info "Committing lock (if any change)"
@@ -658,29 +555,78 @@ step_commit_lock() {
   ok "lock commit pushed"
 }
 
-# ---------------------------------------------------------------- 7. maven release
+# ---------------------------------------------------------------- 7. manual release
 
-# Real release: prepare + perform with autoPublish forwarded into the forked
-# release:perform build via -Darguments.
-step_maven_release() {
-  info "Running maven-release-plugin (prepare + perform)"
+# Replace maven-release-plugin (3.1.1 is Model-4.0 only — it crashes on Model
+# 4.1 implicit-version inheritance with NPE during rewrite-poms-for-release)
+# by driving the release lifecycle ourselves:
+#
+#   1. versions:set to RELEASE_VERSION (processAllModules covers Model 4.1
+#      submodules that omit <version>)
+#   2. commit "release: $v" + lightweight tag "v$v" — LOCAL ONLY at this point
+#   3. mvn -P release clean deploy — central-publishing-maven-plugin signs
+#      and uploads the bundle, autoPublish forwarded as the workflow input
+#   4. push main + tag (only on deploy success → a failed upload leaves no
+#      published tag pointing to an unshippable revision)
+#   5. versions:set to NEXT_DEV_VERSION, commit "release: prepare next dev
+#      iteration $next", push
+#
+# If deploy fails, the local commit and tag are rolled back and the worktree
+# is reset so the workflow can be retried without manual cleanup.
+step_release_manual() {
+  info "Manual release (versions:set + tag + deploy + bump-next)"
   export GPG_TTY=$(tty || echo /dev/null)
 
-  local release_args
-  release_args="-P${RELEASE_PROFILE}"
-  release_args="${release_args} -Dgpg.passphrase=${GPG_PASSPHRASE}"
-  release_args="${release_args} -Dgpg.keyname=${GPG_KEY_ID}"
-  release_args="${release_args} -Dcentral.publishing.autoPublish=${AUTO_PUBLISH}"
-  # Net flags forwarded into the release:perform forked build too:
-  release_args="${release_args} ${MVN_NET_FLAGS}"
+  local pre_release_sha
+  pre_release_sha=$(git rev-parse HEAD)
 
-  mvn -B -ntp ${MVN_NET_FLAGS} \
-      -DreleaseVersion="${RELEASE_VERSION}" \
-      -DdevelopmentVersion="${NEXT_DEV_VERSION}" \
-      -Darguments="${release_args}" \
-      release:prepare release:perform
+  # 1. Flip every reactor module to RELEASE_VERSION. -DprocessAllModules=true
+  #    is critical under Model 4.1 where submodules omit <version> entirely
+  #    — without it versions:set only touches the root pom.
+  info "  → versions:set ${RELEASE_VERSION}"
+  mvn -B -ntp ${MVN_NET_FLAGS} versions:set \
+      -DnewVersion="${RELEASE_VERSION}" \
+      -DprocessAllModules=true \
+      -DgenerateBackupPoms=false
 
-  ok "maven-release-plugin completed (autoPublish=${AUTO_PUBLISH})"
+  # 2. Local commit + tag. Push deferred until the deploy succeeds.
+  info "  → git commit + tag v${RELEASE_VERSION}"
+  git add -A
+  git commit -m "release: ${RELEASE_VERSION}"
+  git tag -a "v${RELEASE_VERSION}" -m "Release ${RELEASE_VERSION}"
+
+  # 3. Sign + deploy through the `release` profile (gpg + central-publishing).
+  info "  → mvn -P${RELEASE_PROFILE} clean deploy (autoPublish=${AUTO_PUBLISH})"
+  set +e
+  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" clean deploy \
+      -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+      -Dgpg.keyname="${GPG_KEY_ID}" \
+      -Dcentral.publishing.autoPublish="${AUTO_PUBLISH}"
+  local deploy_rc=$?
+  set -e
+  if [[ "$deploy_rc" != "0" ]]; then
+    info "  ↻ deploy failed — rolling back local commit + tag (nothing was pushed)"
+    git tag -d "v${RELEASE_VERSION}" >/dev/null 2>&1 || true
+    git reset --hard "${pre_release_sha}" >/dev/null
+    die "deploy failed (rc=${deploy_rc}) — local commit/tag undone, tree restored to ${pre_release_sha}"
+  fi
+
+  # 4. Publish the release commit + tag.
+  info "  → git push main + tag v${RELEASE_VERSION}"
+  git push origin main
+  git push origin "v${RELEASE_VERSION}"
+
+  # 5. Bump to NEXT_DEV_VERSION and push.
+  info "  → versions:set ${NEXT_DEV_VERSION}"
+  mvn -B -ntp ${MVN_NET_FLAGS} versions:set \
+      -DnewVersion="${NEXT_DEV_VERSION}" \
+      -DprocessAllModules=true \
+      -DgenerateBackupPoms=false
+  git add -A
+  git commit -m "release: prepare next dev iteration ${NEXT_DEV_VERSION}"
+  git push origin main
+
+  ok "manual release completed (released ${RELEASE_VERSION}, next dev ${NEXT_DEV_VERSION})"
 }
 
 # Dry-run: run `mvn -P release verify` to exercise the full build + signing +
@@ -829,7 +775,6 @@ main() {
   step_reroute_ssh
   step_apply_overrides
   step_failfast_scan
-  step_inject_parent_versions
 
   if [[ "$DRY_RUN" == "true" ]]; then
     # Dry-run path: never touches git, never uploads. The overrides have been
@@ -848,7 +793,7 @@ main() {
   fi
 
   step_commit_lock
-  step_maven_release
+  step_release_manual
   step_wait_central
   ok "Release ${RELEASE_VERSION} complete"
 }
