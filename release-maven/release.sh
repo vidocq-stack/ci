@@ -157,6 +157,22 @@ EOF
 
 # ---------------------------------------------------------------- 3. GPG
 
+# Reroute `git push ssh://git@codeberg.org/...` to HTTPS-with-token. The
+# release-plugin uses the developerConnection of the POM (ssh://...) and the
+# runner has no SSH key for codeberg.org. The insteadOf config is global so
+# it applies to the release-plugin's separate `git push` invocations too.
+step_reroute_ssh() {
+  if [[ -z "${BOT_TOKEN:-}" ]]; then
+    info "Skipping SSH→HTTPS reroute (BOT_TOKEN not provided)"
+    return 0
+  fi
+  info "Rerouting ssh://git@codeberg.org/* to https://oauth2:<token>@codeberg.org/*"
+  # `insteadOf` is multi-valued; use --add so both ssh:// shapes resolve.
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://git@codeberg.org/"
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://codeberg.org/"
+  ok "SSH→HTTPS reroute armed"
+}
+
 step_import_gpg() {
   info "Importing GPG signing key"
   # Try base64 first (preferred, avoids newline mangling in secrets), fallback to raw armored.
@@ -558,6 +574,7 @@ main() {
   step_precheck
   step_write_settings
   step_import_gpg
+  step_reroute_ssh
   step_apply_overrides
   step_failfast_scan
 

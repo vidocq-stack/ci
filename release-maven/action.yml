@@ -37,6 +37,13 @@ inputs:
   gpg-key-id:
     description: 'GPG key id (long format, secrets.GPG_KEY_ID). Used as --default-key.'
     required: true
+  bot-token:
+    description: |
+      Codeberg/Forgejo token with push access to the project repo (secrets.VIDOCQ_BOT_TOKEN).
+      Required: maven-release-plugin runs `git push <developerConnection>` which is
+      ssh://git@codeberg.org/... in the canonical POMs. The runner has no SSH key
+      for Codeberg, so we re-route SSH→HTTPS+token using `git config insteadOf`.
+    required: true
   bot-name:
     description: 'Git author name for the lock + bump commits'
     default: 'Vidocq CI Bot'
@@ -124,4 +131,5 @@ runs:
         WAIT_INTERVAL_SECONDS: ${{ inputs.wait-interval-seconds }}
         DRY_RUN:               ${{ inputs.dry-run }}
         AUTO_PUBLISH:          ${{ inputs.auto-publish }}
+        BOT_TOKEN:             ${{ inputs.bot-token }}
       run: bash "${{ github.action_path }}/release.sh"

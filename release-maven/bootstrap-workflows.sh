@@ -202,6 +202,7 @@ EOF
           gpg-private-key:  \${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase:   \${{ secrets.GPG_PASSPHRASE }}
           gpg-key-id:       \${{ secrets.GPG_KEY_ID }}
+          bot-token:        \${{ secrets.VIDOCQ_BOT_TOKEN }}
 EOF
 }
 
