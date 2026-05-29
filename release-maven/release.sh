@@ -212,114 +212,155 @@ parse_overrides() {
   done <<< "$OVERRIDES"
 }
 
-# Apply all overrides in one Python call: for each (parent|dependency) coord in
-# every pom.xml under cwd, if it matches an override AND its version is SNAPSHOT
-# (literal or property-resolved), patch the right place:
-#   - literal <version>X-SNAPSHOT</version> → patch the <version> element.
-#   - <version>${some.prop}</version> with ${some.prop}=X-SNAPSHOT → patch the
-#     <properties><some.prop>…</some.prop></properties> element (same POM tree;
-#     properties inherited from a higher-level POM are handled when that POM
-#     is iterated).
+# Detection helper: list the property names referenced as ${X} inside any
+# <dependency groupId="$1"> ... <version>${X}</version> across the reactor.
+# Read-only XML scan (no mutation — versions-maven-plugin handles the writes).
+detect_props_for_group() {
+  local g="$1"
+  python3 - "$g" <<'PY'
+import sys, re, xml.etree.ElementTree as ET
+from pathlib import Path
+g = sys.argv[1]
+PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+seen = set()
+for pom in Path('.').rglob('pom.xml'):
+    if any(p in ('target', 'node_modules') or (p != '.' and p.startswith('.')) for p in pom.parts): continue
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: continue
+    ns = m.group(1)
+    try: root = ET.parse(pom).getroot()
+    except ET.ParseError: continue
+    # <dependency>
+    for dep in root.iter(f'{{{ns}}}dependency'):
+        if (dep.findtext(f'{{{ns}}}groupId') or '') != g: continue
+        raw = (dep.findtext(f'{{{ns}}}version') or '').strip()
+        mp = PROP_RE.match(raw)
+        if mp: seen.add(mp.group(1))
+    # <parent> (in case the parent version is also a ${prop})
+    parent = root.find(f'{{{ns}}}parent')
+    if parent is not None and (parent.findtext(f'{{{ns}}}groupId') or '') == g:
+        raw = (parent.findtext(f'{{{ns}}}version') or '').strip()
+        mp = PROP_RE.match(raw)
+        if mp: seen.add(mp.group(1))
+for p in sorted(seen): print(p)
+PY
+}
+
+# Detection helper: list groupId:artifactId of <dependency> blocks for this
+# groupId whose <version> is a LITERAL SNAPSHOT (not a ${prop}). Used to feed
+# versions:use-dep-version. Skips <parent> (handled by versions:update-parent
+# upstream). Skips own-project artifacts (release-plugin bumps them itself).
+detect_literal_coords_for_group() {
+  local g="$1"
+  python3 - "$g" <<'PY'
+import sys, re, xml.etree.ElementTree as ET
+from pathlib import Path
+g = sys.argv[1]
+PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+own_aids = set()
+poms = []
+for pom in Path('.').rglob('pom.xml'):
+    if any(p in ('target', 'node_modules') or (p != '.' and p.startswith('.')) for p in pom.parts): continue
+    poms.append(pom)
+# Pass 1: collect own artifactIds.
+for pom in poms:
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: continue
+    ns = m.group(1)
+    try: root = ET.parse(pom).getroot()
+    except ET.ParseError: continue
+    aid = root.findtext(f'{{{ns}}}artifactId')
+    if aid: own_aids.add(aid)
+# Pass 2: list literal-SNAPSHOT dep coords for this groupId.
+seen = set()
+for pom in poms:
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: continue
+    ns = m.group(1)
+    try: root = ET.parse(pom).getroot()
+    except ET.ParseError: continue
+    for dep in root.iter(f'{{{ns}}}dependency'):
+        if (dep.findtext(f'{{{ns}}}groupId') or '') != g: continue
+        a = (dep.findtext(f'{{{ns}}}artifactId') or '')
+        if a in own_aids: continue
+        raw = (dep.findtext(f'{{{ns}}}version') or '').strip()
+        if PROP_RE.match(raw): continue       # property — handled elsewhere
+        if raw.endswith('-SNAPSHOT'):
+            seen.add(f"{g}:{a}")
+for c in sorted(seen): print(c)
+PY
+}
+
+# Replace io.vidocq.* SNAPSHOTs by running versions-maven-plugin goals.
+# Three mvn invocations cover the bases:
+#   - versions:update-parent      → root <parent>
+#   - versions:set-property       → <dependency><version>${X}</version>
+#   - versions:use-dep-version    → <dependency><version>X-SNAPSHOT</version> literal
+# All goals run with -DgenerateBackupPoms=false (we don't want .versionsBackup
+# files cluttering the worktree; release-plugin will commit the changed POMs).
 step_apply_overrides() {
   info "Applying overrides"
   if [[ -z "${OVERRIDES// /}" ]]; then
     ok "no overrides given (project has no io.vidocq.* SNAPSHOT deps to lock)"
     return
   fi
-  # Feed overrides on stdin to keep the script self-contained.
-  parse_overrides | python3 - <<'PY'
-import sys, re, xml.etree.ElementTree as ET
-from pathlib import Path
 
-# Read overrides from stdin (3-col TSV: scope, key, version).
-group_overrides = {}   # groupId      → version
-coord_overrides = {}   # (g, a)       → version
-for line in sys.stdin:
-    parts = line.rstrip('\n').split('\t')
-    if len(parts) != 3: continue
-    scope, key, v = parts
-    if scope == 'group':
-        group_overrides[key] = v
-    elif scope == 'coord':
-        g, a = key.split(':', 1)
-        coord_overrides[(g, a)] = v
+  local parent_g parent_a
+  parent_g=$(mvn -q -ntp ${MVN_NET_FLAGS} -N help:evaluate \
+             -Dexpression=project.parent.groupId -DforceStdout 2>/dev/null || true)
+  parent_a=$(mvn -q -ntp ${MVN_NET_FLAGS} -N help:evaluate \
+             -Dexpression=project.parent.artifactId -DforceStdout 2>/dev/null || true)
+  # help:evaluate prints "null object or invalid expression" if no parent.
+  [[ "$parent_g" == "null"* ]] && parent_g=""
+  [[ "$parent_a" == "null"* ]] && parent_a=""
+  info "  root parent: ${parent_g:-<none>}:${parent_a:-<none>}"
 
-PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+  # Iterate one override at a time. parse_overrides emits TSV "scope\tkey\tv".
+  local scope key v g a
+  while IFS=$'\t' read -r scope key v; do
+    [[ -z "${scope:-}" ]] && continue
+    if [[ "$scope" == "coord" ]]; then
+      g="${key%%:*}"; a="${key#*:}"
+    else
+      g="$key"; a=""
+    fi
+    info "Override: ${key} → ${v}"
 
-def match_version(g, a):
-    """Return desired release version for a coord, or None if no override matches."""
-    if (g, a) in coord_overrides: return coord_overrides[(g, a)]
-    if g in group_overrides:      return group_overrides[g]
-    return None
+    # 1) Update <parent> if our root parent matches.
+    if [[ -n "$parent_g" && "$g" == "$parent_g" ]] \
+       && { [[ -z "$a" ]] || [[ "$a" == "$parent_a" ]]; }; then
+      info "  • <parent> ${parent_g}:${parent_a} → ${v}"
+      mvn -B -ntp ${MVN_NET_FLAGS} versions:update-parent \
+          -DparentVersion="$v" -DallowSnapshots=false -DgenerateBackupPoms=false
+    fi
 
-total_changes = 0
-for pom in Path('.').rglob('pom.xml'):
-    if any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in pom.parts): continue
-    text = pom.read_text(encoding='utf-8', errors='replace')
-    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
-    if not m: continue
-    ns = m.group(1)
-    ET.register_namespace('', ns)
-    try:
-        tree = ET.parse(pom)
-    except ET.ParseError as e:
-        print(f"  ⚠ skip {pom} (parse error: {e})", file=sys.stderr)
-        continue
-    root = tree.getroot()
+    # 2) Properties referenced by <dependency groupId=$g> blocks.
+    local prop
+    while IFS= read -r prop; do
+      [[ -z "$prop" ]] && continue
+      info "  • property \${${prop}} → ${v}"
+      mvn -B -ntp ${MVN_NET_FLAGS} versions:set-property \
+          -Dproperty="$prop" -DnewVersion="$v" \
+          -DallowSnapshots=false -DgenerateBackupPoms=false
+    done < <(detect_props_for_group "$g")
 
-    # Build local property map.
-    props_el = root.find(f'{{{ns}}}properties')
-    props = {}
-    if props_el is not None:
-        for child in props_el:
-            name = child.tag.split('}', 1)[-1]
-            props[name] = (child.text or '').strip()
+    # 3) Literal <dependency><version>X-SNAPSHOT</version> (rare for Vidocq —
+    #    the convention is property-driven — but we cover it for safety).
+    local ga
+    while IFS= read -r ga; do
+      [[ -z "$ga" ]] && continue
+      # If a narrow coord override was given, only patch that specific coord.
+      if [[ -n "$a" && "$ga" != "${g}:${a}" ]]; then continue; fi
+      info "  • literal <dependency> ${ga} → ${v}"
+      mvn -B -ntp ${MVN_NET_FLAGS} versions:use-dep-version \
+          -Dincludes="$ga" -DdepVersion="$v" -DforceVersion=true \
+          -DgenerateBackupPoms=false
+    done < <(detect_literal_coords_for_group "$g")
+  done < <(parse_overrides)
 
-    changes_in_pom = []  # list of (description) for log
-    props_to_patch = {}  # prop_name → new_version
-
-    def visit(elem):
-        nonlocal changes_in_pom
-        g = elem.findtext(f'{{{ns}}}groupId') or ''
-        a = elem.findtext(f'{{{ns}}}artifactId') or ''
-        if not g.startswith('io.vidocq'): return
-        target = match_version(g, a)
-        if target is None: return
-        ve = elem.find(f'{{{ns}}}version')
-        if ve is None: return
-        raw = (ve.text or '').strip()
-        m = PROP_RE.match(raw)
-        if m:
-            prop_name = m.group(1)
-            current = props.get(prop_name, '')
-            if current.endswith('-SNAPSHOT'):
-                props_to_patch[prop_name] = target
-                changes_in_pom.append(f"property {prop_name}: {current} → {target} (via {g}:{a})")
-        elif raw.endswith('-SNAPSHOT'):
-            ve.text = target
-            changes_in_pom.append(f"{g}:{a} <version>: {raw} → {target}")
-
-    for parent in root.findall(f'{{{ns}}}parent'):
-        visit(parent)
-    for dep in root.iter(f'{{{ns}}}dependency'):
-        visit(dep)
-
-    # Apply property patches (deferred so we don't mutate while iterating).
-    if props_to_patch and props_el is not None:
-        for child in props_el:
-            name = child.tag.split('}', 1)[-1]
-            if name in props_to_patch:
-                child.text = props_to_patch[name]
-
-    if changes_in_pom:
-        tree.write(pom, encoding='utf-8', xml_declaration=True)
-        print(f"  • {pom}")
-        for c in changes_in_pom:
-            print(f"      ↳ {c}")
-        total_changes += len(changes_in_pom)
-
-print(f"  → {total_changes} change(s) across all pom.xml")
-PY
   ok "overrides applied"
 }
 

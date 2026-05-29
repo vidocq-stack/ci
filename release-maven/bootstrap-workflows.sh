@@ -152,11 +152,19 @@ EOF
 
   if (( ${#deps[@]} > 0 )); then
     for g in "${deps[@]}"; do
-      local key
+      local key pretty
       key=$(input_key "$g")
+      # Special-case io.vidocq: only one artifact lives under that groupId
+      # (vidocq-parent). For every other groupId, mention that we lock all
+      # artifacts of that family at once.
+      if [[ "$g" == "io.vidocq" ]]; then
+        pretty="io.vidocq:vidocq-parent"
+      else
+        pretty="${g}:* (all artifacts under ${g})"
+      fi
       cat <<EOF
       ${key}:
-        description: "${g} stable version (must be on Central)"
+        description: "${pretty} — stable version (must be released on Central first)"
         type: string
         required: true
 EOF
