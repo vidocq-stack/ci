@@ -86,7 +86,12 @@ runs:
       with:
         java-version: ${{ inputs.java-version }}
         distribution: temurin
-        cache: maven
+        # IMPORTANT: do NOT set `cache: maven` here. On the Forgejo runner
+        # (act_runner v11.x), the cache restore extracts its tarball with
+        # `tar -xf cache.tgz -P -C /workspace/<repo>`, which leaks .m2/ files
+        # INTO the workspace and trips the release.sh precheck
+        # ("working tree is dirty"). A release is rare; the extra ~30s of
+        # Maven download is acceptable for a clean worktree.
 
     - name: Install Maven ${{ inputs.maven-version }}
       shell: bash

@@ -61,17 +61,28 @@ step_precheck() {
   [[ "$NEXT_DEV_VERSION" == *-SNAPSHOT ]] \
     || die "NEXT_DEV_VERSION must end with -SNAPSHOT, got '$NEXT_DEV_VERSION'"
 
-  local branch dirty
+  local branch dirty untracked tracked
   branch=$(git symbolic-ref --short HEAD)
   [[ "$branch" == "main" ]] || die "branch is '$branch'; release must run on main"
+
+  # Distinguish untracked (safe to remove — typically tooling leaks like .m2/,
+  # .gradle/, .ci-action/) from modified-tracked (must NOT be auto-cleaned).
+  untracked=$(git status --porcelain | grep -c '^?? ' || true)
+  tracked=$(git status --porcelain | grep -cv '^?? ' || true)
+
+  if (( untracked > 0 )); then
+    info "Found $untracked untracked path(s) (tooling leak — removing):"
+    git status --porcelain | grep '^?? ' | sed 's/^/    /'
+    git clean -fdq -e .git
+  fi
+
   dirty=$(git status --porcelain | wc -l | tr -d ' ')
   if [[ "$dirty" != "0" ]]; then
-    echo "❌ working tree is dirty ($dirty files):" >&2
+    echo "❌ working tree still has $dirty modified TRACKED file(s) after untracked cleanup:" >&2
     git status --porcelain >&2
     echo "" >&2
-    echo "Hint: these files were modified or created between actions/checkout and this step." >&2
-    echo "      Typically setup-java/setup-maven caches or .ci-action/ leak in. Add them" >&2
-    echo "      to .gitignore in the repo and retry." >&2
+    echo "Hint: these are tracked files modified between checkout and the precheck." >&2
+    echo "      Could not auto-clean (would lose data). Investigate the workflow." >&2
     exit 1
   fi
 
