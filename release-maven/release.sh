@@ -308,14 +308,40 @@ step_apply_overrides() {
     return
   fi
 
-  local parent_g parent_a
-  parent_g=$(mvn -q -ntp ${MVN_NET_FLAGS} -N help:evaluate \
-             -Dexpression=project.parent.groupId -DforceStdout 2>/dev/null || true)
-  parent_a=$(mvn -q -ntp ${MVN_NET_FLAGS} -N help:evaluate \
-             -Dexpression=project.parent.artifactId -DforceStdout 2>/dev/null || true)
-  # help:evaluate prints "null object or invalid expression" if no parent.
-  [[ "$parent_g" == "null"* ]] && parent_g=""
-  [[ "$parent_a" == "null"* ]] && parent_a=""
+  # Read parent coords from pom.xml directly. `mvn help:evaluate` is unusable
+  # here: under Maven 4, even with -q, the output is interleaved with
+  # `[INFO] [stdout]` lines that pollute the captured value.
+  local parent_coords parent_g parent_a
+  parent_coords=$(python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+try:
+    text = open('pom.xml', encoding='utf-8').read()
+except FileNotFoundError:
+    print("")
+    raise SystemExit(0)
+m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+if not m:
+    print("")
+    raise SystemExit(0)
+ns = m.group(1)
+try:
+    root = ET.fromstring(text)
+except ET.ParseError:
+    print("")
+    raise SystemExit(0)
+p = root.find(f'{{{ns}}}parent')
+if p is None:
+    print("")
+else:
+    g = (p.findtext(f'{{{ns}}}groupId') or '').strip()
+    a = (p.findtext(f'{{{ns}}}artifactId') or '').strip()
+    print(f"{g}\t{a}")
+PY
+  )
+  parent_g="${parent_coords%%$'\t'*}"
+  parent_a="${parent_coords##*$'\t'}"
+  # If pom.xml has no <parent>, parent_coords is empty → both empty.
+  [[ "$parent_coords" == *$'\t'* ]] || { parent_g=""; parent_a=""; }
   info "  root parent: ${parent_g:-<none>}:${parent_a:-<none>}"
 
   # Iterate one override at a time. parse_overrides emits TSV "scope\tkey\tv".
