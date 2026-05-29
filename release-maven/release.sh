@@ -4,30 +4,45 @@
 # Required env (passed by action.yml):
 #   RELEASE_VERSION, NEXT_DEV_VERSION
 #   OVERRIDES                      multiline "groupId:artifactId=version"
+#   EXCLUDED_MODULES               multiline artifactIds excluded from `mvn deploy`
 #   CENTRAL_USERNAME, CENTRAL_PASSWORD
 #   GPG_PRIVATE_KEY, GPG_PASSPHRASE, GPG_KEY_ID
-#   BOT_NAME, BOT_EMAIL
+#   BOT_NAME, BOT_EMAIL, BOT_TOKEN
 #   RELEASE_PROFILE                (default: release)
 #   WAIT_TIMEOUT_SECONDS, WAIT_INTERVAL_SECONDS
-#   DRY_RUN                        "true" → no commit/tag/push/upload (smoke test)
-#   AUTO_PUBLISH                   "true" → bundle published auto on Central; "false" → manual click required
+#   DRY_RUN                        "true" → no push, no upload (branch + tag local only)
+#   AUTO_PUBLISH                   "true" → bundle auto-published on Central
 #
-# Flow:
-#   1. pre-checks (clean tree, branch=main, env present, version format)
-#   2. write ~/.m2/settings.xml (central + central-snapshots)
-#   3. import GPG key (base64 or armored)
-#   4. apply overrides (lock io.vidocq.* SNAPSHOTs in <parent> + <dependency>)
-#   5. fail-fast if any io.vidocq.* SNAPSHOT remains
-#   6. If DRY_RUN:
-#         a. `mvn -P release verify` (compile + tests + sign + bundle, NO upload)
-#         b. show bundle contents
-#         c. STOP — never touch git, never upload
-#      Else:
-#         a. git commit "release: lock io.vidocq.* deps for X" (if anything changed)
-#         b. mvn release:prepare + release:perform — signs, uploads bundle
-#            (autoPublish=$AUTO_PUBLISH via -Dcentral.publishing.autoPublish)
-#         c. If AUTO_PUBLISH: poll repo1.maven.org until each module's .pom is visible
-#            else: print the central.sonatype.com URL to click manually
+# Flow (10 steps):
+#    1. precheck             clean tree, branch=main, env present, format versions
+#    2. write_settings       ~/.m2/settings.xml (central + central-snapshots)
+#    3. import_gpg           GPG signing key (base64 or armored)
+#    4. reroute_ssh          insteadOf SSH→HTTPS for Codeberg pushes (bot token)
+#    5. branch_create        git checkout -b release/${RELEASE_VERSION} (off main)
+#                            All POM mutations land on the release branch — main
+#                            is left untouched until the deploy succeeds.
+#    6. apply_overrides      versions:update-parent / set-property / use-dep-version
+#                            then fail-fast scan for residual io.vidocq.* SNAPSHOTs
+#    7. set_version_and_commit
+#                            versions:set RELEASE_VERSION (processAllModules)
+#                            git commit on release/${RELEASE_VERSION}
+#                            DRY_RUN=false → push branch, DRY_RUN=true → keep local
+#    8. validate_build       mvn clean install (reactor) with a module-by-module
+#                            fallback if Maven 4 RC-5 mis-orders the DAG
+#    9. deploy               mvn -P release deploy -pl !${excluded}
+#                            DRY_RUN=true → replaced by `verify` (sign + bundle, no upload)
+#   10. tag_and_finalize     git tag v${RELEASE_VERSION} on release branch HEAD
+#                            DRY_RUN=false → push tag, checkout main, versions:set
+#                              NEXT_DEV_VERSION, commit, push main
+#                            DRY_RUN=true → tag local only, main untouched
+#       wait_central         DRY_RUN=true → skip (nothing was uploaded)
+#                            DRY_RUN=false + AUTO_PUBLISH=true → poll repo1.maven.org
+#                            DRY_RUN=false + AUTO_PUBLISH=false → print Portal URL
+#
+# Isolation guarantee:
+# - main never moves before deploy succeeds. If anything fails between step 5
+#   and step 9, main is bit-for-bit identical to its pre-release state.
+# - release/${RELEASE_VERSION} stays forever as the audit trail and hotfix base.
 
 set -euo pipefail
 
@@ -43,11 +58,94 @@ ok()   { printf '✅ %s\n' "$*"; }
 # Bump both connect and request via Aether system properties on every mvn call.
 MVN_NET_FLAGS="-Daether.connector.connectTimeout=60000 -Daether.connector.requestTimeout=300000"
 
+# Globals filled by step_branch_create — consumed by later steps.
+RELEASE_BRANCH=""
+PRE_RELEASE_SHA=""
+
 require_env() {
   local v
   for v in "$@"; do
     [[ -n "${!v:-}" ]] || die "env $v is required but empty"
   done
+}
+
+# Walk every parent's <modules> tree depth-first starting from ./pom.xml. The
+# declaration order is already topological by Vidocq convention (the maintainer
+# lists producers before consumers). Used to bypass the Maven 4 RC-5 DAG sort
+# bug where consumers are scheduled before their producers in vanilla reactor.
+_walk_modules_in_declaration_order() {
+  python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+from pathlib import Path
+
+def parse(pom):
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return None, None
+    ns = m.group(1)
+    try:
+        return ET.parse(pom).getroot(), ns
+    except ET.ParseError:
+        return None, None
+
+def walk(pom_path, out, seen):
+    p = pom_path.resolve()
+    if p in seen: return
+    seen.add(p)
+    root, ns = parse(pom_path)
+    if root is None: return
+    out.append(str(pom_path.parent))
+    modules_el = root.find(f'{{{ns}}}modules')
+    if modules_el is None: return
+    for m in modules_el.findall(f'{{{ns}}}module'):
+        sub = (m.text or '').strip()
+        if not sub: continue
+        sub_pom = pom_path.parent / sub / 'pom.xml'
+        if sub_pom.exists():
+            walk(sub_pom, out, seen)
+
+ordered = []
+walk(Path('pom.xml'), ordered, set())
+for d in ordered: print(d)
+PY
+}
+
+# Run `mvn -N clean install` in every reactor module, in <modules> declaration
+# order. Each invocation handles a single POM (no recursion), so ~/.m2 fills
+# linearly and consumers always find their producers' artifacts.
+_install_modules_in_declaration_order() {
+  local modules_in_order rc=0 module_dir rel
+  modules_in_order=$(_walk_modules_in_declaration_order)
+  while IFS= read -r module_dir; do
+    [[ -z "$module_dir" ]] && continue
+    rel="${module_dir#./}"
+    [[ "$rel" == "." || -z "$rel" ]] && rel="<root>"
+    info "    • install ${rel}"
+    set +e
+    ( cd "$module_dir" && mvn -B -ntp ${MVN_NET_FLAGS} -N clean install )
+    rc=$?
+    set -e
+    [[ "$rc" != "0" ]] && return "$rc"
+  done <<< "$modules_in_order"
+  return 0
+}
+
+# Transform EXCLUDED_MODULES (multiline, one artifactId per line, # comments
+# tolerated) into a comma-separated "!a,!b,!c" string suitable for `mvn -pl`.
+# Empty input → empty output (caller must omit -pl entirely in that case).
+_build_excluded_pl_args() {
+  local result="" mod
+  while IFS= read -r mod; do
+    mod="${mod#"${mod%%[![:space:]]*}"}"
+    mod="${mod%"${mod##*[![:space:]]}"}"
+    [[ -z "$mod" || "$mod" == \#* ]] && continue
+    if [[ -z "$result" ]]; then
+      result="!${mod}"
+    else
+      result="${result},!${mod}"
+    fi
+  done <<< "${EXCLUDED_MODULES:-}"
+  printf '%s' "$result"
 }
 
 # ---------------------------------------------------------------- 1. pre-checks
@@ -58,9 +156,10 @@ step_precheck() {
               CENTRAL_USERNAME CENTRAL_PASSWORD \
               GPG_PRIVATE_KEY GPG_PASSPHRASE GPG_KEY_ID
 
-  # Default the two new toggles if unset (e.g. when sourced standalone).
+  # Default the two toggles if unset (e.g. when sourced standalone).
   : "${DRY_RUN:=false}"
   : "${AUTO_PUBLISH:=false}"
+  : "${EXCLUDED_MODULES:=}"
 
   [[ "$RELEASE_VERSION" != *-SNAPSHOT ]] \
     || die "RELEASE_VERSION must not end with -SNAPSHOT, got '$RELEASE_VERSION'"
@@ -94,8 +193,9 @@ step_precheck() {
 
   git config user.name  "${BOT_NAME:-Vidocq CI Bot}"
   git config user.email "${BOT_EMAIL:-ci@vidocq.dev}"
+
   local mode="real release"
-  [[ "$DRY_RUN" == "true" ]] && mode="DRY-RUN (no commit/upload)"
+  [[ "$DRY_RUN" == "true" ]] && mode="DRY-RUN (no push, no upload)"
   ok "pre-checks passed (branch=$branch, clean, $RELEASE_VERSION → $NEXT_DEV_VERSION, $mode)"
   if [[ "$DRY_RUN" != "true" ]]; then
     if [[ "$AUTO_PUBLISH" == "true" ]]; then
@@ -103,6 +203,13 @@ step_precheck() {
     else
       info "AUTO_PUBLISH=false → bundle will stay in VALIDATED state, waiting for manual click on Portal"
     fi
+  fi
+  local pl_args
+  pl_args=$(_build_excluded_pl_args)
+  if [[ -n "$pl_args" ]]; then
+    info "Excluded modules (deploy will skip): ${pl_args//,/ }"
+  else
+    info "No module exclusions — every reactor module will be deployed"
   fi
 }
 
@@ -155,19 +262,18 @@ EOF
   ok "settings.xml written"
 }
 
-# ---------------------------------------------------------------- 3. GPG
+# ---------------------------------------------------------------- 3. GPG + SSH reroute
 
-# Reroute `git push ssh://git@codeberg.org/...` to HTTPS-with-token. The
-# release-plugin uses the developerConnection of the POM (ssh://...) and the
-# runner has no SSH key for codeberg.org. The insteadOf config is global so
-# it applies to the release-plugin's separate `git push` invocations too.
+# Reroute `git push ssh://git@codeberg.org/...` to HTTPS-with-token. POMs
+# declare <developerConnection>ssh://...</developerConnection> by convention,
+# and the runner has no SSH key for Codeberg. The insteadOf config is global
+# so every subsequent git push is rerouted transparently.
 step_reroute_ssh() {
   if [[ -z "${BOT_TOKEN:-}" ]]; then
     info "Skipping SSH→HTTPS reroute (BOT_TOKEN not provided)"
     return 0
   fi
   info "Rerouting ssh://git@codeberg.org/* to https://oauth2:<token>@codeberg.org/*"
-  # `insteadOf` is multi-valued; use --add so both ssh:// shapes resolve.
   git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://git@codeberg.org/"
   git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://codeberg.org/"
   ok "SSH→HTTPS reroute armed"
@@ -175,7 +281,6 @@ step_reroute_ssh() {
 
 step_import_gpg() {
   info "Importing GPG signing key"
-  # Try base64 first (preferred, avoids newline mangling in secrets), fallback to raw armored.
   if echo "$GPG_PRIVATE_KEY" | base64 -d 2>/dev/null | gpg --batch --import 2>/dev/null; then
     ok "GPG key imported (base64-decoded)"
   else
@@ -184,13 +289,37 @@ step_import_gpg() {
   fi
   gpg --list-secret-keys --with-colons | grep -q '^sec' \
     || die "GPG key import failed — no secret key visible"
-  # Trust the key (ultimate) so non-interactive signing does not prompt.
   local fpr
   fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
   echo -e "5\ny\n" | gpg --batch --command-fd 0 --expert --edit-key "$fpr" trust quit 2>/dev/null || true
 }
 
-# ---------------------------------------------------------------- 4 & 5. overrides + scan
+# ---------------------------------------------------------------- 5. branch_create
+
+# Create the release/${RELEASE_VERSION} branch off main BEFORE any POM mutation.
+# Every subsequent commit (overrides, version bump) lands on this branch, never
+# on main. If the release fails, deleting the branch is the entire rollback.
+#
+# Pre-existence checks: a leftover branch from a previous failed run blocks the
+# retry so the maintainer can audit before discarding.
+step_branch_create() {
+  PRE_RELEASE_SHA=$(git rev-parse HEAD)
+  RELEASE_BRANCH="release/${RELEASE_VERSION}"
+
+  if git show-ref --verify --quiet "refs/heads/${RELEASE_BRANCH}"; then
+    die "branch ${RELEASE_BRANCH} already exists locally — investigate, delete, retry"
+  fi
+  if [[ "$DRY_RUN" != "true" ]] \
+     && git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+    die "branch ${RELEASE_BRANCH} already exists on remote — release likely in flight or failed previously"
+  fi
+
+  info "Creating ${RELEASE_BRANCH} off main (${PRE_RELEASE_SHA})"
+  git checkout -b "${RELEASE_BRANCH}"
+  ok "on branch ${RELEASE_BRANCH}"
+}
+
+# ---------------------------------------------------------------- 6. apply_overrides + failfast
 
 # Parse OVERRIDES env. Accepted formats (one per line, blanks/# ignored):
 #   groupId=version           → applies to every io.vidocq.* dep with that groupId
@@ -199,8 +328,8 @@ step_import_gpg() {
 parse_overrides() {
   local line key v
   while IFS= read -r line; do
-    line="${line#"${line%%[![:space:]]*}"}"       # ltrim
-    line="${line%"${line##*[![:space:]]}"}"       # rtrim
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" == \#* ]] && continue
     [[ "$line" == *=* ]] || die "bad override line (missing '='): $line"
     key="${line%%=*}"; v="${line#*=}"
@@ -212,9 +341,8 @@ parse_overrides() {
   done <<< "$OVERRIDES"
 }
 
-# Detection helper: list the property names referenced as ${X} inside any
-# <dependency groupId="$1"> ... <version>${X}</version> across the reactor.
-# Read-only XML scan (no mutation — versions-maven-plugin handles the writes).
+# List the property names referenced as ${X} inside any <dependency groupId="$1">
+# version field across the reactor. Used to drive versions:set-property.
 detect_props_for_group() {
   local g="$1"
   python3 - "$g" <<'PY'
@@ -231,13 +359,11 @@ for pom in Path('.').rglob('pom.xml'):
     ns = m.group(1)
     try: root = ET.parse(pom).getroot()
     except ET.ParseError: continue
-    # <dependency>
     for dep in root.iter(f'{{{ns}}}dependency'):
         if (dep.findtext(f'{{{ns}}}groupId') or '') != g: continue
         raw = (dep.findtext(f'{{{ns}}}version') or '').strip()
         mp = PROP_RE.match(raw)
         if mp: seen.add(mp.group(1))
-    # <parent> (in case the parent version is also a ${prop})
     parent = root.find(f'{{{ns}}}parent')
     if parent is not None and (parent.findtext(f'{{{ns}}}groupId') or '') == g:
         raw = (parent.findtext(f'{{{ns}}}version') or '').strip()
@@ -247,10 +373,9 @@ for p in sorted(seen): print(p)
 PY
 }
 
-# Detection helper: list groupId:artifactId of <dependency> blocks for this
-# groupId whose <version> is a LITERAL SNAPSHOT (not a ${prop}). Used to feed
-# versions:use-dep-version. Skips <parent> (handled by versions:update-parent
-# upstream). Skips own-project artifacts (release-plugin bumps them itself).
+# List groupId:artifactId of <dependency> blocks for this groupId whose
+# <version> is a LITERAL SNAPSHOT (not a ${prop}). Feeds versions:use-dep-version.
+# Skips <parent> (handled by versions:update-parent) and own-project artifacts.
 detect_literal_coords_for_group() {
   local g="$1"
   python3 - "$g" <<'PY'
@@ -263,7 +388,6 @@ poms = []
 for pom in Path('.').rglob('pom.xml'):
     if any(p in ('target', 'node_modules') or (p != '.' and p.startswith('.')) for p in pom.parts): continue
     poms.append(pom)
-# Pass 1: collect own artifactIds.
 for pom in poms:
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
@@ -273,7 +397,6 @@ for pom in poms:
     except ET.ParseError: continue
     aid = root.findtext(f'{{{ns}}}artifactId')
     if aid: own_aids.add(aid)
-# Pass 2: list literal-SNAPSHOT dep coords for this groupId.
 seen = set()
 for pom in poms:
     text = pom.read_text(encoding='utf-8', errors='replace')
@@ -287,48 +410,40 @@ for pom in poms:
         a = (dep.findtext(f'{{{ns}}}artifactId') or '')
         if a in own_aids: continue
         raw = (dep.findtext(f'{{{ns}}}version') or '').strip()
-        if PROP_RE.match(raw): continue       # property — handled elsewhere
+        if PROP_RE.match(raw): continue
         if raw.endswith('-SNAPSHOT'):
             seen.add(f"{g}:{a}")
 for c in sorted(seen): print(c)
 PY
 }
 
-# Replace io.vidocq.* SNAPSHOTs by running versions-maven-plugin goals.
-# Three mvn invocations cover the bases:
+# Replace io.vidocq.* SNAPSHOTs by running versions-maven-plugin goals:
 #   - versions:update-parent      → root <parent>
 #   - versions:set-property       → <dependency><version>${X}</version>
 #   - versions:use-dep-version    → <dependency><version>X-SNAPSHOT</version> literal
-# All goals run with -DgenerateBackupPoms=false (we don't want .versionsBackup
-# files cluttering the worktree; release-plugin will commit the changed POMs).
+# Runs on the release branch — main is untouched.
 step_apply_overrides() {
-  info "Applying overrides"
+  info "Applying overrides (on ${RELEASE_BRANCH})"
   if [[ -z "${OVERRIDES// /}" ]]; then
     ok "no overrides given (project has no io.vidocq.* SNAPSHOT deps to lock)"
     return
   fi
 
-  # Read parent coords from pom.xml directly. `mvn help:evaluate` is unusable
-  # here: under Maven 4, even with -q, the output is interleaved with
-  # `[INFO] [stdout]` lines that pollute the captured value.
   local parent_coords parent_g parent_a
   parent_coords=$(python3 - <<'PY'
 import re, xml.etree.ElementTree as ET
 try:
     text = open('pom.xml', encoding='utf-8').read()
 except FileNotFoundError:
-    print("")
-    raise SystemExit(0)
+    print(""); raise SystemExit(0)
 m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
 if not m:
-    print("")
-    raise SystemExit(0)
+    print(""); raise SystemExit(0)
 ns = m.group(1)
 try:
     root = ET.fromstring(text)
 except ET.ParseError:
-    print("")
-    raise SystemExit(0)
+    print(""); raise SystemExit(0)
 p = root.find(f'{{{ns}}}parent')
 if p is None:
     print("")
@@ -340,11 +455,9 @@ PY
   )
   parent_g="${parent_coords%%$'\t'*}"
   parent_a="${parent_coords##*$'\t'}"
-  # If pom.xml has no <parent>, parent_coords is empty → both empty.
   [[ "$parent_coords" == *$'\t'* ]] || { parent_g=""; parent_a=""; }
   info "  root parent: ${parent_g:-<none>}:${parent_a:-<none>}"
 
-  # Iterate one override at a time. parse_overrides emits TSV "scope\tkey\tv".
   local scope key v g a
   while IFS=$'\t' read -r scope key v; do
     [[ -z "${scope:-}" ]] && continue
@@ -355,17 +468,10 @@ PY
     fi
     info "Override: ${key} → ${v}"
 
-    # 1) Update <parent> if our root parent matches.
-    #    Preferred path: `mvn versions:update-parent` (validates via Maven repos).
-    #    Fallback: direct XML edit of pom.xml's <parent><version> — used when
-    #    the parent version has been UPLOADED but not yet PUBLISHED on Central
-    #    (typical when chaining a release immediately after an upstream one,
-    #    before the operator clicks "Publish" or the propagation completes),
-    #    OR — more subtly — when mvn finishes BUILD SUCCESS without writing
-    #    anything because the requested version is unknown to every configured
-    #    repo and `allowSnapshots=false` made it discard the local SNAPSHOT
-    #    candidate. The plugin treats "no resolvable upgrade" as a no-op, not
-    #    an error, so we have to detect it by re-reading the file.
+    # 1) <parent>. Preferred: versions:update-parent (validates via repos).
+    #    Fallback: direct XML edit when the parent version has been UPLOADED
+    #    but not yet PUBLISHED on Central, OR when mvn silently no-ops because
+    #    `allowSnapshots=false` discarded the only candidate it found.
     if [[ -n "$parent_g" && "$g" == "$parent_g" ]] \
        && { [[ -z "$a" ]] || [[ "$a" == "$parent_a" ]]; }; then
       info "  • <parent> ${parent_g}:${parent_a} → ${v}"
@@ -375,9 +481,6 @@ PY
           -DparentVersion="$v" -DallowSnapshots=false -DgenerateBackupPoms=false 2>&1 | tee "$up_log"
       local up_rc=${PIPESTATUS[0]}
       set -e
-      # Re-read what pom.xml's <parent><version> looks like now. If mvn was a
-      # silent no-op the value is still the original SNAPSHOT and we have to
-      # patch it ourselves.
       local current_v
       current_v=$(python3 - <<'PY'
 import re, xml.etree.ElementTree as ET
@@ -447,12 +550,11 @@ PY
           -DallowSnapshots=false -DgenerateBackupPoms=false
     done < <(detect_props_for_group "$g")
 
-    # 3) Literal <dependency><version>X-SNAPSHOT</version> (rare for Vidocq —
-    #    the convention is property-driven — but we cover it for safety).
+    # 3) Literal <dependency><version>X-SNAPSHOT</version> (rare under Vidocq
+    #    convention but covered for safety).
     local ga
     while IFS= read -r ga; do
       [[ -z "$ga" ]] && continue
-      # If a narrow coord override was given, only patch that specific coord.
       if [[ -n "$a" && "$ga" != "${g}:${a}" ]]; then continue; fi
       info "  • literal <dependency> ${ga} → ${v}"
       mvn -B -ntp ${MVN_NET_FLAGS} versions:use-dep-version \
@@ -464,9 +566,9 @@ PY
   ok "overrides applied"
 }
 
-# Scan for remaining io.vidocq.* SNAPSHOTs (resolved through properties), then
-# ignore self-references (the project's own artifactIds — release-plugin will
-# bump them). Exit 1 with a clear list if anything legitimate remains.
+# Scan for residual io.vidocq.* SNAPSHOTs (resolved through properties).
+# Self-references (this project's own artifactIds) are ignored — they will be
+# flipped by step_set_version_and_commit.
 step_failfast_scan() {
   info "Scanning for residual io.vidocq.* SNAPSHOTs"
   python3 <<'PY' || exit 1
@@ -475,7 +577,6 @@ from pathlib import Path
 
 PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
 
-# Pass 1: own artifactIds (any artifactId declared by a POM in this repo).
 own_aids = set()
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
@@ -496,7 +597,6 @@ for pom in poms:
     aid = root.findtext(f'{{{ns}}}artifactId')
     if aid: own_aids.add(aid)
 
-# Pass 2: detect external io.vidocq.* SNAPSHOTs (literal or via property).
 bad = []
 for pom in poms:
     root, ns = parse(pom)
@@ -520,7 +620,7 @@ for pom in poms:
         for elem in root.iter(tag):
             g, a, v = coord(elem)
             if not g.startswith('io.vidocq'): continue
-            if a in own_aids: continue       # self-reference
+            if a in own_aids: continue
             resolved = resolve(v)
             if resolved.endswith('-SNAPSHOT'):
                 bad.append((str(pom), g, a, v, resolved))
@@ -541,221 +641,174 @@ PY
   ok "no residual io.vidocq.* SNAPSHOTs"
 }
 
-# ---------------------------------------------------------------- 6. commit lock
+# ---------------------------------------------------------------- 7. set_version_and_commit
 
-step_commit_lock() {
-  info "Committing lock (if any change)"
-  if [[ -z "$(git status --porcelain)" ]]; then
-    ok "no lock needed (no POM changes)"
-    return
-  fi
-  git add -A
-  git commit -m "release: lock io.vidocq.* deps for ${RELEASE_VERSION}"
-  git push origin main
-  ok "lock commit pushed"
-}
-
-# ---------------------------------------------------------------- 7. manual release
-
-# Replace maven-release-plugin (3.1.1 is Model-4.0 only — it crashes on Model
-# 4.1 implicit-version inheritance with NPE during rewrite-poms-for-release)
-# by driving the release lifecycle ourselves:
-#
-#   1. versions:set to RELEASE_VERSION (processAllModules covers Model 4.1
-#      submodules that omit <version>)
-#   2. commit "release: $v" + lightweight tag "v$v" — LOCAL ONLY at this point
-#   3. mvn -P release clean deploy — central-publishing-maven-plugin signs
-#      and uploads the bundle, autoPublish forwarded as the workflow input
-#   4. push main + tag (only on deploy success → a failed upload leaves no
-#      published tag pointing to an unshippable revision)
-#   5. versions:set to NEXT_DEV_VERSION, commit "release: prepare next dev
-#      iteration $next", push
-#
-# If deploy fails, the local commit and tag are rolled back and the worktree
-# is reset so the workflow can be retried without manual cleanup.
-step_release_manual() {
-  info "Manual release (versions:set + tag + deploy + bump-next)"
-  export GPG_TTY=$(tty || echo /dev/null)
-
-  local pre_release_sha
-  pre_release_sha=$(git rev-parse HEAD)
-
-  # 1. Flip every reactor module to RELEASE_VERSION. -DprocessAllModules=true
-  #    is critical under Model 4.1 where submodules omit <version> entirely
-  #    — without it versions:set only touches the root pom.
-  info "  → versions:set ${RELEASE_VERSION}"
+# Flip every reactor module to RELEASE_VERSION and commit on the release branch.
+# -DprocessAllModules=true is critical under Model 4.1: submodules whose
+# <parent> declares an implicit version (no <version> tag) are skipped by
+# versions:set without it.
+step_set_version_and_commit() {
+  info "Setting reactor version to ${RELEASE_VERSION}"
   mvn -B -ntp ${MVN_NET_FLAGS} versions:set \
       -DnewVersion="${RELEASE_VERSION}" \
       -DprocessAllModules=true \
       -DgenerateBackupPoms=false
 
-  # 2. Local commit + tag. Push deferred until the deploy succeeds.
-  info "  → git commit + tag v${RELEASE_VERSION}"
-  git add -A
-  git commit -m "release: ${RELEASE_VERSION}"
-  git tag -a "v${RELEASE_VERSION}" -m "Release ${RELEASE_VERSION}"
-
-  # 3. Two-pass build.
-  #    Pass 1: `clean install` WITHOUT the release profile. Vanilla reactor
-  #    order (topological) → every consumer sees its producer's artifact in
-  #    ~/.m2 before it builds. Tests run here.
-  #    Pass 2: `deploy -P release -Dmaven.install.skip=true`. Activates
-  #    central-publishing-maven-plugin to sign + bundle + upload. v0.10.0
-  #    reorders the reactor (so the root pom collects everything for the
-  #    aggregated bundle); since every <dependency> already resolves from
-  #    the populated ~/.m2, the reorder no longer breaks inter-module
-  #    resolution. Tests are skipped — already covered in pass 1.
-  info "  → pass 1/2: install each module in <modules> declaration order"
-  # Maven 4 RC-5 + Model 4.1 mis-sorts the reactor DAG (consumers scheduled
-  # before producers), breaking inter-module compile resolution. Walk every
-  # parent's <modules> tree depth-first — that order is already topological
-  # by Vidocq convention (the maintainer lists producers before consumers)
-  # — and run an isolated `mvn -N` build in each module so ~/.m2 fills up
-  # linearly. -N skips re-recursion into <modules> (each call handles a
-  # single POM).
-  local modules_in_order
-  modules_in_order=$(python3 - <<'PY'
-import re, xml.etree.ElementTree as ET
-from pathlib import Path
-
-def parse(pom):
-    text = pom.read_text(encoding='utf-8', errors='replace')
-    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
-    if not m: return None, None
-    ns = m.group(1)
-    try:
-        return ET.parse(pom).getroot(), ns
-    except ET.ParseError:
-        return None, None
-
-def walk(pom_path, out, seen):
-    p = pom_path.resolve()
-    if p in seen: return
-    seen.add(p)
-    root, ns = parse(pom_path)
-    if root is None: return
-    out.append(str(pom_path.parent))
-    modules_el = root.find(f'{{{ns}}}modules')
-    if modules_el is None: return
-    for m in modules_el.findall(f'{{{ns}}}module'):
-        sub = (m.text or '').strip()
-        if not sub: continue
-        sub_pom = pom_path.parent / sub / 'pom.xml'
-        if sub_pom.exists():
-            walk(sub_pom, out, seen)
-
-ordered = []
-walk(Path('pom.xml'), ordered, set())
-for d in ordered: print(d)
-PY
-)
-  set +e
-  local install_rc=0
-  local module_dir rel
-  while IFS= read -r module_dir; do
-    [[ -z "$module_dir" ]] && continue
-    rel="${module_dir#./}"
-    [[ "$rel" == "." || -z "$rel" ]] && rel="<root>"
-    info "    • install ${rel}"
-    ( cd "$module_dir" && mvn -B -ntp ${MVN_NET_FLAGS} -N clean install )
-    install_rc=$?
-    [[ "$install_rc" != "0" ]] && break
-  done <<< "$modules_in_order"
-  set -e
-  if [[ "$install_rc" != "0" ]]; then
-    info "  ↻ install failed — rolling back local commit + tag (nothing was pushed)"
-    git tag -d "v${RELEASE_VERSION}" >/dev/null 2>&1 || true
-    git reset --hard "${pre_release_sha}" >/dev/null
-    die "install failed (rc=${install_rc}) — local commit/tag undone, tree restored to ${pre_release_sha}"
+  if [[ -z "$(git status --porcelain)" ]]; then
+    info "no POM changes — versions:set was a no-op"
+  else
+    info "Committing on ${RELEASE_BRANCH}"
+    git add -A
+    git commit -m "release: ${RELEASE_VERSION}"
   fi
 
-  info "  → pass 2/2: mvn -P${RELEASE_PROFILE} deploy (sign + central-publishing, autoPublish=${AUTO_PUBLISH})"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    info "DRY-RUN: branch ${RELEASE_BRANCH} kept LOCAL (not pushed)"
+    return 0
+  fi
+
+  info "Pushing ${RELEASE_BRANCH} to origin"
+  git push -u origin "${RELEASE_BRANCH}"
+  ok "${RELEASE_BRANCH} pushed"
+}
+
+# ---------------------------------------------------------------- 8. validate_build
+
+# Build the full reactor to validate the release-locked POMs. Try the standard
+# reactor first; if Maven 4 RC-5 mis-orders the DAG (consumers scheduled before
+# producers — visible as `Could not find artifact io.vidocq.*`), fall back to a
+# module-by-module install in <modules> declaration order.
+step_validate_build() {
+  info "Validating build (reactor first)"
+  local log
+  log=$(mktemp)
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" deploy \
+  mvn -B -ntp ${MVN_NET_FLAGS} clean install -DskipTests 2>&1 | tee "$log"
+  local rc=${PIPESTATUS[0]}
+  set -e
+
+  if [[ "$rc" == "0" ]]; then
+    rm -f "$log"
+    ok "build OK (reactor)"
+    return 0
+  fi
+
+  if grep -q 'Could not find artifact io.vidocq' "$log"; then
+    info "↻ DAG reorder detected — falling back to module-by-module install"
+    rm -f "$log"
+    if _install_modules_in_declaration_order; then
+      ok "build OK (module-by-module fallback)"
+      return 0
+    fi
+    die "module-by-module install failed too — real compile/test error"
+  fi
+  rm -f "$log"
+  die "reactor build failed (rc=${rc}) — not a DAG reorder, real error in the logs above"
+}
+
+# ---------------------------------------------------------------- 9. deploy
+
+# Real release: `mvn -P release deploy -pl !X,!Y,!Z` with central-publishing
+# bundling and signing everything. Pass 1 (validate_build) populated ~/.m2 so
+# central-publishing's reactor reorder no longer breaks dependency resolution.
+#
+# DRY_RUN: replaced by `mvn verify`. Signs and bundles locally, never uploads.
+step_deploy() {
+  export GPG_TTY=$(tty || echo /dev/null)
+  local pl_args
+  pl_args=$(_build_excluded_pl_args)
+  local pl_flag=""
+  [[ -n "$pl_args" ]] && pl_flag="-pl ${pl_args}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    info "DRY-RUN: mvn -P${RELEASE_PROFILE} verify ${pl_flag} (sign + bundle, NO upload)"
+    set +e
+    mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" verify ${pl_flag} \
+        -DskipTests \
+        -Dmaven.install.skip=true \
+        -Dgpg.passphrase="${GPG_PASSPHRASE}" \
+        -Dgpg.keyname="${GPG_KEY_ID}" \
+        -Dcentral.publishing.autoPublish=false
+    local rc=$?
+    set -e
+    if [[ "$rc" != "0" ]]; then
+      die "DRY-RUN verify failed (rc=${rc}) — nothing was pushed, branch ${RELEASE_BRANCH} stays local"
+    fi
+    info "Bundle artifacts (target/central-publishing or target/checkout):"
+    find . -path '*/target/central-publishing*' -name '*.zip' -print 2>/dev/null | head -20 || true
+    find . -path '*/target/*.asc' -print 2>/dev/null | head -10 || true
+    ok "DRY-RUN deploy complete — POMs signed, bundle generated, NOT uploaded"
+    return 0
+  fi
+
+  info "mvn -P${RELEASE_PROFILE} deploy ${pl_flag} (autoPublish=${AUTO_PUBLISH})"
+  set +e
+  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" deploy ${pl_flag} \
       -DskipTests \
       -Dmaven.install.skip=true \
       -Dgpg.passphrase="${GPG_PASSPHRASE}" \
       -Dgpg.keyname="${GPG_KEY_ID}" \
       -Dcentral.publishing.autoPublish="${AUTO_PUBLISH}"
-  local deploy_rc=$?
+  local rc=$?
   set -e
-  if [[ "$deploy_rc" != "0" ]]; then
-    info "  ↻ deploy failed — rolling back local commit + tag (nothing was pushed)"
-    git tag -d "v${RELEASE_VERSION}" >/dev/null 2>&1 || true
-    git reset --hard "${pre_release_sha}" >/dev/null
-    die "deploy failed (rc=${deploy_rc}) — local commit/tag undone, tree restored to ${pre_release_sha}"
+  if [[ "$rc" != "0" ]]; then
+    info "↻ deploy failed — branch ${RELEASE_BRANCH} stays on remote as evidence; main is untouched"
+    info "↻ inspect, delete the branch (local + remote), retry the workflow"
+    die "deploy failed (rc=${rc}) — no tag, no main bump, no Slack release-success"
+  fi
+  ok "deploy complete"
+}
+
+# ---------------------------------------------------------------- 10. tag + finalize
+
+# Tag v${RELEASE_VERSION} on the release branch HEAD. On a real run: push the
+# tag, switch back to main, bump main to NEXT_DEV_VERSION, push main.
+# On a dry run: tag locally only; main is never touched, branch stays local.
+step_tag_and_finalize() {
+  info "Tagging v${RELEASE_VERSION} on ${RELEASE_BRANCH}"
+  git tag -a "v${RELEASE_VERSION}" -m "Release ${RELEASE_VERSION}"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    info "DRY-RUN: tag v${RELEASE_VERSION} kept LOCAL (not pushed)"
+    info "DRY-RUN: main NOT bumped; branch ${RELEASE_BRANCH} stays local"
+    ok "DRY-RUN finalize complete"
+    return 0
   fi
 
-  # 4. Publish the release commit + tag.
-  info "  → git push main + tag v${RELEASE_VERSION}"
-  git push origin main
+  info "Pushing tag v${RELEASE_VERSION}"
   git push origin "v${RELEASE_VERSION}"
 
-  # 5. Bump to NEXT_DEV_VERSION and push.
-  info "  → versions:set ${NEXT_DEV_VERSION}"
+  info "Switching back to main to bump dev version"
+  git checkout main
   mvn -B -ntp ${MVN_NET_FLAGS} versions:set \
       -DnewVersion="${NEXT_DEV_VERSION}" \
       -DprocessAllModules=true \
       -DgenerateBackupPoms=false
-  git add -A
-  git commit -m "release: prepare next dev iteration ${NEXT_DEV_VERSION}"
-  git push origin main
 
-  ok "manual release completed (released ${RELEASE_VERSION}, next dev ${NEXT_DEV_VERSION})"
-}
-
-# Dry-run: run `mvn -P release verify` to exercise the full build + signing +
-# bundle generation pipeline WITHOUT committing, tagging, pushing, or uploading
-# anything. The central-publishing-maven-plugin places the bundle under
-# target/central-publishing/ — we list it to make the result visible.
-step_dryrun_verify() {
-  info "DRY-RUN: mvn -P release verify (no commit, no upload)"
-  export GPG_TTY=$(tty || echo /dev/null)
-
-  # Bump the project version transiently so the bundle is generated with the
-  # release version, then restore before exit. We use versions:set so submodules
-  # follow. We do NOT commit any of this.
-  mvn -B -ntp ${MVN_NET_FLAGS} versions:set -DnewVersion="${RELEASE_VERSION}" -DgenerateBackupPoms=true
-
-  # `clean verify` (not just `verify`): mvn-plugin descriptors and other
-  # generated metadata embedded into JARs read from target/ left over from
-  # earlier compiles, which still reference the pre-set version
-  # (vauban-maven-plugin failed the first dry-run with
-  #  "Plugin's descriptor contains the wrong version: 0.1.0-SNAPSHOT"
-  #  for /…/vauban-maven-plugin-0.1.0.jar). A clean before verify is the
-  # standard fix and matches what maven-release-plugin's preparationGoals
-  # already does for the real release path.
-  set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} -P "${RELEASE_PROFILE}" clean verify \
-      -Dgpg.passphrase="${GPG_PASSPHRASE}" \
-      -Dgpg.keyname="${GPG_KEY_ID}" \
-      -Dcentral.publishing.autoPublish=false
-  local rc=$?
-  set -e
-
-  # Restore POMs (whether verify succeeded or not).
-  mvn -B -ntp ${MVN_NET_FLAGS} versions:revert >/dev/null 2>&1 || true
-
-  if [[ "$rc" != "0" ]]; then
-    die "DRY-RUN failed during mvn verify (rc=$rc) — POMs restored, nothing pushed"
+  if [[ -n "$(git status --porcelain)" ]]; then
+    git add -A
+    git commit -m "post-release: bump to ${NEXT_DEV_VERSION}"
+    git push origin main
+    ok "main bumped to ${NEXT_DEV_VERSION} and pushed"
+  else
+    info "main already at ${NEXT_DEV_VERSION} — nothing to commit"
   fi
-
-  info "Bundle artifacts (target/central-publishing or target/checkout):"
-  find . -path '*/target/central-publishing*' -name '*.zip' -print 2>/dev/null | head -20 || true
-  find . -path '*/target/*.asc' -print 2>/dev/null | head -10 || true
-  ok "DRY-RUN complete — POMs restored, no git or registry side-effects"
 }
 
-# ---------------------------------------------------------------- 8. wait Central
+# ---------------------------------------------------------------- 11. wait Central
 
-# Enumerate (groupId, artifactId) for every module that is actually deployable
-# (skip <maven.deploy.skip>true</maven.deploy.skip> + <packaging>pom</packaging>
-# for the root if it's not in distributionManagement -- but vidocq-parent IS pom
-# and IS deployed, so we keep pom-packaged modules).
+# Enumerate (groupId, artifactId) for every reactor module that is deployable
+# AND not in EXCLUDED_MODULES. Honors <maven.deploy.skip>true</maven.deploy.skip>.
 list_deployable_coords() {
-  python3 <<'PY'
-import re, xml.etree.ElementTree as ET
+  EXCLUDED_MODULES="${EXCLUDED_MODULES:-}" python3 <<'PY'
+import os, re, xml.etree.ElementTree as ET
 from pathlib import Path
+
+excluded = set()
+for line in (os.environ.get('EXCLUDED_MODULES') or '').splitlines():
+    line = line.strip()
+    if line and not line.startswith('#'):
+        excluded.add(line)
 
 def text(pom):
     return pom.read_text(encoding='utf-8', errors='replace')
@@ -765,7 +818,6 @@ def ns(pom):
     return m.group(1) if m else 'http://maven.apache.org/POM/4.0.0'
 
 def skip_deploy(root, ns_):
-    # honor <maven.deploy.skip>true</maven.deploy.skip> in <properties>
     p = root.find(f'{{{ns_}}}properties')
     if p is None: return False
     v = p.findtext(f'{{{ns_}}}maven.deploy.skip')
@@ -789,18 +841,24 @@ for pom in Path('.').rglob('pom.xml'):
         continue
     if skip_deploy(root, n):
         continue
-    g = resolve_g(root, n)
     a = root.findtext(f'{{{n}}}artifactId') or ''
+    if a in excluded:
+        continue
+    g = resolve_g(root, n)
     if g and a:
         print(f"{g}:{a}")
 PY
 }
 
 step_wait_central() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    info "DRY-RUN: skipping wait-for-Central (nothing was uploaded)"
+    return 0
+  fi
   if [[ "$AUTO_PUBLISH" != "true" ]]; then
     info "Skipping wait-for-Central (AUTO_PUBLISH=false → bundle awaiting manual Publish on the Portal)"
     info "  → Go to: https://central.sonatype.com/publishing/deployments"
-    info "  → Locate the deployment for io.vidocq:* version ${RELEASE_VERSION}, click Publish."
+    info "  → Locate the deployment for ${RELEASE_VERSION}, click Publish."
     info "  → Then verify https://repo1.maven.org/maven2/io/vidocq/... after ~15-30 min."
     return 0
   fi
@@ -848,29 +906,20 @@ main() {
   step_write_settings
   step_import_gpg
   step_reroute_ssh
+  step_branch_create
   step_apply_overrides
   step_failfast_scan
+  step_set_version_and_commit
+  step_validate_build
+  step_deploy
+  step_tag_and_finalize
+  step_wait_central
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    # Dry-run path: never touches git, never uploads. The overrides have been
-    # applied in-memory in working tree (they were going to be commit_locked
-    # anyway in a real run) — that's fine for the verify because we revert
-    # the version with versions:revert right after, but we should NOT push.
-    # Reset the override changes to leave the working tree exactly as it was.
-    if ! git diff --quiet; then
-      info "DRY-RUN: reverting in-tree override changes (they would have been committed in a real run)"
-      git checkout -- . 2>/dev/null || true
-      git clean -fd 2>/dev/null || true
-    fi
-    step_dryrun_verify
-    ok "DRY-RUN ${RELEASE_VERSION} complete (no commit, no upload, no tag)"
-    return 0
+    ok "DRY-RUN ${RELEASE_VERSION} complete — no push, no upload, main untouched"
+  else
+    ok "Release ${RELEASE_VERSION} complete"
   fi
-
-  step_commit_lock
-  step_release_manual
-  step_wait_central
-  ok "Release ${RELEASE_VERSION} complete"
 }
 
 main "$@"

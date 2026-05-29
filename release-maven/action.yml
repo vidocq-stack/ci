@@ -1,8 +1,14 @@
 name: 'Release to Maven Central'
 description: |
-  Orchestrate a full Maven Central release: lock io.vidocq.* SNAPSHOTs via overrides,
-  fail-fast if any remain, run maven-release-plugin (prepare + perform), and block until
-  every deployable artifact is visible on repo1.maven.org.
+  Orchestrate a full Maven Central release on a dedicated `release/{version}` branch:
+  lock io.vidocq.* SNAPSHOTs via overrides, fail-fast if any remain, set the release
+  version, build, deploy via central-publishing (with optional module exclusions),
+  tag, bump main to the next dev version, and block until every deployable artifact
+  is visible on repo1.maven.org.
+
+  Main is never moved before the deploy succeeds — a failed release leaves main bit-for-bit
+  identical to its pre-release state, with the `release/{version}` branch on the remote
+  as the audit trail.
 
   Caller must have already checked out the repo with fetch-depth: 0 and a token capable
   of pushing tags + commits (typically secrets.VIDOCQ_BOT_TOKEN).
@@ -20,6 +26,15 @@ inputs:
       One per line. Used to lock io.vidocq.* SNAPSHOT deps (incl. <parent>) to their
       release versions. Leave empty for projects with no inter-project SNAPSHOT deps
       (e.g. vidocq-parent itself).
+    required: false
+    default: ''
+  excluded-modules:
+    description: |
+      Newline-separated list of reactor module artifactIds to EXCLUDE from `mvn deploy`
+      (typically: examples, TCK runners, test suites — modules that compile and validate
+      the project but are not meant to land on Maven Central). Passed verbatim to
+      `mvn -pl !a,!b,!c` during the deploy step. Empty (default) → every reactor module
+      is deployed.
     required: false
     default: ''
   central-username:
@@ -40,18 +55,19 @@ inputs:
   bot-token:
     description: |
       Codeberg/Forgejo token with push access to the project repo (secrets.VIDOCQ_BOT_TOKEN).
-      Required: maven-release-plugin runs `git push <developerConnection>` which is
-      ssh://git@codeberg.org/... in the canonical POMs. The runner has no SSH key
-      for Codeberg, so we re-route SSH→HTTPS+token using `git config insteadOf`.
+      Required: the release script pushes the `release/{version}` branch, the `v{version}`
+      tag, and the post-release `main` bump. POMs declare ssh://git@codeberg.org/... as
+      developerConnection; the runner has no SSH key for Codeberg, so we re-route
+      SSH→HTTPS+token using `git config insteadOf`.
     required: true
   bot-name:
-    description: 'Git author name for the lock + bump commits'
+    description: 'Git author name for the release + bump commits'
     default: 'Vidocq CI Bot'
   bot-email:
-    description: 'Git author email for the lock + bump commits'
+    description: 'Git author email for the release + bump commits'
     default: 'ci@vidocq.dev'
   release-profile:
-    description: 'Maven profile activated during release:perform (must publish via central-publishing)'
+    description: 'Maven profile activated during the deploy step (must publish via central-publishing)'
     default: 'release'
   wait-timeout-seconds:
     description: 'Max seconds to wait for Central propagation (per artifact). Default 3600 (60 min).'
@@ -61,10 +77,10 @@ inputs:
     default: '60'
   dry-run:
     description: |
-      "true" → skip release:prepare/perform; instead run `mvn -P release verify`
-      to validate the build, signing, and bundle generation without committing,
-      tagging, pushing, or uploading anything to Central. Useful as a smoke test
-      before the real release.
+      "true" → run the full pipeline locally on the release/{version} branch (POM mutations,
+      version bump, build, sign + bundle via `mvn verify`) but DO NOT push the branch, DO NOT
+      push the tag, DO NOT upload to Central, DO NOT touch main. Useful as a smoke test before
+      the real release.
     default: 'false'
   auto-publish:
     description: |
@@ -119,6 +135,7 @@ runs:
         RELEASE_VERSION:       ${{ inputs.release-version }}
         NEXT_DEV_VERSION:      ${{ inputs.next-dev-version }}
         OVERRIDES:             ${{ inputs.overrides }}
+        EXCLUDED_MODULES:      ${{ inputs.excluded-modules }}
         CENTRAL_USERNAME:      ${{ inputs.central-username }}
         CENTRAL_PASSWORD:      ${{ inputs.central-password }}
         GPG_PRIVATE_KEY:       ${{ inputs.gpg-private-key }}
