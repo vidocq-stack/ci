@@ -28,7 +28,7 @@ The workflow that uses this action must:
 | Name | Required | Default | Description |
 |---|---|---|---|
 | `release-version` | ✅ | — | e.g. `1.0.0`, `0.1.0`. Must not end with `-SNAPSHOT`. |
-| `next-dev-version` | ✅ | — | e.g. `0.2.0-SNAPSHOT`. Must end with `-SNAPSHOT`. |
+| `next-dev-version` | ✅ | — | e.g. `0.2.0`. The script auto-appends `-SNAPSHOT` (a value already ending with `-SNAPSHOT` is kept as-is for backward compatibility). |
 | `overrides` | ❌ | `''` | Multiline. Each line is either `groupId=version` (the whole upstream "family" — recommended) or `groupId:artifactId=version` (narrow override). The script auto-patches `<version>` elements and properties (`${X.version}`) alike. Empty for `vidocq-parent`. |
 | `central-username` | ✅ | — | `secrets.CENTRAL_USERNAME` |
 | `central-password` | ✅ | — | `secrets.CENTRAL_PASSWORD` |
@@ -80,7 +80,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:  { description: "e.g. 0.1.0",          required: true }
-      next_dev_version: { description: "e.g. 0.2.0-SNAPSHOT", required: true }
+      next_dev_version: { description: "Next dev version WITHOUT -SNAPSHOT (e.g. 0.2.0)", required: true }
       parent_release:   { description: "io.vidocq:vidocq-parent stable version (must be on Central)", required: true }
 
 jobs:

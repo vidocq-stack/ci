@@ -18,7 +18,7 @@ inputs:
     description: 'Release version (e.g. 1.0.0, 0.1.0). Without -SNAPSHOT.'
     required: true
   next-dev-version:
-    description: 'Next development version (e.g. 0.2.0-SNAPSHOT). Must end with -SNAPSHOT.'
+    description: 'Next development version, WITHOUT -SNAPSHOT (e.g. 0.2.0). The script appends -SNAPSHOT automatically.'
     required: true
   overrides:
     description: |

@@ -133,7 +133,7 @@ on:
         type: string
         required: true
       next_dev_version:
-        description: "Next dev version (e.g. 0.2.0-SNAPSHOT). Must end with -SNAPSHOT."
+        description: "Next dev version WITHOUT -SNAPSHOT (e.g. 0.2.0); the release action appends -SNAPSHOT automatically."
         type: string
         required: true
       dry_run:

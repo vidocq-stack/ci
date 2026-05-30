@@ -173,8 +173,16 @@ step_precheck() {
 
   [[ "$RELEASE_VERSION" != *-SNAPSHOT ]] \
     || die "RELEASE_VERSION must not end with -SNAPSHOT, got '$RELEASE_VERSION'"
-  [[ "$NEXT_DEV_VERSION" == *-SNAPSHOT ]] \
-    || die "NEXT_DEV_VERSION must end with -SNAPSHOT, got '$NEXT_DEV_VERSION'"
+
+  # NEXT_DEV_VERSION is entered without -SNAPSHOT (e.g. "0.2.0"). Append it
+  # here so downstream steps (versions:set, commit message, log line) all see
+  # the same -SNAPSHOT-suffixed value. Tolerate operators who add it anyway.
+  if [[ "$NEXT_DEV_VERSION" == *-SNAPSHOT ]]; then
+    info "NEXT_DEV_VERSION already carries -SNAPSHOT, keeping as-is"
+  else
+    NEXT_DEV_VERSION="${NEXT_DEV_VERSION}-SNAPSHOT"
+    info "Appended -SNAPSHOT → NEXT_DEV_VERSION=${NEXT_DEV_VERSION}"
+  fi
 
   local branch dirty untracked tracked
   branch=$(git symbolic-ref --short HEAD)
