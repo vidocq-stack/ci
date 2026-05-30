@@ -42,7 +42,11 @@
 # Isolation guarantee:
 # - main never moves before deploy succeeds. If anything fails between step 5
 #   and step 9, main is bit-for-bit identical to its pre-release state.
-# - release/${RELEASE_VERSION} stays forever as the audit trail and hotfix base.
+# - If the Central upload fails (step 9), the release/${RELEASE_VERSION} branch
+#   is destroyed automatically on both local and remote so the next attempt
+#   starts from a clean slate. The Maven build log is the only evidence kept.
+# - On deploy SUCCESS, release/${RELEASE_VERSION} stays as the audit trail and
+#   hotfix base.
 
 set -euo pipefail
 
@@ -768,9 +772,17 @@ step_deploy() {
   local rc=$?
   set -e
   if [[ "$rc" != "0" ]]; then
-    info "↻ deploy failed — branch ${RELEASE_BRANCH} stays on remote as evidence; main is untouched"
-    info "↻ inspect, delete the branch (local + remote), retry the workflow"
-    die "deploy failed (rc=${rc}) — no tag, no main bump, no Slack release-success"
+    info "↻ deploy failed (rc=${rc}) — destroying release branch ${RELEASE_BRANCH} (local + remote)"
+    info "↻ main is untouched ; the Maven build log above is the only evidence kept"
+    # Switch off the branch so we can delete it. Use main as the safe parking spot.
+    git checkout main 2>/dev/null || true
+    git branch -D "${RELEASE_BRANCH}" 2>/dev/null && info "  - local branch deleted" || info "  - local branch not present (already gone)"
+    if git push origin --delete "${RELEASE_BRANCH}" 2>&1; then
+      info "  - remote branch deleted on origin"
+    else
+      info "  - remote branch delete failed (possibly already gone or never pushed)"
+    fi
+    die "deploy failed (rc=${rc}) — release branch destroyed, no tag, no main bump, no Slack release-success"
   fi
   ok "deploy complete"
 }
