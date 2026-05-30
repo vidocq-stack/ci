@@ -15,7 +15,7 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 
 | Action | Purpose | Notable inputs (all overridable) |
 |--------|---------|----------------------------------|
-| `setup-maven` | Install Temurin + Maven, put them on the PATH | `java-version` (25), `maven-version` (4.0.0-rc-5), `distribution` (temurin), `cache` (maven) |
+| `setup-maven` | Install Temurin + Maven, put them on the PATH | `java-version` (25), `maven-version` (3.9.16), `distribution` (temurin), `cache` (maven) |
 | `run-tck` | Run a Maven TCK, or a custom shell script | `command` (custom shell, wins), `module` (-pl), `profile` (tck), `pre-install` (true), `maven-args` (-B -ntp) |
 | `notify-slack` | `[ViBot]` Slack notification | `webhook-url` (required), `status` (success/failure/pr-open/pr-merged/pr-validated/release-success/release-failure), plus repo/ref/run-url and commit/PR/release fields. `dry-run: true` renders a big "🧪 DRY RUN 🧪" Block Kit header so the channel sees at a glance that nothing real happened. |
 | `deploy-maven` | settings.xml + GPG import + Central deploy (SNAPSHOT/RELEASE by version) | `central-username`, `central-password`, `gpg-private-key`, `gpg-passphrase`, `snapshot-profile`, `release-profile` |

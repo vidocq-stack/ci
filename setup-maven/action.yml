@@ -9,8 +9,8 @@ inputs:
     description: 'JDK distribution passed to setup-java'
     default: 'temurin'
   maven-version:
-    description: 'Maven version to install (e.g. 4.0.0-rc-5 or 3.9.9; the major prefix selects maven-3/ vs maven-4/)'
-    default: '4.0.0-rc-5'
+    description: 'Maven version to install (e.g. 3.9.16 or 4.0.0-rc-5; the major prefix selects maven-3/ vs maven-4/)'
+    default: '3.9.16'
   cache:
     description: 'setup-java dependency cache (maven, gradle, sbt... or empty to disable)'
     default: 'maven'

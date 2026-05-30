@@ -95,7 +95,7 @@ inputs:
     default: '25'
   maven-version:
     description: 'Maven version (used in https://dlcdn.apache.org/maven/maven-${major}/${version}/binaries/)'
-    default: '4.0.0-rc-5'
+    default: '3.9.16'
 
 runs:
   using: composite
