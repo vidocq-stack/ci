@@ -588,12 +588,13 @@ PY
 # Self-references (this project's own artifactIds) are ignored — they will be
 # flipped by step_set_version_and_commit.
 step_failfast_scan() {
-  info "Scanning for residual io.vidocq.* SNAPSHOTs"
+  info "Scanning for residual io.vidocq.* SNAPSHOTs (and banning fr.vidocq.* legacy coords)"
   python3 <<'PY' || exit 1
 import re, sys, xml.etree.ElementTree as ET
 from pathlib import Path
 
 PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+LEGACY_GROUP_RE = re.compile(r'^fr\.vidocq(\..+)?$')
 
 own_aids = set()
 def parse(pom):
@@ -616,6 +617,7 @@ for pom in poms:
     if aid: own_aids.add(aid)
 
 bad = []
+legacy = []
 for pom in poms:
     root, ns = parse(pom)
     if root is None: continue
@@ -637,11 +639,25 @@ for pom in poms:
     for tag in (f'{{{ns}}}parent', f'{{{ns}}}dependency'):
         for elem in root.iter(tag):
             g, a, v = coord(elem)
+            # Ban legacy fr.vidocq.* coords outright: they were renamed to
+            # io.vidocq.* on Central, so anything still under fr.vidocq.* would
+            # publish an unresolvable dependency. Flag every occurrence (not
+            # just SNAPSHOT ones) so the maintainer sees the full picture.
+            if LEGACY_GROUP_RE.match(g):
+                legacy.append((str(pom), g, a, v))
+                continue
             if not g.startswith('io.vidocq'): continue
             if a in own_aids: continue
             resolved = resolve(v)
             if resolved.endswith('-SNAPSHOT'):
                 bad.append((str(pom), g, a, v, resolved))
+
+if legacy:
+    print("❌ Legacy fr.vidocq.* groupIds detected — these coords no longer exist on Maven Central:", file=sys.stderr)
+    for pom, g, a, v in legacy:
+        print(f"  - {g}:{a} (version {v or '<inherited>'}) in {pom}", file=sys.stderr)
+    print("\nUpdate every <groupId>fr.vidocq.*</groupId> to <groupId>io.vidocq.*</groupId> in the affected POMs.", file=sys.stderr)
+    sys.exit(1)
 
 if bad:
     print("❌ Residual io.vidocq.* SNAPSHOTs — provide overrides for these:", file=sys.stderr)
@@ -654,9 +670,9 @@ if bad:
     print("    <groupId>=<stable-version>             # all artifacts of that groupId", file=sys.stderr)
     print("    <groupId>:<artifactId>=<stable-version> # narrow override", file=sys.stderr)
     sys.exit(1)
-print("  no io.vidocq.* SNAPSHOTs remain")
+print("  no io.vidocq.* SNAPSHOTs remain, no fr.vidocq.* legacy coords")
 PY
-  ok "no residual io.vidocq.* SNAPSHOTs"
+  ok "no residual io.vidocq.* SNAPSHOTs, no fr.vidocq.* legacy coords"
 }
 
 # ---------------------------------------------------------------- 7. set_version_and_commit
