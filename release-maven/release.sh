@@ -607,8 +607,33 @@ def parse(pom):
     except ET.ParseError:
         return None, None
 
-poms = [p for p in Path('.').rglob('pom.xml')
-        if not any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in p.parts)]
+# Walk <modules> from the root POM. Off-reactor POMs (Model 4.0.0 standalone
+# TCK runners — champollion-tck, cassini-tck, foy-tck, …) are NOT listed in any
+# <modules>, so they're skipped: they never reach Maven Central, so their
+# SNAPSHOT deps must not gate the release. Previously we used rglob('pom.xml')
+# which dragged them in and blocked champollion 0.1.0 at the fail-fast scan.
+def walk_reactor(root_pom):
+    seen = set()
+    ordered = []
+    def visit(pom_path):
+        p = pom_path.resolve()
+        if p in seen: return
+        seen.add(p)
+        root, ns = parse(pom_path)
+        if root is None: return
+        ordered.append(pom_path)
+        modules_el = root.find(f'{{{ns}}}modules')
+        if modules_el is None: return
+        for m in modules_el.findall(f'{{{ns}}}module'):
+            sub = (m.text or '').strip()
+            if not sub: continue
+            sub_pom = pom_path.parent / sub / 'pom.xml'
+            if sub_pom.exists():
+                visit(sub_pom)
+    visit(root_pom)
+    return ordered
+
+poms = walk_reactor(Path('pom.xml'))
 
 # Pre-pass: own artifactIds + reactor-wide property table. Child modules
 # routinely reference ${X.version} defined only in the root POM; without

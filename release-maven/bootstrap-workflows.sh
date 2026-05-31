@@ -60,14 +60,40 @@ def parse(pom):
     except ET.ParseError:
         return None, None
 
+# Walk <modules> depth-first from the root POM. Off-reactor POMs (e.g. the
+# Model 4.0.0 standalone TCK runners — champollion-tck, cassini-tck, foy-tck
+# etc.) are NOT in any <modules>, so they're ignored: they never reach Maven
+# Central, so their SNAPSHOT deps shouldn't gate the release.
+def walk_reactor(root_pom):
+    seen = set()
+    ordered = []
+    def visit(pom_path):
+        p = pom_path.resolve()
+        if p in seen: return
+        seen.add(p)
+        root, ns = parse(pom_path)
+        if root is None: return
+        ordered.append(pom_path)
+        modules_el = root.find(f'{{{ns}}}modules')
+        if modules_el is None: return
+        for m in modules_el.findall(f'{{{ns}}}module'):
+            sub = (m.text or '').strip()
+            if not sub: continue
+            sub_pom = pom_path.parent / sub / 'pom.xml'
+            if sub_pom.exists():
+                visit(sub_pom)
+    visit(root_pom)
+    return ordered
+
+reactor_poms = walk_reactor(project / 'pom.xml')
+
 # Pass 1: collect own artifactIds AND merge every <properties> block across
 # the reactor into a global table. Child modules routinely reference
 # ${vauban.version} (etc.) defined only in the root POM; without this merge,
 # `resolve()` on the child returns '' and a real SNAPSHOT slips by undetected.
 # Local overrides still win when present (see `props` lookup below).
 global_props = {}
-for pom in project.rglob('pom.xml'):
-    if any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in pom.parts): continue
+for pom in reactor_poms:
     root, ns = parse(pom)
     if root is None: continue
     aid = root.findtext(f'{{{ns}}}artifactId')
@@ -81,8 +107,7 @@ for pom in project.rglob('pom.xml'):
 # Pass 2: build a per-POM property map (local overrides global), then walk
 # parent + dependency coords.
 PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
-for pom in project.rglob('pom.xml'):
-    if any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in pom.parts): continue
+for pom in reactor_poms:
     root, ns = parse(pom)
     if root is None: continue
     props = dict(global_props)   # start from reactor-wide table
