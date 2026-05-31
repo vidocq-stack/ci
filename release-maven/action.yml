@@ -150,3 +150,16 @@ runs:
         AUTO_PUBLISH:          ${{ inputs.auto-publish }}
         BOT_TOKEN:             ${{ inputs.bot-token }}
       run: bash "${{ github.action_path }}/release.sh"
+
+    # Once the release is in (tag pushed, main bumped to next-dev), notify
+    # every downstream consumer so they regenerate their own release.yml
+    # against the freshly released version. Without this cascade, the
+    # `default:` values of their *_release inputs (queried at bootstrap
+    # time from repo1.maven.org) stay frozen to the previous release.
+    # Skipped on dry-run (nothing was published, so nothing to propagate).
+    - name: Trigger downstream release.yml refresh
+      if: success() && inputs.dry-run != 'true'
+      uses: https://codeberg.org/Vidocq/ci/refresh-downstream-release-yml@main
+      with:
+        producer-slug: ${{ github.repository }}
+        bot-token:     ${{ inputs.bot-token }}

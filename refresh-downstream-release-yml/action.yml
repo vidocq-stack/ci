@@ -1,0 +1,123 @@
+name: 'Refresh downstream release.yml after upstream release'
+description: >
+  Resolve the downstream consumers of the current repo from the Vidocq dependency
+  graph (Vidocq/GestionProjet/graph/inverted.json), then dispatch the
+  `refresh-release-yml` workflow on each one so they re-run
+  `release-maven/bootstrap-workflows.sh` against the freshly released upstream.
+  This keeps the `default:` values of every *_release input — and any
+  excluded-modules: block — in sync with what's actually on Maven Central
+  without manual intervention.
+
+inputs:
+  producer-slug:
+    description: 'Forge slug of the repo that just released, e.g. Vidocq/vauban (pass ${{ github.repository }})'
+    required: true
+  bot-token:
+    description: 'Forgejo token with actions.write on every downstream (VIDOCQ_BOT_TOKEN)'
+    required: true
+  base-url:
+    description: 'Forge base URL'
+    default: 'https://codeberg.org'
+  graph-repo:
+    description: 'owner/name of the dependency-graph repo'
+    default: 'Vidocq/GestionProjet'
+  graph-ref:
+    description: 'Branch/ref to read the inverted graph from'
+    default: 'main'
+  workflow:
+    description: 'Filename of the refresh workflow inside each downstream'
+    default: 'refresh-release-yml.yml'
+  ref:
+    description: 'Branch of each downstream to refresh'
+    default: 'main'
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve downstream consumers + dispatch refresh
+      shell: bash
+      env:
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        TOKEN: ${{ inputs.bot-token }}
+        BASE_URL: ${{ inputs.base-url }}
+        GRAPH_REPO: ${{ inputs.graph-repo }}
+        GRAPH_REF: ${{ inputs.graph-ref }}
+        WORKFLOW: ${{ inputs.workflow }}
+        REF: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        command -v curl >/dev/null 2>&1 || \
+          (apt-get update && apt-get install -y --no-install-recommends curl ca-certificates)
+
+        graph_url="${BASE_URL}/${GRAPH_REPO}/raw/branch/${GRAPH_REF}/graph/inverted.json"
+        echo "[refresh-downstream] fetching ${graph_url}"
+        curl -fsSL -H "Authorization: token ${TOKEN}" "${graph_url}" -o /tmp/inverted.json
+
+        # Resolve unique downstream repos: every consumer of any artifact
+        # produced by PRODUCER_SLUG, minus the producer itself.
+        #
+        # Edge case: vidocq-parent. The graph only tracks <dependency> coords;
+        # <parent> POM references are not in `consumed_by`. Since every Vidocq
+        # repo inherits from vidocq-parent, a release of vidocq-parent must
+        # dispatch refresh to ALL known producers (fallback path).
+        downstream=$(python3 - <<'PY'
+        import json, os
+        producer = os.environ['PRODUCER_SLUG']
+        with open('/tmp/inverted.json') as f:
+            data = json.load(f)
+        artifacts = data.get('artifacts') or {}
+        seen = set()
+        for coord, meta in artifacts.items():
+            if (meta or {}).get('produced_by') != producer: continue
+            for c in (meta.get('consumed_by') or []):
+                repo = (c or {}).get('repo', '').strip()
+                if repo and repo != producer:
+                    seen.add(repo)
+        # Parent-POM fallback: if a release left no <dependency>-tracked
+        # consumers but the producer is one of the known root parents, every
+        # other producer in the workspace inherits from it.
+        ROOT_PARENTS = {'Vidocq/vidocq-parent'}
+        if not seen and producer in ROOT_PARENTS:
+            for coord, meta in artifacts.items():
+                p = (meta or {}).get('produced_by')
+                if p and p != producer:
+                    seen.add(p)
+        for r in sorted(seen):
+            print(r)
+        PY
+        )
+
+        if [[ -z "$downstream" ]]; then
+          echo "[refresh-downstream] no downstream consumers for ${PRODUCER_SLUG} — nothing to do"
+          exit 0
+        fi
+
+        echo "[refresh-downstream] downstream targets:"
+        printf '  - %s\n' $downstream
+
+        # Dispatch the refresh workflow on each downstream. Failures are
+        # logged but don't abort the loop — one missing workflow file
+        # shouldn't block the rest of the cascade.
+        failed=0
+        for repo in $downstream; do
+          url="${BASE_URL}/api/v1/repos/${repo}/actions/workflows/${WORKFLOW}/dispatches"
+          body=$(printf '{"ref":"%s","inputs":{"source":"%s"}}' "$REF" "$PRODUCER_SLUG")
+          echo "[refresh-downstream] POST ${url}"
+          http=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' \
+            -X POST "$url" \
+            -H "Authorization: token ${TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            -d "$body" || echo 000)
+          case "$http" in
+            2*) echo "  ✅ ${repo}: HTTP ${http} (dispatched)" ;;
+            404) echo "  ⚠ ${repo}: HTTP 404 (workflow ${WORKFLOW} not present yet)" ;;
+            *)  echo "  ❌ ${repo}: HTTP ${http}"; cat /tmp/dispatch.out >&2 || true; failed=$((failed+1)) ;;
+          esac
+        done
+
+        if (( failed > 0 )); then
+          echo "[refresh-downstream] ${failed} dispatch(es) failed — see logs above" >&2
+          exit 1
+        fi
+        echo "[refresh-downstream] all dispatches OK"
