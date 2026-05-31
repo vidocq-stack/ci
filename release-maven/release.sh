@@ -610,23 +610,34 @@ def parse(pom):
 poms = [p for p in Path('.').rglob('pom.xml')
         if not any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in p.parts)]
 
+# Pre-pass: own artifactIds + reactor-wide property table. Child modules
+# routinely reference ${X.version} defined only in the root POM; without
+# this merge, resolve() on the child returns '' and a real SNAPSHOT slips
+# by undetected (the bug that let ravel 0.1.0 reach Sonatype with two
+# io.vidocq.vauban SNAPSHOTs in ravel-cdi-vauban).
+global_props = {}
 for pom in poms:
     root, ns = parse(pom)
     if root is None: continue
     aid = root.findtext(f'{{{ns}}}artifactId')
     if aid: own_aids.add(aid)
+    p = root.find(f'{{{ns}}}properties')
+    if p is not None:
+        for child in p:
+            name = child.tag.split('}', 1)[-1]
+            global_props.setdefault(name, (child.text or '').strip())
 
 bad = []
 legacy = []
 for pom in poms:
     root, ns = parse(pom)
     if root is None: continue
+    props = dict(global_props)
     props_el = root.find(f'{{{ns}}}properties')
-    props = {}
     if props_el is not None:
         for child in props_el:
             name = child.tag.split('}', 1)[-1]
-            props[name] = (child.text or '').strip()
+            props[name] = (child.text or '').strip()   # local override wins
 
     def resolve(v):
         m = PROP_RE.match(v or '')

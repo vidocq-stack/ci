@@ -60,26 +60,37 @@ def parse(pom):
     except ET.ParseError:
         return None, None
 
-# Pass 1: collect own artifactIds.
+# Pass 1: collect own artifactIds AND merge every <properties> block across
+# the reactor into a global table. Child modules routinely reference
+# ${vauban.version} (etc.) defined only in the root POM; without this merge,
+# `resolve()` on the child returns '' and a real SNAPSHOT slips by undetected.
+# Local overrides still win when present (see `props` lookup below).
+global_props = {}
 for pom in project.rglob('pom.xml'):
     if any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in pom.parts): continue
     root, ns = parse(pom)
     if root is None: continue
     aid = root.findtext(f'{{{ns}}}artifactId')
     if aid: own_aids.add(aid)
+    p = root.find(f'{{{ns}}}properties')
+    if p is not None:
+        for child in p:
+            name = child.tag.split('}', 1)[-1]
+            global_props.setdefault(name, (child.text or '').strip())
 
-# Pass 2: build a per-POM property map, then walk parent + dependency coords.
+# Pass 2: build a per-POM property map (local overrides global), then walk
+# parent + dependency coords.
 PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
 for pom in project.rglob('pom.xml'):
     if any(part in ('target', 'node_modules') or (part != '.' and part.startswith('.')) for part in pom.parts): continue
     root, ns = parse(pom)
     if root is None: continue
-    props = {}
+    props = dict(global_props)   # start from reactor-wide table
     p = root.find(f'{{{ns}}}properties')
     if p is not None:
         for child in p:
             name = child.tag.split('}', 1)[-1]
-            props[name] = (child.text or '').strip()
+            props[name] = (child.text or '').strip()   # local wins
 
     def resolve(v):
         m = PROP_RE.match(v or '')
