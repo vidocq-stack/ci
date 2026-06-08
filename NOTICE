@@ -1,0 +1,22 @@
+Vidocq
+Copyright (c) 2026 Yann Blazart, Antoine Sabot-Durand and the Vidocq contributors
+
+This product is licensed under a disjunctive triple license: you may use,
+modify and redistribute it under the terms of ANY ONE of the following
+licences, at your option:
+
+  - Eclipse Public License 2.0 (EPL-2.0)          -> see LICENSE
+  - European Union Public Licence 1.2 (EUPL-1.2)  -> see licenses/EUPL-1.2.txt
+  - GNU General Public License v2.0 or later      -> see licenses/GPL-2.0.txt
+    (GPL-2.0-or-later)
+
+The Eclipse Public License 2.0 (the file LICENSE) is the anchor licence.
+In accordance with EPL-2.0 section 1 ("Secondary License"), the GNU General
+Public License, version 2.0 or any later version, is made available as a
+Secondary License for this Program.
+
+SPDX-License-Identifier: EPL-2.0 OR EUPL-1.2 OR GPL-2.0-or-later
+
+This software does not bundle any third-party code. It depends only on
+Jakarta EE and Eclipse MicroProfile specification APIs, which are licensed
+by their respective owners under their own terms.
