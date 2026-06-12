@@ -1,0 +1,105 @@
+name: 'Governance checks (CLA, GPG, sign-off)'
+description: 'Verify the PR author signed the Vidocq CLA and every PR commit is GPG-signed and carries a Signed-off-by trailer'
+
+# Single shared implementation of the per-PR contribution gate. Forgejo/Codeberg does not
+# resolve cross-repo reusable workflows (jobs.<id>.uses:), so the checks live in a composite
+# action (step-level uses:, which Codeberg does support) instead of a workflow_call workflow.
+#
+# The CLA signatures and the contributors' GPG public keys live in the public Vidocq/governance
+# repository, cloned at run time. The calling job MUST check out its repository with
+# fetch-depth: 0 so the GPG and sign-off checks can read the full BASE_REF..HEAD commit range.
+
+inputs:
+  pr-author:
+    description: 'Codeberg username of the pull request author (e.g. github.event.pull_request.user.login)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the governance repository (CLA signatures + GPG keys)
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf "$RUNNER_TEMP/governance"
+        git clone --depth 1 https://codeberg.org/Vidocq/governance "$RUNNER_TEMP/governance"
+
+    - name: Check CLA signature
+      shell: bash
+      env:
+        PR_AUTHOR: ${{ inputs.pr-author }}
+      run: |
+        set -euo pipefail
+        if [ -z "${PR_AUTHOR:-}" ]; then
+          echo "::error::pr-author input is empty — cannot verify the CLA signature."
+          exit 1
+        fi
+        # Match the '@<login>' token in the 'Codeberg Username' column, bounded so one login
+        # cannot match as a substring of another.
+        if grep -qiE "@${PR_AUTHOR}([^[:alnum:]_-]|$)" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md"; then
+          echo "✅ CLA signed by @${PR_AUTHOR}"
+        else
+          echo "❌ @${PR_AUTHOR} has not signed the Vidocq CLA."
+          echo ""
+          echo "Please open a separate pull request on Vidocq/governance adding your name to"
+          echo "CLA-signatures/individuals.md."
+          echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
+          exit 1
+        fi
+
+    - name: Check GPG signatures on all PR commits
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Import contributors' public keys (same step as verification so the keyring is in scope).
+        for keyfile in "$RUNNER_TEMP"/governance/.forgejo/keys/*.asc; do
+          [ -f "$keyfile" ] || continue
+          gpg --import "$keyfile" 2>/dev/null && echo "Imported: $(basename "$keyfile")" || true
+        done
+
+        if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE_REF="origin/$GITHUB_BASE_REF"
+        elif git show-ref --verify --quiet refs/remotes/origin/HEAD; then
+          BASE_REF="$(git symbolic-ref --short refs/remotes/origin/HEAD)"
+        else
+          BASE_REF="origin/main"
+        fi
+
+        UNSIGNED=$(git log "$BASE_REF"..HEAD --format="%H %ae" | \
+          while read -r hash email; do
+            git verify-commit "$hash" 2>/dev/null || echo "  $hash ($email)"
+          done)
+        if [ -n "$UNSIGNED" ]; then
+          echo "❌ The following commits are not GPG-signed or have invalid signatures:"
+          echo "$UNSIGNED"
+          echo ""
+          echo "All commits must be GPG-signed."
+          echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing"
+          exit 1
+        fi
+        echo "✅ All commits are correctly GPG-signed"
+
+    - name: Check Signed-off-by on all PR commits
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE_REF="origin/$GITHUB_BASE_REF"
+        elif git show-ref --verify --quiet refs/remotes/origin/HEAD; then
+          BASE_REF="$(git symbolic-ref --short refs/remotes/origin/HEAD)"
+        else
+          BASE_REF="origin/main"
+        fi
+
+        MISSING=$(git log "$BASE_REF"..HEAD --format="%H" | \
+          while read -r hash; do
+            git log -1 --format="%B" "$hash" | grep -q "^Signed-off-by:" || echo "  $hash"
+          done)
+        if [ -n "$MISSING" ]; then
+          echo "❌ The following commits are missing a Signed-off-by trailer:"
+          echo "$MISSING"
+          echo ""
+          echo "Use: git config --local format.signoff true   (or: git commit --signoff)"
+          exit 1
+        fi
+        echo "✅ All commits have a Signed-off-by trailer"
