@@ -1,19 +1,19 @@
 name: 'Update Vidocq dependency graph'
-description: 'Extract io.vidocq.* dependencies of the current repo and push them into Vidocq/GestionProjet/data via the shared scripts.'
+description: 'Extract io.vidocq.* dependencies of the current repo and push them into Vidocq/dep-graph/data via the shared scripts.'
 
 inputs:
   bot-token:
-    description: 'Token with write access to GestionProjet (VIDOCQ_BOT_TOKEN)'
+    description: 'Token with write access to the dependency-graph repo (VIDOCQ_BOT_TOKEN). Runs on internal push:main only.'
     required: true
   repo:
     description: 'Repository slug (github.repository)'
     required: true
   base-url:
-    description: 'Forge base URL hosting GestionProjet'
+    description: 'Forge base URL hosting the dependency-graph repo'
     default: 'https://codeberg.org'
   graph-repo:
-    description: 'owner/name of the dependency-graph repo'
-    default: 'Vidocq/GestionProjet'
+    description: 'owner/name of the dependency-graph repo (public read surface for ci/build-impacted)'
+    default: 'Vidocq/dep-graph'
   branch:
     description: 'Branch of the graph repo to read scripts from'
     default: 'main'

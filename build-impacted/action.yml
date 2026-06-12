@@ -18,10 +18,18 @@ inputs:
     description: 'Suffix appended to each consumer base version, e.g. PR42.abc1234 (no -SNAPSHOT)'
     required: true
   bot-token:
-    description: 'Codeberg token: clone consumer repos + query the API (org secret VIDOCQ_BOT_TOKEN)'
-    required: true
+    description: >
+      Optional Codeberg token (org secret VIDOCQ_BOT_TOKEN). Used only to lift API/clone
+      rate limits on internal PRs. External fork PRs do NOT receive org secrets, so this is
+      empty there — the graph and every consumer repo are public, so reads and clones fall
+      back to anonymous and the whole step runs with zero secrets.
+    required: false
+    default: ''
+  graph-repo:
+    description: 'owner/name of the PUBLIC dependency-graph repo (read anonymously — no token needed)'
+    default: 'Vidocq/dep-graph'
   graph-ref:
-    description: 'Branch of Vidocq/GestionProjet to read the graph + resolver from'
+    description: 'Branch of the dependency-graph repo to read the graph + resolver from'
     default: 'main'
   maven-args:
     description: 'Common Maven args for every consumer build'
@@ -35,6 +43,7 @@ runs:
       env:
         PRODUCER_SLUG: ${{ inputs.producer-slug }}
         BOT_TOKEN: ${{ inputs.bot-token }}
+        GRAPH_REPO: ${{ inputs.graph-repo }}
         GRAPH_REF: ${{ inputs.graph-ref }}
       run: |
         set -euo pipefail
@@ -45,16 +54,19 @@ runs:
 
         # Forge slug -> data file name: Vidocq/vauban -> Vidocq_vauban.json
         DATA_FILE="${PRODUCER_SLUG/\//_}.json"
-        RAW="https://codeberg.org/Vidocq/GestionProjet/raw/branch/${GRAPH_REF}"
-        echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph ref=$GRAPH_REF"
+        RAW="https://codeberg.org/${GRAPH_REPO}/raw/branch/${GRAPH_REF}"
+        echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph repo=$GRAPH_REPO ref=$GRAPH_REF"
 
-        auth=(-H "Authorization: token ${BOT_TOKEN}")
+        # The dependency graph is public, so the token is optional. On an external fork PR
+        # BOT_TOKEN is empty (org secrets are withheld from forks): drop the auth header and
+        # read anonymously. Internal PRs still pass the token to lift rate limits.
+        if [ -n "${BOT_TOKEN:-}" ]; then auth=(-H "Authorization: token ${BOT_TOKEN}"); else auth=(); fi
         # Retry on transient Codeberg failures (504 gateway timeout, dropped connections).
         # --retry-all-errors retries on HTTP 5xx too, not just connection errors.
         retry_curl=(--retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15)
-        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/inverted.json     "$RAW/graph/inverted.json"
-        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
-        curl -fsSL "${retry_curl[@]}" "${auth[@]}" -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
+        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/inverted.json     "$RAW/graph/inverted.json"
+        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
+        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
 
         # Artifacts this repo produces (source of truth kept by update-dep-graph).
         ARTIFACTS=$(python3 - <<'PY'
@@ -82,7 +94,7 @@ runs:
         for r in $(echo "$MATRIX" | jq -r '.include[].repo'); do
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15 \
-            "${auth[@]}" "https://codeberg.org/api/v1/repos/$r")
+            ${auth[@]+"${auth[@]}"} "https://codeberg.org/api/v1/repos/$r")
           if [ "$code" = "200" ]; then
             echo "  keep $r"
             echo "$r" >> /tmp/impacted.txt
@@ -189,7 +201,13 @@ runs:
           dir="$WORK/$short"
           echo "::group::Rebuild $slug (depends on: ${!PRV[*]})"
 
-          clone_with_retry "https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git" "$dir"
+          # Anonymous clone on fork PRs (no token); token-auth on internal PRs (rate limits).
+          if [ -n "${BOT_TOKEN:-}" ]; then
+            clone_url="https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git"
+          else
+            clone_url="https://codeberg.org/${slug}.git"
+          fi
+          clone_with_retry "$clone_url" "$dir"
           pushd "$dir" >/dev/null
 
           # 1) Pin every upstream rebuilt in this run to its local PR version.

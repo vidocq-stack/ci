@@ -88,10 +88,15 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-          if [ "$STATUS" = "success" ] || [ "$STATUS" = "release-success" ]; then
-            echo "ℹ️ SLACK_WEBHOOK_URL missing — '$STATUS' notification skipped"
-            exit 0
-          fi
+          # A missing webhook is EXPECTED on external fork PRs: Codeberg withholds org
+          # secrets from forks. So every PR-facing notification (pr-*) is skipped silently
+          # instead of failing the job. For internal-only events (push/release success) the
+          # skip stays informational; any other status with no webhook is a real misconfig.
+          case "$STATUS" in
+            success|release-success|pr-*)
+              echo "ℹ️ SLACK_WEBHOOK_URL missing — '$STATUS' notification skipped"
+              exit 0 ;;
+          esac
           echo "❌ SLACK_WEBHOOK_URL missing — cannot send '$STATUS' notification" >&2
           exit 1
         fi

@@ -1,7 +1,7 @@
 name: 'Refresh downstream release.yml after upstream release'
 description: >
   Resolve the downstream consumers of the current repo from the Vidocq dependency
-  graph (Vidocq/GestionProjet/graph/inverted.json), then dispatch the
+  graph (Vidocq/dep-graph/graph/inverted.json), then dispatch the
   `refresh-release-yml` workflow on each one so they re-run
   `release-maven/bootstrap-workflows.sh` against the freshly released upstream.
   This keeps the `default:` values of every *_release input — and any
@@ -20,7 +20,7 @@ inputs:
     default: 'https://codeberg.org'
   graph-repo:
     description: 'owner/name of the dependency-graph repo'
-    default: 'Vidocq/GestionProjet'
+    default: 'Vidocq/dep-graph'
   graph-ref:
     description: 'Branch/ref to read the inverted graph from'
     default: 'main'
