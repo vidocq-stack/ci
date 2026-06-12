@@ -13,6 +13,9 @@ inputs:
   pr-author:
     description: 'Codeberg username of the pull request author (e.g. github.event.pull_request.user.login)'
     required: true
+  slack-webhook:
+    description: 'Optional Slack incoming webhook (SLACK_WEBHOOK_URL). When set, a CLA rejection posts a [ViBot] alert.'
+    default: ''
 
 runs:
   using: composite
@@ -28,6 +31,10 @@ runs:
       shell: bash
       env:
         PR_AUTHOR: ${{ inputs.pr-author }}
+        SLACK_WEBHOOK_URL: ${{ inputs.slack-webhook }}
+        REPO: ${{ github.repository }}
+        PR_NUM: ${{ github.event.number }}
+        PR_URL: ${{ github.event.pull_request.html_url }}
       run: |
         set -euo pipefail
         if [ -z "${PR_AUTHOR:-}" ]; then
@@ -38,14 +45,28 @@ runs:
         # cannot match as a substring of another.
         if grep -qiE "@${PR_AUTHOR}([^[:alnum:]_-]|$)" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md"; then
           echo "✅ CLA signed by @${PR_AUTHOR}"
-        else
-          echo "❌ @${PR_AUTHOR} has not signed the Vidocq CLA."
-          echo ""
-          echo "Please open a separate pull request on Vidocq/governance adding your name to"
-          echo "CLA-signatures/individuals.md."
-          echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
-          exit 1
+          exit 0
         fi
+        echo "❌ @${PR_AUTHOR} has not signed the Vidocq CLA."
+        echo ""
+        echo "Please open a separate pull request on Vidocq/governance adding your name to"
+        echo "CLA-signatures/individuals.md."
+        echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
+        # CLA-specific Slack alert (best-effort; never masks the rejection exit code).
+        if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+          payload=$(node <<'JS'
+        const repo = process.env.REPO, num = process.env.PR_NUM;
+        const url = process.env.PR_URL, author = process.env.PR_AUTHOR;
+        const where = (repo ? `\`${repo}\`` : 'a repository') + (num ? `#${num}` : '');
+        const link = url ? `\n<${url}|View PR>` : '';
+        const text = `[ViBot]: 🚫 *PR REJECTED FOR CLA* — @${author} has not signed the Vidocq CLA on ${where}${link}`;
+        process.stdout.write(JSON.stringify({ text }));
+        JS
+        )
+          curl -fsS -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d "$payload" \
+            && echo "📣 Slack CLA-rejection alert sent" || echo "⚠️ Slack CLA-rejection alert failed (non-fatal)"
+        fi
+        exit 1
 
     - name: Check GPG signatures on all PR commits
       shell: bash
