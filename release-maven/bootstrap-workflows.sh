@@ -352,6 +352,9 @@ jobs:
         with:
           fetch-depth: 0
           token: \${{ secrets.VIDOCQ_BOT_TOKEN }}
+          # Always checkout the current HEAD of the branch, not the SHA captured
+          # at dispatch time — ensures in-flight commits are included in the release.
+          ref: \${{ github.ref_name }}
 
       - uses: https://codeberg.org/Vidocq/ci/release-maven@main
         with:
