@@ -149,10 +149,14 @@ _build_excluded_pl_args() {
     mod="${mod#"${mod%%[![:space:]]*}"}"
     mod="${mod%"${mod##*[![:space:]]}"}"
     [[ -z "$mod" || "$mod" == \#* ]] && continue
+    # ':artifactId' selector form: a bare name is resolved as a RELATIVE PATH
+    # first, so nested modules (cassini-examples/cassini-examples-chappe)
+    # break `mvn -pl` with "Could not find the selected project in the
+    # reactor". The :artifactId form matches wherever the module lives.
     if [[ -z "$result" ]]; then
-      result="!${mod}"
+      result="!:${mod}"
     else
-      result="${result},!${mod}"
+      result="${result},!:${mod}"
     fi
   done <<< "${EXCLUDED_MODULES:-}"
   printf '%s' "$result"
