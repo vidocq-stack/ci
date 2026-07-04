@@ -873,6 +873,31 @@ step_tag_and_finalize() {
       -DprocessAllModules=true \
       -DgenerateBackupPoms=false
 
+  # versions:set never touches the <parent> reference, so without this the
+  # root pom keeps pointing at the pre-release parent SNAPSHOT forever (a
+  # coordinate that is no longer republished once vidocq-parent itself moves
+  # on). Rewrite it in place — a plain text edit, deterministic and offline,
+  # whereas versions:update-parent would need the target SNAPSHOT to already
+  # exist in a reachable repository.
+  info "Bumping io.vidocq:vidocq-parent reference in root pom to ${NEXT_DEV_VERSION}"
+  NEXT_DEV_VERSION="${NEXT_DEV_VERSION}" python3 <<'PY'
+import os, re
+from pathlib import Path
+
+pom = Path('pom.xml')
+text = pom.read_text(encoding='utf-8')
+m = re.search(r'<parent>.*?</parent>', text, re.DOTALL)
+if m and '<groupId>io.vidocq</groupId>' in m.group(0) \
+     and '<artifactId>vidocq-parent</artifactId>' in m.group(0):
+    block = re.sub(r'(<version>)[^<]+(</version>)',
+                   rf'\g<1>{os.environ["NEXT_DEV_VERSION"]}\g<2>',
+                   m.group(0), count=1)
+    pom.write_text(text[:m.start()] + block + text[m.end():], encoding='utf-8')
+    print(f"parent reference set to {os.environ['NEXT_DEV_VERSION']}")
+else:
+    print("no io.vidocq:vidocq-parent <parent> block — nothing to bump")
+PY
+
   if [[ -n "$(git status --porcelain)" ]]; then
     git add -A
     git commit -m "post-release: bump to ${NEXT_DEV_VERSION}"
@@ -886,7 +911,15 @@ step_tag_and_finalize() {
 # ---------------------------------------------------------------- 11. wait Central
 
 # Enumerate (groupId, artifactId) for every reactor module that is deployable
-# AND not in EXCLUDED_MODULES. Honors <maven.deploy.skip>true</maven.deploy.skip>.
+# AND not in EXCLUDED_MODULES. Walks the reactor from the root pom via
+# <modules> (direct children of <project> only — profile-activated modules are
+# not part of the default release reactor), propagating an inherited
+# <maven.deploy.skip>true</maven.deploy.skip>: Maven properties are inherited,
+# so a skip on an aggregator silences all its descendants even when they do
+# not repeat the property. Out-of-reactor poms (standalone TCK runners, …) are
+# never visited, unlike the previous rglob-based scan which listed them as
+# deployable and made step_wait_central poll Central forever for artifacts
+# that were never uploaded.
 list_deployable_coords() {
   EXCLUDED_MODULES="${EXCLUDED_MODULES:-}" python3 <<'PY'
 import os, re, xml.etree.ElementTree as ET
@@ -898,11 +931,9 @@ for line in (os.environ.get('EXCLUDED_MODULES') or '').splitlines():
     if line and not line.startswith('#'):
         excluded.add(line)
 
-def text(pom):
-    return pom.read_text(encoding='utf-8', errors='replace')
-
 def ns(pom):
-    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text(pom))
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"',
+                  pom.read_text(encoding='utf-8', errors='replace'))
     return m.group(1) if m else 'http://maven.apache.org/POM/4.0.0'
 
 def skip_deploy(root, ns_):
@@ -919,22 +950,31 @@ def resolve_g(root, ns_):
         return parent.findtext(f'{{{ns_}}}groupId') or ''
     return ''
 
-for pom in Path('.').rglob('pom.xml'):
-    if any(p in pom.parts for p in ('target', 'node_modules')):
-        continue
+visited = set()
+
+def walk(pom, inherited_skip):
+    pom = pom.resolve()
+    if pom in visited or not pom.is_file():
+        return
+    visited.add(pom)
     n = ns(pom)
     try:
         root = ET.parse(pom).getroot()
     except ET.ParseError:
-        continue
-    if skip_deploy(root, n):
-        continue
+        return
+    skip = inherited_skip or skip_deploy(root, n)
     a = root.findtext(f'{{{n}}}artifactId') or ''
-    if a in excluded:
-        continue
     g = resolve_g(root, n)
-    if g and a:
+    if not skip and g and a and a not in excluded:
         print(f"{g}:{a}")
+    modules = root.find(f'{{{n}}}modules')
+    if modules is not None:
+        for m in modules.findall(f'{{{n}}}module'):
+            child = (m.text or '').strip()
+            if child:
+                walk(pom.parent / child / 'pom.xml', skip)
+
+walk(Path('pom.xml'), False)
 PY
 }
 
