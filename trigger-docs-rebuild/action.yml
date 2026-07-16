@@ -16,7 +16,7 @@ inputs:
     default: 'Vidocq/vidocq-docs'
   workflow:
     description: 'Workflow filename to dispatch in the docs repo'
-    default: 'build.yml'
+    default: 'deploy-pages.yaml'
   ref:
     description: 'Branch / ref of the docs repo to build'
     default: 'main'
