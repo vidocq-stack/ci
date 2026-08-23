@@ -10,7 +10,7 @@ inputs:
     required: true
   base-url:
     description: 'Forge base URL hosting the dependency-graph repo'
-    default: 'https://codeberg.org'
+    default: 'https://codefloe.com'
   graph-repo:
     description: 'owner/name of the dependency-graph repo (public read surface for ci/build-impacted)'
     default: 'Vidocq/dep-graph'

@@ -295,10 +295,15 @@ step_reroute_ssh() {
     info "Skipping SSH→HTTPS reroute (BOT_TOKEN not provided)"
     return 0
   fi
-  info "Rerouting ssh://git@codeberg.org/* to https://oauth2:<token>@codeberg.org/*"
-  git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://git@codeberg.org/"
-  git config --global --add "url.https://oauth2:${BOT_TOKEN}@codeberg.org/.insteadOf" "ssh://codeberg.org/"
-  ok "SSH→HTTPS reroute armed"
+  info "Rerouting ssh forge remotes to https://oauth2:<token>@<forge>/*"
+  # POMs still declare ssh://git@codeberg.org/... as developerConnection; keep
+  # rerouting those to the current forge until the SCM sweep lands post-migration.
+  FORGE_HOST="${GITHUB_SERVER_URL:-https://codefloe.com}"; FORGE_HOST="${FORGE_HOST#https://}"; FORGE_HOST="${FORGE_HOST%/}"
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://git@codeberg.org/"
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://codeberg.org/"
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://git@${FORGE_HOST}/"
+  git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://${FORGE_HOST}/"
+  ok "SSH→HTTPS reroute armed (forge: ${FORGE_HOST})"
 }
 
 step_import_gpg() {

@@ -54,7 +54,8 @@ runs:
 
         # Forge slug -> data file name: Vidocq/vauban -> Vidocq_vauban.json
         DATA_FILE="${PRODUCER_SLUG/\//_}.json"
-        RAW="https://codeberg.org/${GRAPH_REPO}/raw/branch/${GRAPH_REF}"
+        FORGE="${GITHUB_SERVER_URL%/}"
+        RAW="${FORGE}/${GRAPH_REPO}/raw/branch/${GRAPH_REF}"
         echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph repo=$GRAPH_REPO ref=$GRAPH_REF"
 
         # The dependency graph is public, so the token is optional. On an external fork PR
@@ -94,7 +95,7 @@ runs:
         for r in $(echo "$MATRIX" | jq -r '.include[].repo'); do
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15 \
-            ${auth[@]+"${auth[@]}"} "https://codeberg.org/api/v1/repos/$r")
+            ${auth[@]+"${auth[@]}"} "${GITHUB_SERVER_URL%/}/api/v1/repos/$r")
           if [ "$code" = "200" ]; then
             echo "  keep $r"
             echo "$r" >> /tmp/impacted.txt
@@ -203,9 +204,9 @@ runs:
 
           # Anonymous clone on fork PRs (no token); token-auth on internal PRs (rate limits).
           if [ -n "${BOT_TOKEN:-}" ]; then
-            clone_url="https://oauth2:${BOT_TOKEN}@codeberg.org/${slug}.git"
+            clone_url="$(printf %s "${GITHUB_SERVER_URL%/}" | sed "s|https://|https://oauth2:${BOT_TOKEN}@|")/${slug}.git"
           else
-            clone_url="https://codeberg.org/${slug}.git"
+            clone_url="${GITHUB_SERVER_URL%/}/${slug}.git"
           fi
           clone_with_retry "$clone_url" "$dir"
           pushd "$dir" >/dev/null

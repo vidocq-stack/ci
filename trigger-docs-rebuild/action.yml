@@ -10,7 +10,7 @@ inputs:
     required: true
   base-url:
     description: 'Forge base URL hosting vidocq-docs'
-    default: 'https://codeberg.org'
+    default: 'https://codefloe.com'
   docs-repo:
     description: 'owner/name of the docs repo'
     default: 'Vidocq/vidocq-docs'

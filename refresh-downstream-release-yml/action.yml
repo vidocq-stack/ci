@@ -17,7 +17,7 @@ inputs:
     required: true
   base-url:
     description: 'Forge base URL'
-    default: 'https://codeberg.org'
+    default: 'https://codefloe.com'
   graph-repo:
     description: 'owner/name of the dependency-graph repo'
     default: 'Vidocq/dep-graph'

@@ -356,7 +356,7 @@ jobs:
           # at dispatch time — ensures in-flight commits are included in the release.
           ref: \${{ github.ref_name }}
 
-      - uses: https://codeberg.org/Vidocq/ci/release-maven@main
+      - uses: https://codefloe.com/Vidocq/ci/release-maven@main
         with:
           release-version:  \${{ inputs.release_version }}
           next-dev-version: \${{ inputs.next_dev_version }}
@@ -398,7 +398,7 @@ EOF
 
       - name: Notify Slack — release success
         if: success()
-        uses: https://codeberg.org/Vidocq/ci/notify-slack@main
+        uses: https://codefloe.com/Vidocq/ci/notify-slack@main
         with:
           webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
           status:           release-success
@@ -411,7 +411,7 @@ EOF
 
       - name: Notify Slack — release failure
         if: failure()
-        uses: https://codeberg.org/Vidocq/ci/notify-slack@main
+        uses: https://codefloe.com/Vidocq/ci/notify-slack@main
         with:
           webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
           status:           release-failure

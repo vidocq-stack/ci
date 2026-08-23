@@ -25,7 +25,7 @@ runs:
       run: |
         set -euo pipefail
         rm -rf "$RUNNER_TEMP/governance"
-        git clone --depth 1 https://codeberg.org/Vidocq/governance "$RUNNER_TEMP/governance"
+        git clone --depth 1 "${GITHUB_SERVER_URL%/}/Vidocq/governance" "$RUNNER_TEMP/governance"
 
     - name: Check CLA signature
       shell: bash
@@ -51,7 +51,7 @@ runs:
         echo ""
         echo "Please open a separate pull request on Vidocq/governance adding your name to"
         echo "CLA-signatures/individuals.md."
-        echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
+        echo "See https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
         # CLA-specific Slack alert (best-effort; never masks the rejection exit code).
         if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
           payload=$(node <<'JS'
@@ -95,7 +95,7 @@ runs:
           echo "$UNSIGNED"
           echo ""
           echo "All commits must be GPG-signed."
-          echo "See https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing"
+          echo "See https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing"
           exit 1
         fi
         echo "✅ All commits are correctly GPG-signed"

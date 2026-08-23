@@ -159,7 +159,7 @@ runs:
     # Skipped on dry-run (nothing was published, so nothing to propagate).
     - name: Trigger downstream release.yml refresh
       if: success() && inputs.dry-run != 'true'
-      uses: https://codeberg.org/Vidocq/ci/refresh-downstream-release-yml@main
+      uses: https://codefloe.com/Vidocq/ci/refresh-downstream-release-yml@main
       with:
         producer-slug: ${{ github.repository }}
         bot-token:     ${{ inputs.bot-token }}
