@@ -22,6 +22,7 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 | `build-impacted` | PR-only: rebuild the transitive downstream consumers (topological order) against the producer's local PR artifacts — no staging registry | `producer-slug` (required), `producer-version` (required), `version-suffix` (required), `bot-token` (required), `graph-ref` (main), `maven-args` (-B -ntp) |
 | `update-dep-graph` | Extract `io.vidocq.*` deps and push them into GestionProjet/data | `bot-token` (required), `repo` (required), `base-url`, `graph-repo`, `branch` |
 | `trigger-docs-rebuild` | POST a `workflow_dispatch` to `vidocq-docs/build.yml` so the Antora site is rebuilt & redeployed. Use after a push on `main` that touched `docs/**`. | `bot-token` (required), `source-repo` (required), `base-url`, `docs-repo`, `workflow`, `ref` |
+| `merge-bot` | Rebase a PR's head branch onto its base, re-sign every replayed commit with the dedicated CI bot key, force-push, then fast-forward merge. The only way to merge without producing an unsigned commit once `require_signed_commits` is enforced (server-side merge/squash/rebase always strips the original signature — true of Forgejo, GitHub and GitLab alike). | `pr-number` (required), `repo` (required), `bot-token` (required), `git-signing-private-key`/`git-signing-passphrase`/`git-signing-key-id` (required, `secrets.CI_BOT_GPG_*`), `base-url` |
 
 ## Examples
 
@@ -77,6 +78,64 @@ jobs:
         with:
           bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
           source-repo: ${{ github.repository }}
+```
+
+### Per-repo wiring — `merge-bot.yml`
+
+Add this workflow once per sub-project to enable a `/merge` PR comment command.
+Requires `require_signed_commits` (org default) and the `CI_BOT_GPG_*` org
+secrets (key registered in `Vidocq/governance/.forgejo/keys/vidocq-ci-bot.asc`).
+Only commenters with `write`/`admin` access trigger a merge; anyone else's
+comment is ignored by the permission check.
+
+```yaml
+name: merge-bot
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  merge:
+    if: >-
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '/merge')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require write access
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          level=$(curl -fsS -H "Authorization: token $BOT_TOKEN" \
+            "https://codefloe.com/api/v1/repos/${{ github.repository }}/collaborators/${ACTOR}/permission" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("permission",""))')
+          [[ "$level" == "admin" || "$level" == "write" ]] \
+            || { echo "::error::@${ACTOR} lacks write access — refusing /merge"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+
+      - uses: https://codefloe.com/Vidocq/ci/merge-bot@main
+        with:
+          pr-number: ${{ github.event.issue.number }}
+          repo: ${{ github.repository }}
+          bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          git-signing-private-key: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          git-signing-passphrase: ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          git-signing-key-id: ${{ secrets.CI_BOT_GPG_KEY_ID }}
+
+      - name: Comment on failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+        run: |
+          curl -fsS -X POST -H "Authorization: token $BOT_TOKEN" -H "Content-Type: application/json" \
+            -d '{"body":"❌ merge-bot failed — see the Actions run log for details."}' \
+            "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
 ```
 
 ## Secrets
