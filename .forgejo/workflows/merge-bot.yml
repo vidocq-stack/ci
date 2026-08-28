@@ -23,6 +23,7 @@ jobs:
           echo "actor=${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.comment.user.login }}" >> "$GITHUB_OUTPUT"
 
       - name: Require write access
+        if: github.event_name == 'issue_comment'
         env:
           BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
           ACTOR: ${{ steps.ctx.outputs.actor }}
