@@ -50,6 +50,33 @@ runs:
           echo "✅ CLA signed by @${PR_AUTHOR}"
           exit 0
         fi
+
+        # The PR author's account may have been deleted after the PR was opened
+        # (Forgejo then reports the login as "Ghost"), which would otherwise
+        # permanently reject a contribution from someone who legitimately signed
+        # the CLA beforehand. As a narrow fallback for this specific case, match
+        # every commit author's name (preserved in git history regardless of
+        # account deletion) against the "Full Name" column instead of the
+        # now-unrecoverable login. Only attempted when the login itself is the
+        # deleted-account placeholder, never as a general substitute for the
+        # login check.
+        if [ "${PR_AUTHOR}" = "Ghost" ]; then
+          base_ref="${GITHUB_BASE_REF:-main}"
+          git fetch --quiet origin "$base_ref" 2>/dev/null || true
+          all_signed=true
+          any_commit=false
+          while IFS= read -r author_name; do
+            [ -n "$author_name" ] || continue
+            any_commit=true
+            grep -qiF "| ${author_name} |" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md" \
+              || all_signed=false
+          done < <(git log "origin/${base_ref}..HEAD" --format='%an' | sort -u)
+          if [ "$any_commit" = true ] && [ "$all_signed" = true ]; then
+            echo "✅ CLA signed (matched by commit author name — the PR author's account was deleted)"
+            exit 0
+          fi
+        fi
+
         echo "❌ @${PR_AUTHOR} has not signed the Vidocq CLA."
         echo ""
         echo "Please open a separate pull request on Vidocq/governance adding your name to"
