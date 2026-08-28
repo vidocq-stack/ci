@@ -1,0 +1,58 @@
+name: merge-bot
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'Pull request number to rebase, re-sign and fast-forward merge'
+        required: true
+
+jobs:
+  merge:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request != null && contains(github.event.comment.body, '/merge'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR number and actor
+        id: ctx
+        run: |
+          echo "pr-number=${{ github.event.inputs.pr-number || github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          echo "actor=${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.comment.user.login }}" >> "$GITHUB_OUTPUT"
+
+      - name: Require write access
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          ACTOR: ${{ steps.ctx.outputs.actor }}
+        run: |
+          set -euo pipefail
+          level=$(curl -fsS -H "Authorization: token $BOT_TOKEN" \
+            "https://codefloe.com/api/v1/repos/${{ github.repository }}/collaborators/${ACTOR}/permission" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("permission",""))')
+          [[ "$level" == "admin" || "$level" == "write" ]] \
+            || { echo "::error::@${ACTOR} lacks write access — refusing"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+
+      - uses: ./merge-bot
+        with:
+          pr-number: ${{ steps.ctx.outputs.pr-number }}
+          repo: ${{ github.repository }}
+          bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          git-signing-private-key: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          git-signing-passphrase: ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          git-signing-key-id: ${{ secrets.CI_BOT_GPG_KEY_ID }}
+
+      - name: Comment on failure
+        if: failure() && github.event_name == 'issue_comment'
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+        run: |
+          curl -fsS -X POST -H "Authorization: token $BOT_TOKEN" -H "Content-Type: application/json" \
+            -d '{"body":"❌ merge-bot failed — see the Actions run log for details."}' \
+            "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
