@@ -1,0 +1,71 @@
+name: 'CLA check'
+description: 'Verify the PR author signed the Vidocq CLA'
+
+# One of the 3 independently-reportable status checks split out of the
+# original governance-checks bundle (Vidocq/ci#<split-governance-checks PR>).
+# Kept as its own composite action (not a job in a workflow_call workflow):
+# Forgejo/Codeberg does not resolve cross-repo reusable workflows
+# (jobs.<id>.uses:), so every shared check lives in a composite action
+# (step-level uses:, which Codeberg does support) instead.
+#
+# Identity-based, NOT signature-based: unaffected by any later rebase/squash
+# of the PR branch (unlike gpg-check), so it never needs re-running after a
+# merge-bot re-sign.
+
+inputs:
+  pr-author:
+    description: 'Codeberg username of the pull request author (e.g. github.event.pull_request.user.login)'
+    required: true
+  slack-webhook:
+    description: 'Optional Slack incoming webhook (SLACK_WEBHOOK_URL). When set, a rejection posts a [ViBot] alert.'
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the governance repository (CLA signatures)
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf "$RUNNER_TEMP/governance"
+        git clone --depth 1 "${GITHUB_SERVER_URL%/}/Vidocq/governance" "$RUNNER_TEMP/governance"
+
+    - name: Check CLA signature
+      shell: bash
+      env:
+        PR_AUTHOR: ${{ inputs.pr-author }}
+        SLACK_WEBHOOK_URL: ${{ inputs.slack-webhook }}
+        REPO: ${{ github.repository }}
+        PR_NUM: ${{ github.event.number }}
+        PR_URL: ${{ github.event.pull_request.html_url }}
+      run: |
+        set -euo pipefail
+        if [ -z "${PR_AUTHOR:-}" ]; then
+          echo "::error::pr-author input is empty — cannot verify the CLA signature."
+          exit 1
+        fi
+        # Match the '@<login>' token in the 'Codeberg Username' column, bounded so one login
+        # cannot match as a substring of another.
+        if grep -qiE "@${PR_AUTHOR}([^[:alnum:]_-]|$)" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md"; then
+          echo "✅ CLA signed by @${PR_AUTHOR}"
+          exit 0
+        fi
+        echo "❌ @${PR_AUTHOR} has not signed the Vidocq CLA."
+        echo ""
+        echo "Please open a separate pull request on Vidocq/governance adding your name to"
+        echo "CLA-signatures/individuals.md."
+        echo "See https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md"
+        if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+          payload=$(node <<'JS'
+        const repo = process.env.REPO, num = process.env.PR_NUM;
+        const url = process.env.PR_URL, author = process.env.PR_AUTHOR;
+        const where = (repo ? `\`${repo}\`` : 'a repository') + (num ? `#${num}` : '');
+        const link = url ? `\n<${url}|View PR>` : '';
+        const text = `[ViBot]: 🚫 *PR REJECTED FOR CLA* — @${author} has not signed the Vidocq CLA on ${where}${link}`;
+        process.stdout.write(JSON.stringify({ text }));
+        JS
+        )
+          curl -fsS -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d "$payload" \
+            && echo "📣 Slack CLA-rejection alert sent" || echo "⚠️ Slack CLA-rejection alert failed (non-fatal)"
+        fi
+        exit 1

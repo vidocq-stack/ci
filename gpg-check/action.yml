@@ -1,0 +1,56 @@
+name: 'GPG check'
+description: 'Verify every PR commit is GPG-signed by a registered Vidocq contributor key'
+
+# One of the 3 independently-reportable status checks split out of the
+# original governance-checks bundle. See cla-check/action.yml for the
+# rationale (composite action, not workflow_call — Forgejo/Codeberg does not
+# resolve cross-repo reusable workflows).
+#
+# The calling job MUST check out its repository with fetch-depth: 0 so this
+# can read the full BASE_REF..HEAD commit range.
+#
+# Signature-based, unlike cla-check/dco-check: any later rebase or re-sign of
+# the PR branch (e.g. by merge-bot) changes the commit hashes, so this check
+# re-runs and re-verifies against the new signatures — this is the one
+# status context that is expected to be re-evaluated after a merge-bot pass.
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the governance repository (GPG keys)
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf "$RUNNER_TEMP/governance"
+        git clone --depth 1 "${GITHUB_SERVER_URL%/}/Vidocq/governance" "$RUNNER_TEMP/governance"
+
+    - name: Check GPG signatures on all PR commits
+      shell: bash
+      run: |
+        set -euo pipefail
+        for keyfile in "$RUNNER_TEMP"/governance/.forgejo/keys/*.asc; do
+          [ -f "$keyfile" ] || continue
+          gpg --import "$keyfile" 2>/dev/null && echo "Imported: $(basename "$keyfile")" || true
+        done
+
+        if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE_REF="origin/$GITHUB_BASE_REF"
+        elif git show-ref --verify --quiet refs/remotes/origin/HEAD; then
+          BASE_REF="$(git symbolic-ref --short refs/remotes/origin/HEAD)"
+        else
+          BASE_REF="origin/main"
+        fi
+
+        UNSIGNED=$(git log "$BASE_REF"..HEAD --format="%H %ae" | \
+          while read -r hash email; do
+            git verify-commit "$hash" 2>/dev/null || echo "  $hash ($email)"
+          done)
+        if [ -n "$UNSIGNED" ]; then
+          echo "❌ The following commits are not GPG-signed or have invalid signatures:"
+          echo "$UNSIGNED"
+          echo ""
+          echo "All commits must be GPG-signed."
+          echo "See https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing"
+          exit 1
+        fi
+        echo "✅ All commits are correctly GPG-signed"

@@ -1,0 +1,42 @@
+name: 'DCO check'
+description: 'Verify every PR commit carries a Signed-off-by trailer (DCO)'
+
+# One of the 3 independently-reportable status checks split out of the
+# original governance-checks bundle. See cla-check/action.yml for the
+# rationale (composite action, not workflow_call — Forgejo/Codeberg does not
+# resolve cross-repo reusable workflows).
+#
+# The calling job MUST check out its repository with fetch-depth: 0 so this
+# can read the full BASE_REF..HEAD commit range.
+#
+# Trailer-based, like cla-check: survives a later rebase/re-sign (the
+# trailer text is preserved by `git commit --amend`), so unlike gpg-check it
+# does not need to be re-evaluated after a merge-bot pass.
+
+runs:
+  using: composite
+  steps:
+    - name: Check Signed-off-by on all PR commits
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${GITHUB_BASE_REF:-}" ]; then
+          BASE_REF="origin/$GITHUB_BASE_REF"
+        elif git show-ref --verify --quiet refs/remotes/origin/HEAD; then
+          BASE_REF="$(git symbolic-ref --short refs/remotes/origin/HEAD)"
+        else
+          BASE_REF="origin/main"
+        fi
+
+        MISSING=$(git log "$BASE_REF"..HEAD --format="%H" | \
+          while read -r hash; do
+            git log -1 --format="%B" "$hash" | grep -q "^Signed-off-by:" || echo "  $hash"
+          done)
+        if [ -n "$MISSING" ]; then
+          echo "❌ The following commits are missing a Signed-off-by trailer:"
+          echo "$MISSING"
+          echo ""
+          echo "Use: git config --local format.signoff true   (or: git commit --signoff)"
+          exit 1
+        fi
+        echo "✅ All commits have a Signed-off-by trailer"

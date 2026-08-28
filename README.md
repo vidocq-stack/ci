@@ -19,6 +19,10 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
 | `run-tck` | Run a Maven TCK, or a custom shell script | `command` (custom shell, wins), `module` (-pl), `profile` (tck), `pre-install` (true), `maven-args` (-B -ntp) |
 | `notify-slack` | `[ViBot]` Slack notification | `webhook-url` (required), `status` (success/failure/pr-open/pr-merged/pr-validated/release-success/release-failure), plus repo/ref/run-url and commit/PR/release fields. `dry-run: true` renders a big "🧪 DRY RUN 🧪" Block Kit header so the channel sees at a glance that nothing real happened. |
 | `deploy-maven` | settings.xml + GPG import + Central deploy (SNAPSHOT/RELEASE by version) | `central-username`, `central-password`, `gpg-private-key`, `gpg-passphrase`, `snapshot-profile`, `release-profile` |
+| `cla-check` | PR-gate: verify the PR author signed the Vidocq CLA (identity-based, one of the 3 checks split out of `governance-checks`) | `pr-author` (required), `slack-webhook` |
+| `gpg-check` | PR-gate: verify every PR commit is GPG-signed by a registered contributor key (signature-based — re-evaluate after any merge-bot re-sign) | none (reads `BASE_REF..HEAD` from the checked-out repo) |
+| `dco-check` | PR-gate: verify every PR commit carries a `Signed-off-by` trailer (trailer-based, survives a merge-bot re-sign) | none |
+| `governance-checks` | ⚠️ Deprecated — bundles `cla-check` + `gpg-check` + `dco-check` into a single job/status-check. Kept for repos not yet migrated to the 3 split actions above. | `pr-author` (required), `slack-webhook` |
 | `build-impacted` | PR-only: rebuild the transitive downstream consumers (topological order) against the producer's local PR artifacts — no staging registry | `producer-slug` (required), `producer-version` (required), `version-suffix` (required), `bot-token` (required), `graph-ref` (main), `maven-args` (-B -ntp) |
 | `update-dep-graph` | Extract `io.vidocq.*` deps and push them into GestionProjet/data | `bot-token` (required), `repo` (required), `base-url`, `graph-repo`, `branch` |
 | `trigger-docs-rebuild` | POST a `workflow_dispatch` to `vidocq-docs/build.yml` so the Antora site is rebuilt & redeployed. Use after a push on `main` that touched `docs/**`. | `bot-token` (required), `source-repo` (required), `base-url`, `docs-repo`, `workflow`, `ref` |
@@ -54,6 +58,46 @@ It only provides reusable actions consumed via `uses: https://codeberg.org/Vidoc
   with:
     bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
     source-repo: ${{ github.repository }}
+```
+
+### Per-repo wiring — `pr.yml` governance gate (split checks)
+
+3 independent status checks, replacing the single `governance-checks` job.
+Migrating a repo means updating this job list AND its branch-protection
+`status_check_contexts` (`pr-validate / cla-check (pull_request)`, `pr-validate
+/ gpg-check (pull_request)`, `pr-validate / dco-check (pull_request)` instead
+of `pr-validate / governance-checks (pull_request)`).
+
+```yaml
+name: pr-validate
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  cla-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://codefloe.com/Vidocq/ci/cla-check@main
+        with:
+          pr-author: ${{ github.event.pull_request.user.login }}
+          slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  gpg-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://codefloe.com/Vidocq/ci/gpg-check@main
+
+  dco-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: https://codefloe.com/Vidocq/ci/dco-check@main
 ```
 
 ### Per-repo wiring — `notify-docs.yml`

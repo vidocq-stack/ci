@@ -1,6 +1,14 @@
 name: 'Governance checks (CLA, GPG, sign-off)'
 description: 'Verify the PR author signed the Vidocq CLA and every PR commit is GPG-signed and carries a Signed-off-by trailer'
 
+# ⚠️ DEPRECATED — kept working for repos not yet migrated, but new/updated
+# workflows should use the 3 split actions instead: cla-check, gpg-check,
+# dco-check. Bundling all 3 checks into a single job means a single status
+# check context ("… / governance-checks") that fails for any of 3 unrelated
+# reasons, and — the immediate motivation for the split — a merge-bot re-sign
+# only invalidates the GPG check, not CLA/DCO, so re-running only gpg-check
+# after a merge-bot pass is both faster and clearer than re-running all 3.
+#
 # Single shared implementation of the per-PR contribution gate. Forgejo/Codeberg does not
 # resolve cross-repo reusable workflows (jobs.<id>.uses:), so the checks live in a composite
 # action (step-level uses:, which Codeberg does support) instead of a workflow_call workflow.
