@@ -65,7 +65,7 @@ inputs:
     default: 'Vidocq CI Bot'
   bot-email:
     description: 'Git author email for the release + bump commits'
-    default: 'ci@vidocq.dev'
+    default: 'ci@vidocq.io'
   git-signing-private-key:
     description: |
       GPG private key (ASCII-armored), dedicated to signing the bot's git commits
