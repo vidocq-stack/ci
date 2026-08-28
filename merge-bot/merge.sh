@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # merge.sh — rebase a PR's head branch onto its base, re-sign every replayed
-# commit with the dedicated CI bot GPG key, force-push, then fast-forward
-# merge via the Forgejo API.
+# commit with the dedicated CI bot GPG key, force-push, then (unless
+# MERGE_AFTER_REBASE=false) fast-forward merge via the Forgejo API.
 #
 # Why this exists: any server-side merge/squash/rebase (on Forgejo, GitHub or
 # GitLab alike) strips the contributor's original GPG signature, because the
@@ -13,7 +13,7 @@
 # Required env (passed by action.yml):
 #   PR_NUMBER, REPO, BASE_URL, BOT_TOKEN
 #   GIT_SIGNING_PRIVATE_KEY, GIT_SIGNING_PASSPHRASE, GIT_SIGNING_KEY_ID
-#   BOT_NAME, BOT_EMAIL
+#   BOT_NAME, BOT_EMAIL, MERGE_AFTER_REBASE (true/false, default true)
 #
 # Assumes the calling workflow already ran actions/checkout@v4 with
 # fetch-depth: 0 and a token with push rights (VIDOCQ_BOT_TOKEN).
@@ -52,7 +52,7 @@ mergeable=$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("mergeab
 [[ "$head_repo" == "$REPO" ]] \
   || die "cross-repo/fork PRs are not supported (head repo: ${head_repo}) — merge manually"
 [[ "$mergeable" != "False" ]] \
-  || die "PR #${PR_NUMBER} has conflicts with ${base_ref} — resolve locally and retry /merge"
+  || die "PR #${PR_NUMBER} has conflicts with ${base_ref} — resolve locally and retry /merge or /rebase"
 
 info "PR #${PR_NUMBER}: ${head_ref} → ${base_ref}"
 
@@ -96,11 +96,11 @@ git checkout -B "$head_ref" "origin/${head_ref}"
 
 info "Rebasing ${head_ref} onto origin/${base_ref} (re-signing every replayed commit)"
 GIT_SEQUENCE_EDITOR=true git rebase --exec 'git commit --amend --no-edit -S' "origin/${base_ref}" \
-  || die "rebase onto ${base_ref} failed (conflicts) — resolve locally and retry /merge"
+  || die "rebase onto ${base_ref} failed (conflicts) — resolve locally and retry /merge or /rebase"
 
 info "Verifying every commit ahead of ${base_ref} is signed"
 commits=$(git rev-list "origin/${base_ref}..HEAD")
-[[ -n "$commits" ]] || die "no commits ahead of ${base_ref} after rebase — nothing to merge"
+[[ -n "$commits" ]] || die "no commits ahead of ${base_ref} after rebase — nothing to do"
 for sha in $commits; do
   git verify-commit "$sha" 2>&1 | sed 's/^/    /'
   git verify-commit "$sha" >/dev/null 2>&1 || die "commit ${sha} failed signature verification"
@@ -112,7 +112,12 @@ new_head=$(git rev-parse HEAD)
 info "Force-pushing rebased+signed ${head_ref}"
 git push --force-with-lease origin "HEAD:${head_ref}"
 
-# ---------------------------------------------------------------- 4. fast-forward merge
+# ---------------------------------------------------------------- 4. fast-forward merge (optional)
+
+if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
+  ok "Rebase-only mode: ${head_ref} is up to date with ${base_ref} and fully signed — PR #${PR_NUMBER} left open"
+  exit 0
+fi
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "

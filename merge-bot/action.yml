@@ -1,11 +1,12 @@
-name: 'Merge-bot (rebase + re-sign + fast-forward)'
+name: 'Merge-bot (rebase + re-sign + optional fast-forward)'
 description: >-
   Rebase a pull request's head branch onto its base, re-sign every replayed
-  commit with the dedicated CI bot GPG key, force-push, then fast-forward
-  merge via the Forgejo API. This is the only way to merge a PR without
-  producing an unsigned commit once require_signed_commits is enforced,
-  since every git-forge (Forgejo, GitHub, GitLab included) strips the
-  original signatures on any server-side merge/squash/rebase.
+  commit with the dedicated CI bot GPG key, force-push, then (unless
+  merge: 'false') fast-forward merge via the Forgejo API. This is the only
+  way to update or merge a PR without producing an unsigned commit once
+  require_signed_commits is enforced, since every git-forge (Forgejo,
+  GitHub, GitLab included) strips the original signatures on any
+  server-side merge/squash/rebase.
 
 inputs:
   pr-number:
@@ -35,11 +36,18 @@ inputs:
   bot-email:
     description: 'Git author email, only used as a config fallback — original commit authors are untouched'
     default: 'ci@vidocq.io'
+  merge:
+    description: >-
+      Whether to fast-forward merge the PR after rebasing+re-signing.
+      Set to 'false' for rebase-only mode (e.g. a /rebase comment): the
+      branch is brought up to date and every commit re-signed, but the PR
+      is left open for a human (or a later /merge) to merge it.
+    default: 'true'
 
 runs:
   using: composite
   steps:
-    - name: Rebase, re-sign and fast-forward merge
+    - name: Rebase, re-sign and (optionally) fast-forward merge
       shell: bash
       env:
         PR_NUMBER: ${{ inputs.pr-number }}
@@ -51,4 +59,5 @@ runs:
         GIT_SIGNING_KEY_ID: ${{ inputs.git-signing-key-id }}
         BOT_NAME: ${{ inputs.bot-name }}
         BOT_EMAIL: ${{ inputs.bot-email }}
+        MERGE_AFTER_REBASE: ${{ inputs.merge }}
       run: bash "${{ github.action_path }}/merge.sh"
