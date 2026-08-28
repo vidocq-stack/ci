@@ -395,6 +395,9 @@ EOF
           gpg-passphrase:   \${{ secrets.GPG_PASSPHRASE }}
           gpg-key-id:       \${{ secrets.GPG_KEY_ID }}
           bot-token:        \${{ secrets.VIDOCQ_BOT_TOKEN }}
+          git-signing-private-key: \${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          git-signing-passphrase:  \${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          git-signing-key-id:      \${{ secrets.CI_BOT_GPG_KEY_ID }}
 
       - name: Notify Slack — release success
         if: success()

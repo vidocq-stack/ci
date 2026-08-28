@@ -13,25 +13,35 @@
 #   DRY_RUN                        "true" → no push, no upload (branch + tag local only)
 #   AUTO_PUBLISH                   "true" → bundle auto-published on Central
 #
-# Flow (10 steps):
+# Optional env:
+#   GIT_SIGNING_PRIVATE_KEY, GIT_SIGNING_PASSPHRASE, GIT_SIGNING_KEY_ID
+#                                  Dedicated key (separate from GPG_*) used to GPG-sign
+#                                  the release/bump commits pushed to main. Unset →
+#                                  commits are pushed unsigned, which fails branch
+#                                  protection on repos with require_signed_commits.
+#
+# Flow (11 steps):
 #    1. precheck             clean tree, branch=main, env present, format versions
 #    2. write_settings       ~/.m2/settings.xml (central + central-snapshots)
 #    3. import_gpg           GPG signing key (base64 or armored)
-#    4. reroute_ssh          insteadOf SSH→HTTPS for Codeberg pushes (bot token)
-#    5. branch_create        git checkout -b release/${RELEASE_VERSION} (off main)
+#    4. import_git_signing_key
+#                            optional dedicated key to sign the release/bump commits
+#                            themselves (distinct from the Maven-artifact GPG key)
+#    5. reroute_ssh          insteadOf SSH→HTTPS for Codeberg pushes (bot token)
+#    6. branch_create        git checkout -b release/${RELEASE_VERSION} (off main)
 #                            All POM mutations land on the release branch — main
 #                            is left untouched until the deploy succeeds.
-#    6. apply_overrides      versions:update-parent / set-property / use-dep-version
+#    7. apply_overrides      versions:update-parent / set-property / use-dep-version
 #                            then fail-fast scan for residual io.vidocq.* SNAPSHOTs
-#    7. set_version_and_commit
+#    8. set_version_and_commit
 #                            versions:set RELEASE_VERSION (processAllModules)
 #                            git commit on release/${RELEASE_VERSION}
 #                            DRY_RUN=false → push branch, DRY_RUN=true → keep local
-#    8. validate_build       mvn clean install (reactor) with a module-by-module
+#    9. validate_build       mvn clean install (reactor) with a module-by-module
 #                            fallback if Maven 4 RC-5 mis-orders the DAG
-#    9. deploy               mvn -P release deploy -pl !${excluded}
+#   10. deploy               mvn -P release deploy -pl !${excluded}
 #                            DRY_RUN=true → replaced by `verify` (sign + bundle, no upload)
-#   10. tag_and_finalize     git tag v${RELEASE_VERSION} on release branch HEAD
+#   11. tag_and_finalize     git tag v${RELEASE_VERSION} on release branch HEAD
 #                            DRY_RUN=false → push tag, checkout main, versions:set
 #                              NEXT_DEV_VERSION, commit, push main
 #                            DRY_RUN=true → tag local only, main untouched
@@ -319,6 +329,52 @@ step_import_gpg() {
   local fpr
   fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
   echo -e "5\ny\n" | gpg --batch --command-fd 0 --expert --edit-key "$fpr" trust quit 2>/dev/null || true
+}
+
+# Configures `git commit` to GPG-sign the release/bump commits pushed directly
+# to main. Deliberately a SEPARATE key from GPG_PRIVATE_KEY (which only signs
+# Maven artifacts) — see Vidocq/governance/.forgejo/keys/README.md. Optional:
+# when unset, commits are pushed unsigned, which fails branch protection on
+# any repo with require_signed_commits enabled (this is a hard requirement on
+# every Vidocq repo as of the org-wide governance hardening).
+step_import_git_signing_key() {
+  if [[ -z "${GIT_SIGNING_PRIVATE_KEY:-}" ]]; then
+    info "GIT_SIGNING_PRIVATE_KEY not provided — release/bump commits will be UNSIGNED"
+    info "(this will be rejected by 'require_signed_commits' branch protection)"
+    return 0
+  fi
+  require_env GIT_SIGNING_PASSPHRASE GIT_SIGNING_KEY_ID
+
+  info "Importing git commit-signing key"
+  if echo "$GIT_SIGNING_PRIVATE_KEY" | base64 -d 2>/dev/null | gpg --batch --import 2>/dev/null; then
+    ok "Git signing key imported (base64-decoded)"
+  else
+    echo "$GIT_SIGNING_PRIVATE_KEY" | gpg --batch --import
+    ok "Git signing key imported (ASCII-armored)"
+  fi
+  gpg --list-secret-keys --with-colons "$GIT_SIGNING_KEY_ID" | grep -q '^sec' \
+    || die "Git signing key import failed — key $GIT_SIGNING_KEY_ID not visible"
+
+  # Non-interactive signing: git invokes `gpg.program` with no TTY attached,
+  # so a plain `gpg -bsau` would block on a pinentry prompt. Point git at a
+  # tiny wrapper that always answers the passphrase via --pinentry-mode
+  # loopback, reading it from a file (never from argv/env, to keep it out of
+  # `ps`/CI logs).
+  local passfile wrapper
+  passfile=$(mktemp)
+  wrapper=$(mktemp)
+  printf '%s' "$GIT_SIGNING_PASSPHRASE" > "$passfile"
+  chmod 600 "$passfile"
+  cat > "$wrapper" <<WRAP
+#!/bin/sh
+exec gpg --batch --pinentry-mode loopback --passphrase-file "$passfile" "\$@"
+WRAP
+  chmod 700 "$wrapper"
+
+  git config gpg.program "$wrapper"
+  git config commit.gpgsign true
+  git config user.signingkey "$GIT_SIGNING_KEY_ID"
+  ok "git commits will be signed with key $GIT_SIGNING_KEY_ID"
 }
 
 # ---------------------------------------------------------------- 5. branch_create
@@ -1042,6 +1098,7 @@ main() {
   step_precheck
   step_write_settings
   step_import_gpg
+  step_import_git_signing_key
   step_reroute_ssh
   step_branch_create
   step_apply_overrides

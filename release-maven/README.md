@@ -37,6 +37,9 @@ The workflow that uses this action must:
 | `gpg-key-id` | ✅ | — | `secrets.GPG_KEY_ID` (long key id) |
 | `bot-name` | ❌ | `Vidocq CI Bot` | Git author for lock + bump commits |
 | `bot-email` | ❌ | `ci@vidocq.dev` | Git author email |
+| `git-signing-private-key` | ❌ | `''` | `secrets.CI_BOT_GPG_PRIVATE_KEY` — dedicated key (separate from `gpg-private-key`) used to GPG-sign the release/bump commits themselves. Unset → those commits are pushed unsigned, which fails branch protection on repos with `require_signed_commits`. |
+| `git-signing-passphrase` | ❌ | `''` | `secrets.CI_BOT_GPG_PASSPHRASE` |
+| `git-signing-key-id` | ❌ | `''` | `secrets.CI_BOT_GPG_KEY_ID` (long key id) |
 | `release-profile` | ❌ | `release` | Profile activated during `release:perform` |
 | `wait-timeout-seconds` | ❌ | `3600` | Max seconds to wait for Central propagation |
 | `wait-interval-seconds` | ❌ | `60` | Polling interval |
@@ -69,6 +72,9 @@ jobs:
           gpg-private-key:  ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase:   ${{ secrets.GPG_PASSPHRASE }}
           gpg-key-id:       ${{ secrets.GPG_KEY_ID }}
+          git-signing-private-key: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          git-signing-passphrase:  ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          git-signing-key-id:      ${{ secrets.CI_BOT_GPG_KEY_ID }}
 ```
 
 ## Example — `vauban` (depends on `vidocq-parent`)
@@ -102,6 +108,9 @@ jobs:
           gpg-private-key:  ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase:   ${{ secrets.GPG_PASSPHRASE }}
           gpg-key-id:       ${{ secrets.GPG_KEY_ID }}
+          git-signing-private-key: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          git-signing-passphrase:  ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          git-signing-key-id:      ${{ secrets.CI_BOT_GPG_KEY_ID }}
 ```
 
 ## Topological release order
