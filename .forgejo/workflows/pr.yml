@@ -1,26 +1,45 @@
 # Pull-request governance gate for repositories without a build pipeline
-# (docs, infra, templates). It verifies that the PR author signed the Vidocq
-# CLA and that every PR commit is GPG-signed and carries a Signed-off-by
-# trailer, via the shared composite action (Vidocq/ci/governance-checks).
+# (docs, infra, templates). Verifies that the PR author signed the Vidocq
+# CLA, every PR commit is GPG-signed, and every PR commit carries a
+# Signed-off-by trailer, via 3 independent shared composite actions
+# (Vidocq/ci/cla-check, gpg-check, dco-check — split out of the previous
+# bundled governance-checks so a merge-bot re-sign only needs to re-run
+# gpg-check).
 #
 # NOTE: `pull_request` workflows run from the PR branch's version of this
-# file, so a PR based on an older commit (or one that removes this job) will
-# simply not report the context. Branch protection on `main` therefore
-# REQUIRES the "pr-validate / governance-checks (pull_request)" context:
-# such a PR stays unmergeable until it is rebased on a base that has the gate.
+# file, so a PR based on an older commit (or one that removes a job) will
+# simply not report that context. Branch protection on `main` therefore
+# REQUIRES all 3 "pr-validate / <job> (pull_request)" contexts: such a PR
+# stays unmergeable until it is rebased on a base that has the gate.
 name: pr-validate
 on:
   pull_request:
     branches: [main]
 
 jobs:
-  governance-checks:
+  cla-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: https://codefloe.com/Vidocq/ci/governance-checks@main
+      - uses: https://codefloe.com/Vidocq/ci/cla-check@main
         with:
           pr-author: ${{ github.event.pull_request.user.login }}
           slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  gpg-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: https://codefloe.com/Vidocq/ci/gpg-check@main
+
+  dco-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: https://codefloe.com/Vidocq/ci/dco-check@main
