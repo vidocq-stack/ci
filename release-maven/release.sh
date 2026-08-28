@@ -224,7 +224,7 @@ step_precheck() {
   fi
 
   git config user.name  "${BOT_NAME:-Vidocq CI Bot}"
-  git config user.email "${BOT_EMAIL:-ci@vidocq.dev}"
+  git config user.email "${BOT_EMAIL:-ci@vidocq.io}"
 
   local mode="real release"
   [[ "$DRY_RUN" == "true" ]] && mode="DRY-RUN (no push, no upload)"
