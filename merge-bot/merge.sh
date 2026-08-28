@@ -119,6 +119,16 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
   exit 0
 fi
 
+info "Waiting for required status checks on ${new_head} (force-push always retriggers them)"
+for attempt in $(seq 1 20); do
+  status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
+  [[ "$status" == "success" ]] && break
+  [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
+  sleep 3
+done
+[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 60s (last state: ${status})"
+
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "
 import json
@@ -128,14 +138,17 @@ print(json.dumps({
     'head_commit_id': '${new_head}',
 }))
 ")
-resp=$(curl -sS -w '\n%{http_code}' -X POST \
-  -H "$auth_hdr" -H "Content-Type: application/json" \
-  -d "$merge_body" \
-  "${API}/repos/${REPO}/pulls/${PR_NUMBER}/merge")
-http_code=$(tail -n1 <<<"$resp")
-body=$(sed '$d' <<<"$resp")
-
-case "$http_code" in
-  200|201) ok "PR #${PR_NUMBER} merged (fast-forward, signed by ${GIT_SIGNING_KEY_ID})" ;;
-  *) die "merge API returned HTTP ${http_code}: ${body}" ;;
-esac
+for attempt in $(seq 1 5); do
+  resp=$(curl -sS -w '\n%{http_code}' -X POST \
+    -H "$auth_hdr" -H "Content-Type: application/json" \
+    -d "$merge_body" \
+    "${API}/repos/${REPO}/pulls/${PR_NUMBER}/merge")
+  http_code=$(tail -n1 <<<"$resp")
+  body=$(sed '$d' <<<"$resp")
+  case "$http_code" in
+    200|201) ok "PR #${PR_NUMBER} merged (fast-forward, signed by ${GIT_SIGNING_KEY_ID})"; exit 0 ;;
+    405) info "merge not yet allowed (status checks still settling), retrying in 3s..."; sleep 3 ;;
+    *) die "merge API returned HTTP ${http_code}: ${body}" ;;
+  esac
+done
+die "merge API kept returning 405 after retries: ${body}"
