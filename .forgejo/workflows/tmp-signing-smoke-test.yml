@@ -1,0 +1,83 @@
+name: tmp-signing-smoke-test
+on:
+  workflow_dispatch: {}
+
+jobs:
+  smoke-test:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import CI bot GPG key and configure signing
+        env:
+          GIT_SIGNING_PRIVATE_KEY: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
+          GIT_SIGNING_PASSPHRASE:  ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
+          GIT_SIGNING_KEY_ID:      ${{ secrets.CI_BOT_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          echo "allow-loopback-pinentry" > "$GNUPGHOME/gpg-agent.conf"
+          gpgconf --kill gpg-agent 2>/dev/null || true
+
+          if echo "$GIT_SIGNING_PRIVATE_KEY" | base64 -d 2>/dev/null | gpg --batch --import - 2>/dev/null; then
+            echo "imported (base64)"
+          else
+            echo "$GIT_SIGNING_PRIVATE_KEY" | gpg --batch --import - 
+            echo "imported (armored)"
+          fi
+
+          passfile="$(mktemp)"
+          chmod 600 "$passfile"
+          printf '%s' "$GIT_SIGNING_PASSPHRASE" > "$passfile"
+
+          wrapper="$(mktemp)"
+          chmod 700 "$wrapper"
+          cat > "$wrapper" <<WRAP
+          #!/usr/bin/env bash
+          exec gpg --batch --pinentry-mode loopback --passphrase-file "$passfile" "\$@"
+          WRAP
+
+          git config user.name  "Vidocq CI Bot"
+          git config user.email "ci@vidocq.io"
+          git config gpg.program "$wrapper"
+          git config commit.gpgsign true
+          git config user.signingkey "$GIT_SIGNING_KEY_ID"
+
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      - name: Create signed empty commit
+        run: |
+          set -euo pipefail
+          git commit --allow-empty -m "test: signing smoke test (throwaway, will be deleted)"
+          echo "--- git log (local view) ---"
+          git log -1 --show-signature | cat
+
+      - name: Push throwaway branch
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote set-url origin "https://vidocq-ci-bot:${BOT_TOKEN}@codefloe.com/Vidocq/ci.git"
+          git push -f origin HEAD:refs/heads/tmp-signing-smoke-test-result
+
+      - name: Check server-side verification via API
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "commit sha: $sha"
+          curl -fsS -H "Authorization: token ${BOT_TOKEN}" \
+            "https://codefloe.com/api/v1/repos/Vidocq/ci/git/commits/${sha}" \
+            | tee /tmp/commit_info.json
+          echo ""
+          echo "--- verification block ---"
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/commit_info.json'))
+          v = d.get('commit', {}).get('verification') or d.get('verification')
+          print(json.dumps(v, indent=2))
+          "
