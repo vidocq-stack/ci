@@ -120,14 +120,18 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
 fi
 
 info "Waiting for required status checks on ${new_head} (force-push always retriggers them)"
-for attempt in $(seq 1 20); do
+# 120 attempts * 5s = 10 minutes: some consumer repos run a full Maven build
+# (pr-validate) as part of the required checks, which routinely takes 3-5
+# minutes — the previous 60s budget was only enough for the lightweight
+# governance-only checks on ci/vidocq-parent.
+for attempt in $(seq 1 120); do
   status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
     | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
   [[ "$status" == "success" ]] && break
   [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
-  sleep 3
+  sleep 5
 done
-[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 60s (last state: ${status})"
+[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 10 minutes (last state: ${status})"
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "
