@@ -34,7 +34,7 @@ inputs:
     default: 'Vidocq CI Bot'
   bot-email:
     description: 'Git author email, only used as a config fallback — original commit authors are untouched'
-    default: 'ci@vidocq.dev'
+    default: 'ci@vidocq.io'
 
 runs:
   using: composite
