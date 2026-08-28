@@ -59,7 +59,7 @@ info "PR #${PR_NUMBER}: ${head_ref} → ${base_ref}"
 # ---------------------------------------------------------------- 2. signing setup
 
 git config user.name "${BOT_NAME:-Vidocq CI Bot}"
-git config user.email "${BOT_EMAIL:-ci@vidocq.dev}"
+git config user.email "${BOT_EMAIL:-ci@vidocq.io}"
 
 info "Importing git commit-signing key"
 if base64 -d <<<"$GIT_SIGNING_PRIVATE_KEY" 2>/dev/null | gpg --batch --import 2>/dev/null; then
