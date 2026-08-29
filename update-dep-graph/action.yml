@@ -17,21 +17,6 @@ inputs:
   branch:
     description: 'Branch of the graph repo to read scripts from'
     default: 'main'
-  git-signing-private-key:
-    description: 'CI bot GPG private key, ASCII-armored or base64 (secrets.CI_BOT_GPG_PRIVATE_KEY) — Vidocq/dep-graph main requires signed commits'
-    required: true
-  git-signing-passphrase:
-    description: 'Passphrase for git-signing-private-key (secrets.CI_BOT_GPG_PASSPHRASE)'
-    required: true
-  git-signing-key-id:
-    description: 'Long key id of git-signing-private-key (secrets.CI_BOT_GPG_KEY_ID)'
-    required: true
-  bot-name:
-    description: 'Git author/committer name for the data-graph commit'
-    default: 'Vidocq CI Bot'
-  bot-email:
-    description: 'Git author/committer email for the data-graph commit'
-    default: 'ci@vidocq.io'
 
 runs:
   using: composite
@@ -44,11 +29,6 @@ runs:
         BASE_URL: ${{ inputs.base-url }}
         GRAPH_REPO: ${{ inputs.graph-repo }}
         BRANCH: ${{ inputs.branch }}
-        GIT_SIGNING_PRIVATE_KEY: ${{ inputs.git-signing-private-key }}
-        GIT_SIGNING_PASSPHRASE: ${{ inputs.git-signing-passphrase }}
-        GIT_SIGNING_KEY_ID: ${{ inputs.git-signing-key-id }}
-        BOT_NAME: ${{ inputs.bot-name }}
-        BOT_EMAIL: ${{ inputs.bot-email }}
       run: |
         set -euo pipefail
         command -v python3 >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || \
