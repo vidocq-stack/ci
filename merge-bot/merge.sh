@@ -94,23 +94,45 @@ info "Fetching ${base_ref} and ${head_ref}"
 git fetch origin "$base_ref" "$head_ref"
 git checkout -B "$head_ref" "origin/${head_ref}"
 
-info "Rebasing ${head_ref} onto origin/${base_ref} (re-signing every replayed commit)"
-GIT_SEQUENCE_EDITOR=true git rebase --exec 'git commit --amend --no-edit -S' "origin/${base_ref}" \
-  || die "rebase onto ${base_ref} failed (conflicts) — resolve locally and retry /merge or /rebase"
+# Idempotence short-circuit: if the branch is already rebased onto base and
+# every commit ahead already carries a valid signature, keep the existing SHA.
+# Rewriting it (rebase --exec amend) would change the committer date, produce
+# a new head, retrigger every required check and throw away the green ones —
+# turning each retried /merge into a fresh race against the checks budget.
+already_ok=false
+if git merge-base --is-ancestor "origin/${base_ref}" HEAD; then
+  commits=$(git rev-list "origin/${base_ref}..HEAD")
+  if [[ -n "$commits" ]]; then
+    already_ok=true
+    for sha in $commits; do
+      git verify-commit "$sha" >/dev/null 2>&1 || { already_ok=false; break; }
+    done
+  fi
+fi
 
-info "Verifying every commit ahead of ${base_ref} is signed"
-commits=$(git rev-list "origin/${base_ref}..HEAD")
-[[ -n "$commits" ]] || die "no commits ahead of ${base_ref} after rebase — nothing to do"
-for sha in $commits; do
-  git verify-commit "$sha" 2>&1 | sed 's/^/    /'
-  git verify-commit "$sha" >/dev/null 2>&1 || die "commit ${sha} failed signature verification"
-done
-ok "All commits signed and verified"
+if [[ "$already_ok" == "true" ]]; then
+  ok "${head_ref} is already rebased onto ${base_ref} and fully signed — keeping existing head (checks already run against it)"
+else
+  info "Rebasing ${head_ref} onto origin/${base_ref} (re-signing every replayed commit)"
+  GIT_SEQUENCE_EDITOR=true git rebase --exec 'git commit --amend --no-edit -S' "origin/${base_ref}" \
+    || die "rebase onto ${base_ref} failed (conflicts) — resolve locally and retry /merge or /rebase"
+
+  info "Verifying every commit ahead of ${base_ref} is signed"
+  commits=$(git rev-list "origin/${base_ref}..HEAD")
+  [[ -n "$commits" ]] || die "no commits ahead of ${base_ref} after rebase — nothing to do"
+  for sha in $commits; do
+    git verify-commit "$sha" 2>&1 | sed 's/^/    /'
+    git verify-commit "$sha" >/dev/null 2>&1 || die "commit ${sha} failed signature verification"
+  done
+  ok "All commits signed and verified"
+fi
 
 new_head=$(git rev-parse HEAD)
 
-info "Force-pushing rebased+signed ${head_ref}"
-git push --force-with-lease origin "HEAD:${head_ref}"
+if [[ "$already_ok" != "true" ]]; then
+  info "Force-pushing rebased+signed ${head_ref}"
+  git push --force-with-lease origin "HEAD:${head_ref}"
+fi
 
 # ---------------------------------------------------------------- 4. fast-forward merge (optional)
 
@@ -119,19 +141,19 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
   exit 0
 fi
 
-info "Waiting for required status checks on ${new_head} (force-push always retriggers them)"
-# 120 attempts * 5s = 10 minutes: some consumer repos run a full Maven build
-# (pr-validate) as part of the required checks, which routinely takes 3-5
-# minutes — the previous 60s budget was only enough for the lightweight
-# governance-only checks on ci/vidocq-parent.
-for attempt in $(seq 1 120); do
+info "Waiting for required status checks on ${new_head}"
+# 360 attempts * 5s = 30 minutes: some consumer repos run a full Maven build
+# (pr-validate) as part of the required checks, which takes 3-5 minutes on the
+# fast runner but 10+ minutes on the slower ones — the previous 10-minute
+# budget lost the race whenever a slow runner picked the job up.
+for attempt in $(seq 1 360); do
   status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
     | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
   [[ "$status" == "success" ]] && break
   [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
   sleep 5
 done
-[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 10 minutes (last state: ${status})"
+[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${status})"
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "
