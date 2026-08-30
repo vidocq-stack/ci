@@ -144,8 +144,11 @@ fi
 # Repos without required status checks (enable_status_check=false, e.g.
 # GestionProjet or governance) never report a commit status, so waiting for
 # "success" would burn the whole 30-minute budget and fail. Skip the wait.
-checks_required=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branch_protections/${base_ref}" \
-  | python3 -c 'import sys,json; print(str(json.load(sys.stdin).get("enable_status_check", False)).lower())' \
+# NOTE: use the read-level /branches/{branch} endpoint — /branch_protections/
+# requires admin rights the bot token does not have (it returned an error page,
+# and the fail-safe fallback made the bot wait forever on check-less repos).
+checks_required=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branches/${base_ref}" \
+  | python3 -c 'import sys,json; print(str(json.load(sys.stdin).get("enable_status_check", True)).lower())' \
   || echo "true")
 
 if [[ "$checks_required" != "true" ]]; then
