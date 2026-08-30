@@ -141,19 +141,30 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
   exit 0
 fi
 
-info "Waiting for required status checks on ${new_head}"
-# 360 attempts * 5s = 30 minutes: some consumer repos run a full Maven build
-# (pr-validate) as part of the required checks, which takes 3-5 minutes on the
-# fast runner but 10+ minutes on the slower ones — the previous 10-minute
-# budget lost the race whenever a slow runner picked the job up.
-for attempt in $(seq 1 360); do
-  status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
-    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
-  [[ "$status" == "success" ]] && break
-  [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
-  sleep 5
-done
-[[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${status})"
+# Repos without required status checks (enable_status_check=false, e.g.
+# GestionProjet or governance) never report a commit status, so waiting for
+# "success" would burn the whole 30-minute budget and fail. Skip the wait.
+checks_required=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branch_protections/${base_ref}" \
+  | python3 -c 'import sys,json; print(str(json.load(sys.stdin).get("enable_status_check", False)).lower())' \
+  || echo "true")
+
+if [[ "$checks_required" != "true" ]]; then
+  info "Branch protection on ${base_ref} does not require status checks — skipping check wait"
+else
+  info "Waiting for required status checks on ${new_head}"
+  # 360 attempts * 5s = 30 minutes: some consumer repos run a full Maven build
+  # (pr-validate) as part of the required checks, which takes 3-5 minutes on the
+  # fast runner but 10+ minutes on the slower ones — the previous 10-minute
+  # budget lost the race whenever a slow runner picked the job up.
+  for attempt in $(seq 1 360); do
+    status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
+    [[ "$status" == "success" ]] && break
+    [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
+    sleep 5
+  done
+  [[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${status})"
+fi
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "
