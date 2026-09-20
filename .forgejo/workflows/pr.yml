@@ -18,7 +18,7 @@ on:
 
 jobs:
   cla-check:
-    runs-on: ubuntu-latest
+    runs-on: vidocq-runner
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,7 +29,7 @@ jobs:
           slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
 
   gpg-check:
-    runs-on: ubuntu-latest
+    runs-on: vidocq-runner
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +37,7 @@ jobs:
       - uses: https://codefloe.com/Vidocq/ci/gpg-check@main
 
   dco-check:
-    runs-on: ubuntu-latest
+    runs-on: vidocq-runner
     steps:
       - uses: actions/checkout@v4
         with:
