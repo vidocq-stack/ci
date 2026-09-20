@@ -12,13 +12,30 @@ on:
         description: "Fast-forward merge after rebasing? Set to 'false' for rebase-only."
         default: 'true'
 
+# One merge-bot run at a time per repository. Two runs force-pushing to the
+# same repository in the same second left one of them wedged inside
+# `git push --force-with-lease`, holding a runner and never reporting.
+# Queue them instead of cancelling: each one was asked for by a human.
+concurrency:
+  group: merge-bot-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   merge:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request != null &&
-       (contains(github.event.comment.body, '/merge') || contains(github.event.comment.body, '/rebase')))
+       github.event.comment.user.login != 'vidocq-ci-bot' &&
+       (startsWith(github.event.comment.body, '/merge') || startsWith(github.event.comment.body, '/rebase')))
     runs-on: vidocq-runner
+    # A trigger is the FIRST thing in a comment, and never something the bot
+    # itself said. Both halves matter: `contains` matched the token anywhere in
+    # any comment, so the rebase-only success message below -- which names
+    # /merge to tell a human what to do next -- re-triggered this workflow in
+    # merge mode and merged six pull requests that had only been asked to
+    # rebase. `startsWith` also stops a human from merging a PR by writing
+    # "I'll /merge once CI is green".
+    timeout-minutes: 45
     steps:
       - name: Resolve PR number, actor and mode
         id: ctx

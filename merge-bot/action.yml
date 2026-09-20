@@ -60,4 +60,11 @@ runs:
         BOT_NAME: ${{ inputs.bot-name }}
         BOT_EMAIL: ${{ inputs.bot-email }}
         MERGE_AFTER_REBASE: ${{ inputs.merge }}
+        # What actually triggered this run. The calling workflow gates on it
+        # too, but that workflow is copied into every consumer repository and
+        # drifts; this action is resolved from @main, so the guard in merge.sh
+        # reaches every repository the moment it is merged here.
+        TRIGGER_EVENT: ${{ github.event_name }}
+        TRIGGER_COMMENTER: ${{ github.event.comment.user.login }}
+        TRIGGER_COMMENT: ${{ github.event.comment.body }}
       run: bash "${{ github.action_path }}/merge.sh"

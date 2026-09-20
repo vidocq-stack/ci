@@ -14,6 +14,8 @@
 #   PR_NUMBER, REPO, BASE_URL, BOT_TOKEN
 #   GIT_SIGNING_PRIVATE_KEY, GIT_SIGNING_PASSPHRASE, GIT_SIGNING_KEY_ID
 #   BOT_NAME, BOT_EMAIL, MERGE_AFTER_REBASE (true/false, default true)
+#   TRIGGER_EVENT, TRIGGER_COMMENTER, TRIGGER_COMMENT — what set this run off
+#   TRIGGER_BOT_LOGIN — the bot's own account (default vidocq-ci-bot)
 #
 # Assumes the calling workflow already ran actions/checkout@v4 with
 # fetch-depth: 0 and a token with push rights (VIDOCQ_BOT_TOKEN).
@@ -32,6 +34,26 @@ require_env() {
 
 require_env PR_NUMBER REPO BASE_URL BOT_TOKEN \
             GIT_SIGNING_PRIVATE_KEY GIT_SIGNING_PASSPHRASE GIT_SIGNING_KEY_ID
+
+# ---------------------------------------------------------------- 0. is this trigger real?
+#
+# `/rebase` used to merge the pull request. The rebase-only run ends by posting
+# "Still open -- use /merge when ready", the calling workflow matched /merge
+# anywhere in any comment, and so the bot re-triggered itself in merge mode and
+# merged six pull requests nobody had asked to merge.
+#
+# Refusing here rather than exiting 0 is deliberate: a successful run makes the
+# caller post its "rebased, still open" comment, which would trigger the bot
+# again, which would refuse again, which would comment again -- a loop. A
+# failure posts a message carrying no trigger word, and stops.
+if [[ "${TRIGGER_EVENT:-}" == "issue_comment" ]]; then
+  [[ "${TRIGGER_COMMENTER:-}" != "${TRIGGER_BOT_LOGIN:-vidocq-ci-bot}" ]] \
+    || die "this comment was written by the bot itself — refusing to act on it"
+  case "${TRIGGER_COMMENT:-}" in
+    /merge*|/rebase*) ;;
+    *) die "a trigger is the first thing in a comment; this one only mentions one in passing" ;;
+  esac
+fi
 
 API="${BASE_URL%/}/api/v1"
 auth_hdr="Authorization: token ${BOT_TOKEN}"
@@ -91,7 +113,9 @@ git config user.signingkey "$GIT_SIGNING_KEY_ID"
 # ---------------------------------------------------------------- 3. rebase + re-sign
 
 info "Fetching ${base_ref} and ${head_ref}"
-git fetch origin "$base_ref" "$head_ref"
+# git has no deadline of its own: a wedged transfer would hold the runner
+# until the job timeout, silent the whole time.
+timeout 300 git fetch origin "$base_ref" "$head_ref"
 git checkout -B "$head_ref" "origin/${head_ref}"
 
 # Idempotence short-circuit: if the branch is already rebased onto base and
@@ -131,7 +155,7 @@ new_head=$(git rev-parse HEAD)
 
 if [[ "$already_ok" != "true" ]]; then
   info "Force-pushing rebased+signed ${head_ref}"
-  git push --force-with-lease origin "HEAD:${head_ref}"
+  timeout 300 git push --force-with-lease origin "HEAD:${head_ref}"
 fi
 
 # ---------------------------------------------------------------- 4. fast-forward merge (optional)
