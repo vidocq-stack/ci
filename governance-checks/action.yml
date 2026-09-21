@@ -121,16 +121,67 @@ runs:
           BASE_REF="origin/main"
         fi
 
-        UNSIGNED=$(git log "$BASE_REF"..HEAD --format="%H %ae" | \
-          while read -r hash email; do
-            git verify-commit "$hash" 2>/dev/null || echo "  $hash ($email)"
-          done)
-        if [ -n "$UNSIGNED" ]; then
+        # A commit produced by the forge's own web "Update branch" button (merge mode):
+        # exactly two parents, author identical to committer, an author address under
+        # @noreply.codefloe.com and a "Merge branch '…' into …" subject. Such a commit
+        # still fails — a forge signs nothing, and exempting it would let any unsigned
+        # merge through — but the remedy to print is not the contributor's GPG setup.
+        # Every field is read with its own `git log -1`, so a subject containing spaces
+        # or quotes cannot shift the parsing.
+        is_forge_update_commit() {
+          local hash="$1" parents author_name author_email committer_name committer_email subject
+          parents="$(git log -1 --format='%P' "$hash")"
+          set -- $parents
+          [ "$#" -eq 2 ] || return 1
+          author_name="$(git log -1 --format='%an' "$hash")"
+          author_email="$(git log -1 --format='%ae' "$hash")"
+          committer_name="$(git log -1 --format='%cn' "$hash")"
+          committer_email="$(git log -1 --format='%ce' "$hash")"
+          [ "$author_name" = "$committer_name" ] || return 1
+          [ "$author_email" = "$committer_email" ] || return 1
+          case "$author_email" in *@noreply.codefloe.com) ;; *) return 1 ;; esac
+          subject="$(git log -1 --format='%s' "$hash")"
+          case "$subject" in "Merge branch '"*"' into "*) ;; *) return 1 ;; esac
+          return 0
+        }
+
+        UNSIGNED_FORGE=""
+        UNSIGNED_OTHER=""
+        while IFS= read -r hash; do
+          [ -n "$hash" ] || continue
+          git verify-commit "$hash" 2>/dev/null && continue
+          email="$(git log -1 --format='%ae' "$hash")"
+          if is_forge_update_commit "$hash"; then
+            UNSIGNED_FORGE="${UNSIGNED_FORGE}  $hash ($email) $(git log -1 --format='%s' "$hash")"$'\n'
+          else
+            UNSIGNED_OTHER="${UNSIGNED_OTHER}  $hash ($email)"$'\n'
+          fi
+        done < <(git log "$BASE_REF"..HEAD --format='%H')
+
+        FAILED=0
+        if [ -n "$UNSIGNED_OTHER" ]; then
           echo "❌ The following commits are not GPG-signed or have invalid signatures:"
-          echo "$UNSIGNED"
+          printf '%s' "$UNSIGNED_OTHER"
           echo ""
           echo "All commits must be GPG-signed."
           echo "See https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing"
+          echo ""
+          FAILED=1
+        fi
+        if [ -n "$UNSIGNED_FORGE" ]; then
+          echo "❌ The following commits are not GPG-signed and were created by the forge itself:"
+          printf '%s' "$UNSIGNED_FORGE"
+          echo ""
+          echo "This commit was created by the web \"Update branch\" button, not by you."
+          echo "A forge signs nothing when it merges on the server, and its rebase mode"
+          echo "would strip the signatures from your other commits instead."
+          echo "Comment '/rebase' on this pull request: the merge-bot will rebase the branch,"
+          echo "re-sign every commit with the CI key and force-push, leaving the pull request"
+          echo "open."
+          echo ""
+          FAILED=1
+        fi
+        if [ "$FAILED" -ne 0 ]; then
           exit 1
         fi
         echo "✅ All commits are correctly GPG-signed"
@@ -147,15 +198,68 @@ runs:
           BASE_REF="origin/main"
         fi
 
-        MISSING=$(git log "$BASE_REF"..HEAD --format="%H" | \
-          while read -r hash; do
-            git log -1 --format="%B" "$hash" | grep -q "^Signed-off-by:" || echo "  $hash"
-          done)
-        if [ -n "$MISSING" ]; then
+        # A commit produced by the forge's own web "Update branch" button (merge mode):
+        # exactly two parents, author identical to committer, an author address under
+        # @noreply.codefloe.com and a "Merge branch '…' into …" subject. Such a commit
+        # still fails — exempting it would let any trailer-less merge through — but the
+        # remedy to print is not the contributor's git configuration, since the commit
+        # was never made on their machine. Every field is read with its own `git log -1`,
+        # so a subject containing spaces or quotes cannot shift the parsing.
+        is_forge_update_commit() {
+          local hash="$1" parents author_name author_email committer_name committer_email subject
+          parents="$(git log -1 --format='%P' "$hash")"
+          set -- $parents
+          [ "$#" -eq 2 ] || return 1
+          author_name="$(git log -1 --format='%an' "$hash")"
+          author_email="$(git log -1 --format='%ae' "$hash")"
+          committer_name="$(git log -1 --format='%cn' "$hash")"
+          committer_email="$(git log -1 --format='%ce' "$hash")"
+          [ "$author_name" = "$committer_name" ] || return 1
+          [ "$author_email" = "$committer_email" ] || return 1
+          case "$author_email" in *@noreply.codefloe.com) ;; *) return 1 ;; esac
+          subject="$(git log -1 --format='%s' "$hash")"
+          case "$subject" in "Merge branch '"*"' into "*) ;; *) return 1 ;; esac
+          return 0
+        }
+
+        MISSING_FORGE=""
+        MISSING_OTHER=""
+        while IFS= read -r hash; do
+          [ -n "$hash" ] || continue
+          if git log -1 --format='%B' "$hash" | grep -q "^Signed-off-by:"; then
+            continue
+          fi
+          if is_forge_update_commit "$hash"; then
+            MISSING_FORGE="${MISSING_FORGE}  $hash ($(git log -1 --format='%ae' "$hash")) $(git log -1 --format='%s' "$hash")"$'\n'
+          else
+            MISSING_OTHER="${MISSING_OTHER}  $hash"$'\n'
+          fi
+        done < <(git log "$BASE_REF"..HEAD --format='%H')
+
+        FAILED=0
+        if [ -n "$MISSING_OTHER" ]; then
           echo "❌ The following commits are missing a Signed-off-by trailer:"
-          echo "$MISSING"
+          printf '%s' "$MISSING_OTHER"
           echo ""
           echo "Use: git config --local format.signoff true   (or: git commit --signoff)"
+          echo ""
+          FAILED=1
+        fi
+        if [ -n "$MISSING_FORGE" ]; then
+          echo "❌ The following commits have no Signed-off-by trailer and were created by the forge itself:"
+          printf '%s' "$MISSING_FORGE"
+          echo ""
+          echo "This commit was created by the web \"Update branch\" button, not by you."
+          echo "A forge adds no trailer when it merges on the server, so 'format.signoff'"
+          echo "would have changed nothing here, and its rebase mode would strip the GPG"
+          echo "signatures from your other commits instead."
+          echo "Comment '/rebase' on this pull request: the merge-bot will rebase the branch,"
+          echo "re-sign every commit with the CI key and force-push, leaving the pull request"
+          echo "open."
+          echo ""
+          FAILED=1
+        fi
+        if [ "$FAILED" -ne 0 ]; then
           exit 1
         fi
         echo "✅ All commits have a Signed-off-by trailer"
