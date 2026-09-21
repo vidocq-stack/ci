@@ -26,15 +26,12 @@ on:
         required: false
         default: 'true'
         type: string
-    secrets:
-      VIDOCQ_BOT_TOKEN:
-        required: true
-      CI_BOT_GPG_PRIVATE_KEY:
-        required: true
-      CI_BOT_GPG_PASSPHRASE:
-        required: true
-      CI_BOT_GPG_KEY_ID:
-        required: true
+    # No `secrets:` declaration: Forgejo documents on.workflow_call.inputs and
+    # .outputs, not .secrets, and declaring it made the forge schedule this file
+    # on push and pull_request and fail the run before any job existed. Callers
+    # pass `secrets: inherit`, which the reference does document, and this
+    # workflow reads VIDOCQ_BOT_TOKEN and CI_BOT_GPG_* from the caller's own
+    # secrets as a result.
 
 # One merge-bot run at a time per repository. Two runs force-pushing to the
 # same repository in the same second left one of them wedged inside
