@@ -1,5 +1,10 @@
 name: merge-bot
 
+# Declares when the bot may run; what it does lives in the reusable workflow.
+# Every Vidocq repository carries this same file, so a change to the bot's
+# behaviour is one commit in Vidocq/ci rather than one pull request per
+# repository. See .forgejo/workflows/merge-bot-reusable.yml.
+
 on:
   issue_comment:
     types: [created]
@@ -12,96 +17,10 @@ on:
         description: "Fast-forward merge after rebasing? Set to 'false' for rebase-only."
         default: 'true'
 
-# One merge-bot run at a time per repository. Two runs force-pushing to the
-# same repository in the same second left one of them wedged inside
-# `git push --force-with-lease`, holding a runner and never reporting.
-# Queue them instead of cancelling: each one was asked for by a human.
-concurrency:
-  group: merge-bot-${{ github.repository }}
-  cancel-in-progress: false
-
 jobs:
   merge:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request != null &&
-       github.event.comment.user.login != 'vidocq-ci-bot' &&
-       (startsWith(github.event.comment.body, '/merge') || startsWith(github.event.comment.body, '/rebase')))
-    runs-on: vidocq-runner
-    # A trigger is the FIRST thing in a comment, and never something the bot
-    # itself said. Both halves matter: `contains` matched the token anywhere in
-    # any comment, so the rebase-only success message below -- which names
-    # /merge to tell a human what to do next -- re-triggered this workflow in
-    # merge mode and merged six pull requests that had only been asked to
-    # rebase. `startsWith` also stops a human from merging a PR by writing
-    # "I'll /merge once CI is green".
-    timeout-minutes: 45
-    steps:
-      - name: Resolve PR number, actor and mode
-        id: ctx
-        run: |
-          set -euo pipefail
-          echo "pr-number=${{ github.event.inputs.pr-number || github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-          echo "actor=${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.comment.user.login }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "merge=${{ github.event.inputs.merge }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ contains(github.event.comment.body, '/rebase') }}" == "true" ]]; then
-            echo "merge=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "merge=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Require write access
-        if: github.event_name == 'issue_comment'
-        env:
-          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-          ACTOR: ${{ steps.ctx.outputs.actor }}
-        run: |
-          set -euo pipefail
-          # The /collaborators/{user}/permission endpoint requires an admin-level
-          # token, which the bot deliberately does not have. Instead, check
-          # membership in the org teams that actually hold push/merge rights on
-          # protected branches (see branch_protections.push_whitelist_teams):
-          # devs (1500) and Owners (752). Team IDs are org-scoped, stable across
-          # every Vidocq repo.
-          authorized=false
-          for team_id in 1500 752; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $BOT_TOKEN" \
-              "https://codefloe.com/api/v1/teams/${team_id}/members/${ACTOR}")
-            if [[ "$code" == "200" ]]; then authorized=true; break; fi
-          done
-          $authorized \
-            || { echo "::error::@${ACTOR} is not a member of devs/Owners — refusing"; exit 1; }
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-
-      - uses: ./merge-bot
-        with:
-          pr-number: ${{ steps.ctx.outputs.pr-number }}
-          repo: ${{ github.repository }}
-          bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-          git-signing-private-key: ${{ secrets.CI_BOT_GPG_PRIVATE_KEY }}
-          git-signing-passphrase: ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
-          git-signing-key-id: ${{ secrets.CI_BOT_GPG_KEY_ID }}
-          merge: ${{ steps.ctx.outputs.merge }}
-
-      - name: Comment on success (rebase-only)
-        if: success() && github.event_name == 'issue_comment' && steps.ctx.outputs.merge == 'false'
-        env:
-          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-        run: |
-          curl -fsS -X POST -H "Authorization: token $BOT_TOKEN" -H "Content-Type: application/json" \
-            -d '{"body":"✅ rebased onto the base branch and re-signed every commit. Still open — use /merge when ready."}' \
-            "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
-
-      - name: Comment on failure
-        if: failure() && github.event_name == 'issue_comment'
-        env:
-          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-        run: |
-          curl -fsS -X POST -H "Authorization: token $BOT_TOKEN" -H "Content-Type: application/json" \
-            -d '{"body":"❌ merge-bot failed — see the Actions run log for details."}' \
-            "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
+    uses: https://codefloe.com/Vidocq/ci/.forgejo/workflows/merge-bot-reusable.yml@main
+    with:
+      pr-number: ${{ github.event.inputs.pr-number }}
+      merge: ${{ github.event.inputs.merge || 'true' }}
+    secrets: inherit
