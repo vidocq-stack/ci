@@ -19,7 +19,7 @@ inputs:
     required: true
   bot-token:
     description: >
-      Optional Codeberg token (org secret VIDOCQ_BOT_TOKEN). Used only to lift API/clone
+      Optional Codefloe token (org secret VIDOCQ_BOT_TOKEN). Used only to lift API/clone
       rate limits on internal PRs. External fork PRs do NOT receive org secrets, so this is
       empty there — the graph and every consumer repo are public, so reads and clones fall
       back to anonymous and the whole step runs with zero secrets.
@@ -38,7 +38,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Resolve impacted consumers (topological order, Codeberg-filtered)
+    - name: Resolve impacted consumers (topological order, forge-filtered)
       shell: bash
       env:
         PRODUCER_SLUG: ${{ inputs.producer-slug }}
@@ -62,7 +62,7 @@ runs:
         # BOT_TOKEN is empty (org secrets are withheld from forks): drop the auth header and
         # read anonymously. Internal PRs still pass the token to lift rate limits.
         if [ -n "${BOT_TOKEN:-}" ]; then auth=(-H "Authorization: token ${BOT_TOKEN}"); else auth=(); fi
-        # Retry on transient Codeberg failures (504 gateway timeout, dropped connections).
+        # Retry on transient forge failures (504 gateway timeout, dropped connections).
         # --retry-all-errors retries on HTTP 5xx too, not just connection errors.
         retry_curl=(--retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15)
         curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/inverted.json     "$RAW/graph/inverted.json"
@@ -88,7 +88,7 @@ runs:
           --graph /tmp/inverted.json --changed $ARTIFACTS --format matrix --ordered)
         echo "Ordered matrix (raw): $MATRIX"
 
-        # Keep only consumers that already exist on Codeberg. The migrated graph still
+        # Keep only consumers that already exist on the forge (Codefloe). The migrated graph still
         # lists historical/not-yet-migrated consumers; each rejoins automatically once
         # created — no manual flag. Order is preserved (jq keeps array order).
         : > /tmp/impacted.txt
@@ -100,7 +100,7 @@ runs:
             echo "  keep $r"
             echo "$r" >> /tmp/impacted.txt
           else
-            echo "  drop $r (not on Codeberg yet, HTTP $code)"
+            echo "  drop $r (not on the forge yet, HTTP $code)"
           fi
         done
         echo "Impacted consumers to rebuild: $(wc -l < /tmp/impacted.txt)"
@@ -117,7 +117,7 @@ runs:
         set -euo pipefail
 
         if [ ! -s /tmp/impacted.txt ]; then
-          echo "No impacted consumer on Codeberg — nothing to rebuild."
+          echo "No impacted consumer on the forge — nothing to rebuild."
           exit 0
         fi
 
@@ -132,7 +132,7 @@ runs:
         mkdir -p "$WORK"
 
         clone_with_retry() {
-          # git has no built-in retry; Codeberg occasionally returns 504 on clone under load.
+          # git has no built-in retry; the forge occasionally returns 504 on clone under load.
           # Retry with exponential backoff, cleaning the dest between attempts. The token in the
           # URL is stripped from log output (${url##*@}).
           local url="$1" dest="$2" attempt=1 max=5 delay=5

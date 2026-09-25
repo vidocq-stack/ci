@@ -4,9 +4,9 @@ description: 'Verify the PR author signed the Vidocq CLA'
 # One of the 3 independently-reportable status checks split out of the
 # original governance-checks bundle (Vidocq/ci#<split-governance-checks PR>).
 # Kept as its own composite action (not a job in a workflow_call workflow):
-# Forgejo/Codeberg does not resolve cross-repo reusable workflows
+# Forgejo does not resolve cross-repo reusable workflows
 # (jobs.<id>.uses:), so every shared check lives in a composite action
-# (step-level uses:, which Codeberg does support) instead.
+# (step-level uses:, which Forgejo does support) instead.
 #
 # Identity-based, NOT signature-based: unaffected by any later rebase/squash
 # of the PR branch (unlike gpg-check), so it never needs re-running after a
@@ -14,7 +14,7 @@ description: 'Verify the PR author signed the Vidocq CLA'
 
 inputs:
   pr-author:
-    description: 'Codeberg username of the pull request author (e.g. github.event.pull_request.user.login)'
+    description: 'Codefloe username of the pull request author (e.g. github.event.pull_request.user.login)'
     required: true
   slack-webhook:
     description: 'Optional Slack incoming webhook (SLACK_WEBHOOK_URL). When set, a rejection posts a [ViBot] alert.'
@@ -44,7 +44,7 @@ runs:
           echo "::error::pr-author input is empty — cannot verify the CLA signature."
           exit 1
         fi
-        # Match the '@<login>' token in the 'Codeberg Username' column, bounded so one login
+        # Match the '@<login>' token in the 'Codefloe Username' column, bounded so one login
         # cannot match as a substring of another.
         if grep -qiE "@${PR_AUTHOR}([^[:alnum:]_-]|$)" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md"; then
           echo "✅ CLA signed by @${PR_AUTHOR}"

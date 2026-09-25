@@ -27,7 +27,7 @@
 #    4. import_git_signing_key
 #                            optional dedicated key to sign the release/bump commits
 #                            themselves (distinct from the Maven-artifact GPG key)
-#    5. reroute_ssh          insteadOf SSH→HTTPS for Codeberg pushes (bot token)
+#    5. reroute_ssh          insteadOf SSH→HTTPS for forge pushes (bot token)
 #    6. branch_create        git checkout -b release/${RELEASE_VERSION} (off main)
 #                            All POM mutations land on the release branch — main
 #                            is left untouched until the deploy succeeds.
@@ -296,9 +296,9 @@ EOF
 
 # ---------------------------------------------------------------- 3. GPG + SSH reroute
 
-# Reroute `git push ssh://git@codeberg.org/...` to HTTPS-with-token. POMs
+# Reroute `git push ssh://git@<forge>/...` to HTTPS-with-token. POMs
 # declare <developerConnection>ssh://...</developerConnection> by convention,
-# and the runner has no SSH key for Codeberg. The insteadOf config is global
+# and the runner has no SSH key for the forge (Codefloe). The insteadOf config is global
 # so every subsequent git push is rerouted transparently.
 step_reroute_ssh() {
   if [[ -z "${BOT_TOKEN:-}" ]]; then
@@ -306,8 +306,9 @@ step_reroute_ssh() {
     return 0
   fi
   info "Rerouting ssh forge remotes to https://oauth2:<token>@<forge>/*"
-  # POMs still declare ssh://git@codeberg.org/... as developerConnection; keep
-  # rerouting those to the current forge until the SCM sweep lands post-migration.
+  # Legacy shim: POMs predating the Codefloe migration declared
+  # ssh://git@codeberg.org/... as developerConnection. Every POM on main now
+  # declares codefloe.com, but rerouting the old host is harmless, so it stays.
   FORGE_HOST="${GITHUB_SERVER_URL:-https://codefloe.com}"; FORGE_HOST="${FORGE_HOST#https://}"; FORGE_HOST="${FORGE_HOST%/}"
   git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://git@codeberg.org/"
   git config --global --add "url.https://oauth2:${BOT_TOKEN}@${FORGE_HOST}/.insteadOf" "ssh://codeberg.org/"

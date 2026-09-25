@@ -3,7 +3,7 @@ description: 'Verify every PR commit carries a Signed-off-by trailer (DCO)'
 
 # One of the 3 independently-reportable status checks split out of the
 # original governance-checks bundle. See cla-check/action.yml for the
-# rationale (composite action, not workflow_call — Forgejo/Codeberg does not
+# rationale (composite action, not workflow_call — Forgejo does not
 # resolve cross-repo reusable workflows).
 #
 # The calling job MUST check out its repository with fetch-depth: 0 so this

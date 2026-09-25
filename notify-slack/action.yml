@@ -88,7 +88,7 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
-          # A missing webhook is EXPECTED on external fork PRs: Codeberg withholds org
+          # A missing webhook is EXPECTED on external fork PRs: Forgejo withholds org
           # secrets from forks. So every PR-facing notification (pr-*) is skipped silently
           # instead of failing the job. For internal-only events (push/release success) the
           # skip stays informational; any other status with no webhook is a real misconfig.

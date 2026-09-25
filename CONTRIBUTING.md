@@ -21,14 +21,14 @@ redistributed under any of these three licences at the recipient's option.
 ## Before your first PR — the three signing requirements
 
 Every pull request must pass the automated governance gate
-(`governance-checks` in [`Vidocq/ci`](https://codeberg.org/Vidocq/ci)), which
+(`governance-checks` in [`Vidocq/ci`](https://codefloe.com/Vidocq/ci)), which
 verifies **all three** of the following. A PR failing any of them is blocked
 before the build even starts:
 
 | # | Requirement | How |
 |---|-------------|-----|
-| 1 | **CLA signed** (one-time) | Open a signature PR against [`Vidocq/governance`](https://codeberg.org/Vidocq/governance) |
-| 2 | **GPG-signed commits** | `git commit -S` — your public key must be registered in [`Vidocq/governance`](https://codeberg.org/Vidocq/governance) |
+| 1 | **CLA signed** (one-time) | Open a signature PR against [`Vidocq/governance`](https://codefloe.com/Vidocq/governance) |
+| 2 | **GPG-signed commits** | `git commit -S` — your public key must be registered in [`Vidocq/governance`](https://codefloe.com/Vidocq/governance) |
 | 3 | **DCO sign-off** | `git commit -s` — adds the `Signed-off-by` trailer (see below) |
 
 Recommended one-time setup in your clone:
@@ -48,10 +48,10 @@ git push --force-with-lease
 ## Contributor License Agreement (CLA) and GPG key
 
 The CLA text, the list of signatories, and the contributors' GPG public keys
-are maintained centrally in [`Vidocq/governance`](https://codeberg.org/Vidocq/governance).
+are maintained centrally in [`Vidocq/governance`](https://codefloe.com/Vidocq/governance).
 Sign the CLA and register your GPG public key there **before** opening your
 first pull request — the GPG setup guide is in that repository's
-[CONTRIBUTING.md](https://codeberg.org/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing).
+[CONTRIBUTING.md](https://codefloe.com/Vidocq/governance/src/branch/main/CONTRIBUTING.md#set-up-gpg-commit-signing).
 
 ## Developer Certificate of Origin (DCO)
 

@@ -9,9 +9,9 @@ description: 'Verify the PR author signed the Vidocq CLA and every PR commit is 
 # only invalidates the GPG check, not CLA/DCO, so re-running only gpg-check
 # after a merge-bot pass is both faster and clearer than re-running all 3.
 #
-# Single shared implementation of the per-PR contribution gate. Forgejo/Codeberg does not
+# Single shared implementation of the per-PR contribution gate. Forgejo does not
 # resolve cross-repo reusable workflows (jobs.<id>.uses:), so the checks live in a composite
-# action (step-level uses:, which Codeberg does support) instead of a workflow_call workflow.
+# action (step-level uses:, which Forgejo does support) instead of a workflow_call workflow.
 #
 # The CLA signatures and the contributors' GPG public keys live in the public Vidocq/governance
 # repository, cloned at run time. The calling job MUST check out its repository with
@@ -19,7 +19,7 @@ description: 'Verify the PR author signed the Vidocq CLA and every PR commit is 
 
 inputs:
   pr-author:
-    description: 'Codeberg username of the pull request author (e.g. github.event.pull_request.user.login)'
+    description: 'Codefloe username of the pull request author (e.g. github.event.pull_request.user.login)'
     required: true
   slack-webhook:
     description: 'Optional Slack incoming webhook (SLACK_WEBHOOK_URL). When set, a CLA rejection posts a [ViBot] alert.'
@@ -49,7 +49,7 @@ runs:
           echo "::error::pr-author input is empty — cannot verify the CLA signature."
           exit 1
         fi
-        # Match the '@<login>' token in the 'Codeberg Username' column, bounded so one login
+        # Match the '@<login>' token in the 'Codefloe Username' column, bounded so one login
         # cannot match as a substring of another.
         if grep -qiE "@${PR_AUTHOR}([^[:alnum:]_-]|$)" "$RUNNER_TEMP/governance/CLA-signatures/individuals.md"; then
           echo "✅ CLA signed by @${PR_AUTHOR}"

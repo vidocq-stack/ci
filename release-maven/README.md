@@ -63,7 +63,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-      - uses: https://codeberg.org/Vidocq/ci/release-maven@v1
+      - uses: https://codefloe.com/Vidocq/ci/release-maven@v1
         with:
           release-version:  ${{ inputs.release_version }}
           next-dev-version: ${{ inputs.next_dev_version }}
@@ -97,7 +97,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
-      - uses: https://codeberg.org/Vidocq/ci/release-maven@v1
+      - uses: https://codefloe.com/Vidocq/ci/release-maven@v1
         with:
           release-version:  ${{ inputs.release_version }}
           next-dev-version: ${{ inputs.next_dev_version }}

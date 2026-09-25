@@ -54,11 +54,12 @@ inputs:
     required: true
   bot-token:
     description: |
-      Codeberg/Forgejo token with push access to the project repo (secrets.VIDOCQ_BOT_TOKEN).
+      Codefloe (Forgejo) token with push access to the project repo (secrets.VIDOCQ_BOT_TOKEN).
       Required: the release script pushes the `release/{version}` branch, the `v{version}`
-      tag, and the post-release `main` bump. POMs declare ssh://git@codeberg.org/... as
-      developerConnection; the runner has no SSH key for Codeberg, so we re-route
-      SSH→HTTPS+token using `git config insteadOf`.
+      tag, and the post-release `main` bump. POMs declare ssh://git@codefloe.com/... as
+      developerConnection; the runner has no SSH key for the forge, so we re-route
+      SSH→HTTPS+token using `git config insteadOf` (legacy ssh://codeberg.org/... URLs
+      from before the Codefloe migration are rerouted too, as a harmless shim).
     required: true
   bot-name:
     description: 'Git author name for the release + bump commits'
@@ -117,7 +118,7 @@ runs:
   using: composite
   steps:
     # Setup Java + Maven inline rather than `uses: ci/setup-maven@v1` so the
-    # runner makes ONE clone of Vidocq/ci instead of two — under Codeberg
+    # runner makes ONE clone of Vidocq/ci instead of two — under forge
     # rate-limiting (504 on burst clones after a force-tag) this is the
     # difference between green and red.
     - name: Set up Java ${{ inputs.java-version }} (temurin)
