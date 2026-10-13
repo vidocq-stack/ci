@@ -23,6 +23,20 @@ The workflow that uses this action must:
 - Be triggered on `workflow_dispatch` and pass the inputs documented below.
 - Run on a clean `main` branch (the action refuses to proceed otherwise).
 
+## Blocking the release of a project
+
+A project that must not be released yet commits a `.forgejo/release-blocked` file on `main`.
+Its content is free text: say why, and link the issue that tracks the decision.
+
+- A real run stops in the pre-checks, before any branch, tag, push or upload, and prints the
+  content of the file.
+- A dry run (`dry-run: true`) goes on, since it publishes nothing: the project can still rehearse
+  its release.
+
+The guard lives in the action, not in the caller's `release.yml`: `bootstrap-workflows.sh` and the
+`refresh-release-yml` workflow rewrite that file, and would drop a guard written in it. To allow
+the release again, delete the file in the pull request that prepares the release.
+
 ## Inputs
 
 | Name | Required | Default | Description |

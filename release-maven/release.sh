@@ -21,7 +21,8 @@
 #                                  protection on repos with require_signed_commits.
 #
 # Flow (11 steps):
-#    1. precheck             clean tree, branch=main, env present, format versions
+#    1. precheck             release guard (.forgejo/release-blocked), clean tree,
+#                            branch=main, env present, format versions
 #    2. write_settings       ~/.m2/settings.xml (central + central-snapshots)
 #    3. import_gpg           GPG signing key (base64 or armored)
 #    4. import_git_signing_key
@@ -61,6 +62,9 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------- helpers
+
+# A project carrying this file cannot be released (see step_precheck).
+RELEASE_BLOCKED_FILE=".forgejo/release-blocked"
 
 die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 info() { printf '▸  %s\n' "$*"; }
@@ -184,6 +188,21 @@ step_precheck() {
   : "${DRY_RUN:=false}"
   : "${AUTO_PUBLISH:=false}"
   : "${EXCLUDED_MODULES:=}"
+
+  # Release guard. A project that must not be released yet carries a tracked
+  # .forgejo/release-blocked file, whose content says why. A real run stops
+  # here, before any branch, tag, push or upload. A dry run goes on: it
+  # publishes nothing, and it is how the project rehearses its release.
+  # The file is not in release.yml, so regenerating that workflow keeps it.
+  if [[ -f "$RELEASE_BLOCKED_FILE" ]]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
+      info "${RELEASE_BLOCKED_FILE} is present: a real release is blocked, the dry run goes on"
+    else
+      echo "❌ release is blocked by ${RELEASE_BLOCKED_FILE}:" >&2
+      sed 's/^/    /' "$RELEASE_BLOCKED_FILE" >&2
+      die "remove ${RELEASE_BLOCKED_FILE} in the pull request that prepares the release, then run again"
+    fi
+  fi
 
   [[ "$RELEASE_VERSION" != *-SNAPSHOT ]] \
     || die "RELEASE_VERSION must not end with -SNAPSHOT, got '$RELEASE_VERSION'"
