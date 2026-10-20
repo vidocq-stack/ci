@@ -26,6 +26,7 @@ It only provides reusable actions consumed via `uses: https://codefloe.com/Vidoc
 | `build-impacted` | PR-only: rebuild the transitive downstream consumers (topological order) against the producer's local PR artifacts — no staging registry | `producer-slug` (required), `producer-version` (required), `version-suffix` (required), `bot-token` (required), `graph-ref` (main), `maven-args` (-B -ntp) |
 | `update-dep-graph` | Extract `io.vidocq.*` deps and push them into GestionProjet/data | `bot-token` (required), `repo` (required), `base-url`, `graph-repo`, `branch` |
 | `trigger-docs-rebuild` | POST a `workflow_dispatch` to `vidocq-docs/build.yml` so the Antora site is rebuilt & redeployed. Use after a push on `main` that touched `docs/**`. | `bot-token` (required), `source-repo` (required), `base-url`, `docs-repo`, `workflow`, `ref` |
+| `sonar-analysis` | SonarQube analysis of the Maven build on `sonar.dev.vidocq.io` (community branch plugin): `main` on push, a pull request with its own quality gate. Report mode by default: never fails the job, and keeps one comment on the pull request up to date with the gate. Skipped when the token is empty (pull requests from forks). | `sonar-token` (required, `secrets.SONAR_TOKEN`), `host-url` (required, `vars.SONAR_HOST_URL`), `bot-token` (PR comment, `secrets.VIDOCQ_BOT_TOKEN`), `maven-args` (-B -ntp -Pquality verify), `scanner-version`, `blocking` (false) |
 | `merge-bot` | Rebase a PR's head branch onto its base, re-sign every replayed commit with the dedicated CI bot key, force-push, then fast-forward merge. The only way to merge without producing an unsigned commit once `require_signed_commits` is enforced (server-side merge/squash/rebase always strips the original signature — true of Forgejo, GitHub and GitLab alike). | `pr-number` (required), `repo` (required), `bot-token` (required), `git-signing-private-key`/`git-signing-passphrase`/`git-signing-key-id` (required, `secrets.CI_BOT_GPG_*`), `base-url` |
 
 ## Examples
@@ -36,6 +37,17 @@ It only provides reusable actions consumed via `uses: https://codefloe.com/Vidoc
   with: { maven-version: 3.9.9 }
 - uses: https://codefloe.com/Vidocq/ci/run-tck@main
   with: { module: my-tck-module }
+
+# SonarQube analysis in report mode (needs fetch-depth: 0 on the checkout, for the
+# new-code detection), in a workflow triggered on push to main and on pull_request:
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- uses: https://codefloe.com/Vidocq/ci/setup-maven@main
+- uses: https://codefloe.com/Vidocq/ci/sonar-analysis@main
+  with:
+    sonar-token: ${{ secrets.SONAR_TOKEN }}
+    host-url: ${{ vars.SONAR_HOST_URL }}
+    bot-token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
 
 # Out-of-reactor TCK via a script:
 - uses: https://codefloe.com/Vidocq/ci/run-tck@main

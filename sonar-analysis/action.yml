@@ -1,0 +1,151 @@
+name: 'SonarQube analysis'
+description: >-
+  Analyse the Maven build with SonarQube (community branch plugin): the main branch on push,
+  pull requests with their own quality gate. Report mode by default: the job never fails on a
+  finding, and a pull request gets one comment, kept up to date, with the quality gate.
+
+inputs:
+  sonar-token:
+    description: 'SonarQube token (secrets.SONAR_TOKEN). Empty on pull requests from forks, which receive no secrets: the analysis is then skipped.'
+    required: true
+  host-url:
+    description: 'SonarQube URL (vars.SONAR_HOST_URL)'
+    required: true
+  bot-token:
+    description: '(pull requests, optional) Codefloe token that posts the quality-gate comment (secrets.VIDOCQ_BOT_TOKEN); no comment when empty'
+    default: ''
+  maven-args:
+    description: 'Maven arguments run before the analysis goal. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does).'
+    default: '-B -ntp -Pquality verify'
+  scanner-version:
+    description: 'sonar-maven-plugin version'
+    default: '5.8.0.7211'
+  blocking:
+    description: "'true' fails the job when the analysis fails or the quality gate is not passed (the blocking waves of the rollout plan, Vidocq/vidocq#284); 'false' only reports"
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: SonarQube analysis
+      shell: bash
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        SONAR_HOST_URL: ${{ inputs.host-url }}
+        MAVEN_ARGS_IN: ${{ inputs.maven-args }}
+        SCANNER_VERSION: ${{ inputs.scanner-version }}
+        BLOCKING: ${{ inputs.blocking }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_REF: ${{ github.head_ref }}
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -uo pipefail
+        if [ -z "${SONAR_TOKEN}" ]; then
+          echo "::notice::No SonarQube token (pull request from a fork?): analysis skipped."
+          echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        args=("-Dsonar.host.url=${SONAR_HOST_URL}")
+        if [ "${EVENT_NAME}" = "pull_request" ]; then
+          args+=("-Dsonar.pullrequest.key=${PR_NUMBER}"
+                 "-Dsonar.pullrequest.branch=${HEAD_REF}"
+                 "-Dsonar.pullrequest.base=${BASE_REF}")
+        fi
+        # MAVEN_ARGS_IN is split on purpose: it holds several arguments.
+        # shellcheck disable=SC2086
+        if mvn ${MAVEN_ARGS_IN} "org.sonarsource.scanner.maven:sonar-maven-plugin:${SCANNER_VERSION}:sonar" "${args[@]}"; then
+          echo "SONAR_ANALYSED=true" >> "$GITHUB_ENV"
+        else
+          echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
+          if [ "${BLOCKING}" = "true" ]; then exit 1; fi
+          echo "::warning::SonarQube analysis failed (report mode: not blocking)."
+        fi
+
+    - name: SonarQube quality gate
+      if: env.SONAR_ANALYSED == 'true'
+      shell: bash
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        SONAR_HOST_URL: ${{ inputs.host-url }}
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        BLOCKING: ${{ inputs.blocking }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REPOSITORY: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+      run: |
+        python3 - <<'PY'
+        import json, os, sys, time, urllib.error, urllib.parse, urllib.request
+
+        host = os.environ["SONAR_HOST_URL"].rstrip("/")
+        token = os.environ["SONAR_TOKEN"]
+        blocking = os.environ.get("BLOCKING") == "true"
+        is_pr = os.environ.get("EVENT_NAME") == "pull_request"
+        pr = os.environ.get("PR_NUMBER", "")
+        q = urllib.parse.quote
+
+        def sonar(path):
+            req = urllib.request.Request(host + path, headers={"Authorization": "Bearer " + token})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+
+        def forge(method, path, body=None):
+            req = urllib.request.Request(
+                os.environ["SERVER_URL"].rstrip("/") + "/api/v1" + path,
+                data=None if body is None else json.dumps(body).encode(),
+                method=method,
+                headers={"Authorization": "token " + os.environ["BOT_TOKEN"], "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw = r.read()
+                return json.loads(raw) if raw else None
+
+        # The scanner writes the task of the server-side processing next to the root module.
+        task = dict(line.rstrip("\n").split("=", 1) for line in open("target/sonar/report-task.txt") if "=" in line)
+        ce, deadline = None, time.time() + 600
+        while time.time() < deadline:
+            ce = sonar("/api/ce/task?id=" + q(task["ceTaskId"]))["task"]
+            if ce["status"] in ("SUCCESS", "FAILED", "CANCELED"):
+                break
+            time.sleep(5)
+        if not ce or ce["status"] != "SUCCESS":
+            print("::warning::SonarQube did not process the analysis (%s)." % (ce or {}).get("status", "timeout"))
+            sys.exit(1 if blocking else 0)
+
+        gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
+        status = gate.get("status", "NONE")
+        failed = [c for c in gate.get("conditions", []) if c.get("status") == "ERROR"]
+        key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
+        scope = "&pullRequest=" + q(pr) if is_pr else ""
+        issues = sonar("/api/issues/search?components=%s%s&resolved=false&ps=1" % (q(key), scope))["total"]
+        hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
+        print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
+
+        if is_pr and os.environ.get("BOT_TOKEN") and pr:
+            marker = "<!-- vidocq-sonarqube -->"
+            verdict = {"OK": "✅ passed", "ERROR": "❌ failed", "WARN": "⚠️ warning"}.get(status, "➖ " + status.lower())
+            lines = [marker, "### SonarQube quality gate: " + verdict, "",
+                     "New issues: **%s** · security hotspots to review: **%s**" % (issues, hotspots)]
+            if failed:
+                lines += ["", "Failed conditions:"] + [
+                    "- `%s`: %s (must be %s %s)" % (c.get("metricKey"), c.get("actualValue", "?"),
+                                                    "≥" if c.get("comparator") == "LT" else "≤", c.get("errorThreshold", "?"))
+                    for c in failed]
+            lines += ["", "[Open the analysis](%s) · %s · commit `%s`" % (
+                dashboard, "blocking" if blocking else "report mode, not blocking", os.environ.get("HEAD_SHA", "")[:8])]
+            body = "\n".join(lines)
+            repo = os.environ["REPOSITORY"]
+            try:
+                comments = forge("GET", "/repos/%s/issues/%s/comments" % (repo, pr)) or []
+                mine = next((c for c in comments if marker in (c.get("body") or "")), None)
+                if mine:
+                    forge("PATCH", "/repos/%s/issues/comments/%s" % (repo, mine["id"]), {"body": body})
+                else:
+                    forge("POST", "/repos/%s/issues/%s/comments" % (repo, pr), {"body": body})
+            except urllib.error.URLError as e:
+                print("::warning::Could not post the SonarQube comment: %s" % e)
+
+        if blocking and status != "OK":
+            sys.exit(1)
+        PY
