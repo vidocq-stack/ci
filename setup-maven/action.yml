@@ -25,12 +25,18 @@ runs:
         distribution: ${{ inputs.distribution }}
         cache: ${{ inputs.cache }}
 
-    # Temporary (Vidocq/vidocq#292): refuse the eMudhra intermediate CAs whose private keys
-    # leaked on 2026-10-20, until Temurin ships a JDK that does. The JDK checks no
+    # Temporary (Vidocq/vidocq#292): Maven refuses the eMudhra intermediate CAs whose private
+    # keys leaked on 2026-10-20, until Temurin ships a JDK that does. The JDK checks no
     # revocation, so without this Maven would accept a forged certificate for Maven Central.
-    - name: Block the compromised eMudhra intermediate CAs in the JDK
+    # Maven gets its own trust store; the JDK stays untouched, because jlink refuses a
+    # modified JDK that has no jmods.
+    - name: Trust store without the compromised eMudhra CAs, for Maven
       shell: bash
-      run: bash "${{ github.action_path }}/block-emudhra-intermediates.sh" "$JAVA_HOME"
+      run: |
+        set -euo pipefail
+        ts="${RUNNER_TEMP:-/tmp}/vidocq-maven-cacerts"
+        bash "${{ github.action_path }}/block-emudhra-intermediates.sh" "$JAVA_HOME" "$ts"
+        echo "MAVEN_OPTS=${MAVEN_OPTS:+$MAVEN_OPTS }-Djavax.net.ssl.trustStore=$ts -Djavax.net.ssl.trustStorePassword=changeit" >> "$GITHUB_ENV"
 
     - name: Install Maven ${{ inputs.maven-version }}
       shell: bash
