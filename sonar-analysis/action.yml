@@ -18,8 +18,8 @@ inputs:
     description: '(pull requests, optional) Codefloe token that posts the quality-gate comment (secrets.VIDOCQ_BOT_TOKEN); no comment when empty'
     default: ''
   maven-args:
-    description: 'Maven arguments run before the analysis goal. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does).'
-    default: '-B -ntp -Pquality verify'
+    description: 'Maven arguments run before the analysis goal. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does). Test failures do not stop the analysis: the pull request validation is the test gate, and JaCoCo instrumentation slows timing-sensitive tests down.'
+    default: '-B -ntp -Pquality -Dmaven.test.failure.ignore=true verify'
   scanner-version:
     description: 'sonar-maven-plugin version'
     default: '5.8.0.7211'
