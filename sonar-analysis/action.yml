@@ -85,10 +85,13 @@ runs:
                  "-Dsonar.pullrequest.base=${BASE_REF}")
         fi
         # 1. Build, tests and coverage, plus the CycloneDX SBOM of what the build ships, which the
-        #    dependency scan reads. The *_ARGS variables are split on purpose: several arguments.
+        #    dependency scan reads: compile and runtime scopes only. Test, provided (the Maven API
+        #    of a plugin, a container's specifications) and system dependencies are not shipped.
+        #    The *_ARGS variables are split on purpose: several arguments.
         # shellcheck disable=SC2086
         if ! mvn ${MAVEN_ARGS_IN} "org.cyclonedx:cyclonedx-maven-plugin:${CYCLONEDX_VERSION}:makeAggregateBom" \
-            -DoutputFormat=json -DoutputName=bom; then
+            -DoutputFormat=json -DoutputName=bom \
+            -DincludeTestScope=false -DincludeProvidedScope=false -DincludeSystemScope=false; then
           echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
           if [ "${BLOCKING}" = "true" ]; then exit 1; fi
           echo "::warning::The build failed, no SonarQube analysis (report mode: not blocking)."
