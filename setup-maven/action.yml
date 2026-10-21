@@ -25,6 +25,13 @@ runs:
         distribution: ${{ inputs.distribution }}
         cache: ${{ inputs.cache }}
 
+    # Temporary (Vidocq/vidocq#292): refuse the eMudhra intermediate CAs whose private keys
+    # leaked on 2026-10-20, until Temurin ships a JDK that does. The JDK checks no
+    # revocation, so without this Maven would accept a forged certificate for Maven Central.
+    - name: Block the compromised eMudhra intermediate CAs in the JDK
+      shell: bash
+      run: bash "${{ github.action_path }}/block-emudhra-intermediates.sh" "$JAVA_HOME"
+
     - name: Install Maven ${{ inputs.maven-version }}
       shell: bash
       env:
