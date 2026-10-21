@@ -107,9 +107,10 @@ if fetch "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSIO
     tar -xzf "$WORK/trivy.tar.gz" -C "$WORK/bin" trivy
     # Offline: without --offline-scan Trivy resolves the pom.xml dependencies on Maven Central even
     # when the vulnerability scanner is off; the misconfiguration checks embedded in the release
-    # are used instead of a download.
+    # are used instead of a download. The scan runs after the build: '**/target' keeps every
+    # module's build output out ('target' alone only skips the root one).
     "$WORK/bin/trivy" fs --quiet --scanners secret,misconfig \
-        --offline-scan --skip-db-update --skip-check-update --skip-dirs target \
+        --offline-scan --skip-db-update --skip-check-update --skip-dirs '**/target' \
         --cache-dir "$WORK/trivy-cache" --format sarif --output "$WORK/trivy.sarif" --exit-code 0 "$ROOT"
     rc=$?
     if [ "$rc" -eq 0 ]; then keep trivy "$WORK/trivy.sarif"; else echo "::warning::Trivy failed (exit $rc)"; fi
