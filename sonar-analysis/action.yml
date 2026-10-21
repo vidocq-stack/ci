@@ -18,14 +18,23 @@ inputs:
     description: '(pull requests, optional) Codefloe token that posts the quality-gate comment (secrets.VIDOCQ_BOT_TOKEN); no comment when empty'
     default: ''
   maven-args:
-    description: 'Maven arguments run before the analysis goal. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does). Test failures do not stop the analysis: the pull request validation is the test gate, and JaCoCo instrumentation slows timing-sensitive tests down.'
-    default: '-B -ntp -Pquality -Dmaven.test.failure.ignore=true verify'
+    description: "Maven arguments of the build, run before the security scans and the analysis. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does) and install the modules into the job's local repository, so that the separate analysis run resolves them. Test failures do not stop the analysis: the pull request validation is the test gate, and JaCoCo instrumentation slows timing-sensitive tests down."
+    default: '-B -ntp -Pquality -Dmaven.test.failure.ignore=true install'
+  analysis-args:
+    description: 'Maven arguments of the analysis run, which works on what the build left in target/: the same profiles, no lifecycle phase'
+    default: '-B -ntp -Pquality'
+  cyclonedx-version:
+    description: 'cyclonedx-maven-plugin version: the build writes the CycloneDX SBOM (target/bom.json) that the dependency scan reads'
+    default: '2.9.3'
   scanner-version:
     description: 'sonar-maven-plugin version'
     default: '5.8.0.7211'
   blocking:
     description: "'true' fails the job when the analysis fails or the quality gate is not passed (the blocking waves of the rollout plan, Vidocq/vidocq#284); 'false' only reports"
     default: 'false'
+  security-scans:
+    description: "'true' also runs OSV-Scanner (dependency vulnerabilities), OpenGrep (security patterns) and Trivy (secrets, Dockerfile misconfigurations) and imports their SARIF reports into SonarQube as external issues (Vidocq/vidocq#269); they never stop the analysis"
+    default: 'true'
 
 runs:
   using: composite
@@ -37,6 +46,10 @@ runs:
         SONAR_HOST_URL: ${{ inputs.host-url }}
         PROJECT_KEY: ${{ inputs.project-key }}
         MAVEN_ARGS_IN: ${{ inputs.maven-args }}
+        ANALYSIS_ARGS: ${{ inputs.analysis-args }}
+        CYCLONEDX_VERSION: ${{ inputs.cyclonedx-version }}
+        SECURITY_SCANS: ${{ inputs.security-scans }}
+        ACTION_PATH: ${{ github.action_path }}
         SCANNER_VERSION: ${{ inputs.scanner-version }}
         BLOCKING: ${{ inputs.blocking }}
         EVENT_NAME: ${{ github.event_name }}
@@ -71,9 +84,27 @@ runs:
                  "-Dsonar.pullrequest.branch=${HEAD_REF}"
                  "-Dsonar.pullrequest.base=${BASE_REF}")
         fi
-        # MAVEN_ARGS_IN is split on purpose: it holds several arguments.
+        # 1. Build, tests and coverage, plus the CycloneDX SBOM of what the build ships, which the
+        #    dependency scan reads. The *_ARGS variables are split on purpose: several arguments.
         # shellcheck disable=SC2086
-        if mvn ${MAVEN_ARGS_IN} "org.sonarsource.scanner.maven:sonar-maven-plugin:${SCANNER_VERSION}:sonar" "${args[@]}"; then
+        if ! mvn ${MAVEN_ARGS_IN} "org.cyclonedx:cyclonedx-maven-plugin:${CYCLONEDX_VERSION}:makeAggregateBom" \
+            -DoutputFormat=json -DoutputName=bom; then
+          echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
+          if [ "${BLOCKING}" = "true" ]; then exit 1; fi
+          echo "::warning::The build failed, no SonarQube analysis (report mode: not blocking)."
+          exit 0
+        fi
+        # 2. Security scans: their reports become external issues; they never stop the analysis.
+        if [ "${SECURITY_SCANS}" = "true" ]; then
+          bash "${ACTION_PATH}/security-scans.sh" || echo "::warning::The security scans failed."
+          sarif=$(cat "${RUNNER_TEMP:-/tmp}/vidocq-security/sarif-paths" 2>/dev/null || true)
+          if [ -n "${sarif}" ]; then
+            args+=("-Dsonar.sarifReportPaths=${sarif}")
+          fi
+        fi
+        # 3. The analysis of what the build left in target/.
+        # shellcheck disable=SC2086
+        if mvn ${ANALYSIS_ARGS} "org.sonarsource.scanner.maven:sonar-maven-plugin:${SCANNER_VERSION}:sonar" "${args[@]}"; then
           echo "SONAR_ANALYSED=true" >> "$GITHUB_ENV"
         else
           echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
