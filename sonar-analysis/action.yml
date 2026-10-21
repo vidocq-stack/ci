@@ -11,6 +11,9 @@ inputs:
   host-url:
     description: 'SonarQube URL (vars.SONAR_HOST_URL)'
     required: true
+  project-key:
+    description: "SonarQube project key; default vidocq-<repository name>. Created on the server when it does not exist (the token's user needs the Create Projects permission): SonarQube refuses to analyse a pull request of an unknown project."
+    default: ''
   bot-token:
     description: '(pull requests, optional) Codefloe token that posts the quality-gate comment (secrets.VIDOCQ_BOT_TOKEN); no comment when empty'
     default: ''
@@ -32,6 +35,7 @@ runs:
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
         SONAR_HOST_URL: ${{ inputs.host-url }}
+        PROJECT_KEY: ${{ inputs.project-key }}
         MAVEN_ARGS_IN: ${{ inputs.maven-args }}
         SCANNER_VERSION: ${{ inputs.scanner-version }}
         BLOCKING: ${{ inputs.blocking }}
@@ -39,6 +43,8 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         HEAD_REF: ${{ github.head_ref }}
         BASE_REF: ${{ github.base_ref }}
+        REPOSITORY: ${{ github.repository }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -uo pipefail
         if [ -z "${SONAR_TOKEN}" ]; then
@@ -46,7 +52,20 @@ runs:
           echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
           exit 0
         fi
-        args=("-Dsonar.host.url=${SONAR_HOST_URL}")
+        repo="${REPOSITORY##*/}"
+        key="${PROJECT_KEY:-vidocq-${repo}}"
+        key="${key,,}"
+        api="${SONAR_HOST_URL%/}/api"
+        auth=(-H "Authorization: Bearer ${SONAR_TOKEN}")
+        # SonarQube refuses to analyse a pull request of a project that does not exist yet.
+        if [ "$(curl -sS -o /dev/null -w '%{http_code}' "${auth[@]}" "${api}/components/show?component=${key}")" = "404" ]; then
+          created=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
+            --data-urlencode "project=${key}" --data-urlencode "name=${repo}" \
+            --data-urlencode "mainBranch=${DEFAULT_BRANCH:-main}" "${api}/projects/create")
+          if [ "${created}" = "200" ]; then echo "Created the SonarQube project ${key}."
+          else echo "::warning::Could not create the SonarQube project ${key} (HTTP ${created})."; fi
+        fi
+        args=("-Dsonar.host.url=${SONAR_HOST_URL}" "-Dsonar.projectKey=${key}")
         if [ "${EVENT_NAME}" = "pull_request" ]; then
           args+=("-Dsonar.pullrequest.key=${PR_NUMBER}"
                  "-Dsonar.pullrequest.branch=${HEAD_REF}"
