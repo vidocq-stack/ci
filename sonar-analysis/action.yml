@@ -4,7 +4,8 @@ description: >-
   pull requests with their own quality gate. Report mode by default: the job never fails on a
   finding, and a pull request gets one comment, kept up to date, with the quality gate. The
   findings of the security scans, and of Error Prone when the build runs it, are imported as
-  external issues.
+  external issues; the API compatibility japicmp measures, when the build runs it, gets a
+  pull-request comment of its own.
 
 inputs:
   sonar-token:
@@ -230,3 +231,17 @@ runs:
         if blocking and status != "OK":
             sys.exit(1)
         PY
+
+    - name: API compatibility report
+      # A module whose build runs japicmp (Vidocq/vidocq#288) leaves target/japicmp/: its summary goes to
+      # the log, and to one comment on the pull request. Nothing to do otherwise. Never fails the job.
+      if: always()
+      shell: bash
+      env:
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REPOSITORY: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "${ACTION_PATH}/api-compat-comment.py" "${GITHUB_WORKSPACE:-$PWD}" || echo "::warning::The API compatibility report failed."
