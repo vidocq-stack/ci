@@ -2,7 +2,9 @@ name: 'SonarQube analysis'
 description: >-
   Analyse the Maven build with SonarQube (community branch plugin): the main branch on push,
   pull requests with their own quality gate. Report mode by default: the job never fails on a
-  finding, and a pull request gets one comment, kept up to date, with the quality gate.
+  finding, and a pull request gets one comment, kept up to date, with the quality gate. The
+  findings of the security scans, and of Error Prone when the build runs it, are imported as
+  external issues.
 
 inputs:
   sonar-token:
@@ -18,7 +20,7 @@ inputs:
     description: '(pull requests, optional) Codefloe token that posts the quality-gate comment (secrets.VIDOCQ_BOT_TOKEN); no comment when empty'
     default: ''
   maven-args:
-    description: "Maven arguments of the build, run before the security scans and the analysis. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does) and install the modules into the job's local repository, so that the separate analysis run resolves them. Test failures do not stop the analysis: the pull request validation is the test gate, and JaCoCo instrumentation slows timing-sensitive tests down."
+    description: "Maven arguments of the build, run before the security scans and the analysis. The build must write the JaCoCo XML reports for coverage (the quality profile of vidocq-parent does) and install the modules into the job's local repository, so that the separate analysis run resolves them. Test failures do not stop the analysis: the pull request validation is the test gate, and JaCoCo instrumentation slows timing-sensitive tests down. Add the repository's errorprone profile (-Pquality,errorprone) and Error Prone's warnings become external issues."
     default: '-B -ntp -Pquality -Dmaven.test.failure.ignore=true install'
   analysis-args:
     description: 'Maven arguments of the analysis run, which works on what the build left in target/: the same profiles, no lifecycle phase'
@@ -87,25 +89,51 @@ runs:
         # 1. Build, tests and coverage, plus the CycloneDX SBOM of what the build ships, which the
         #    dependency scan reads: compile and runtime scopes only. Test, provided (the Maven API
         #    of a plugin, a container's specifications) and system dependencies are not shipped.
-        #    The *_ARGS variables are split on purpose: several arguments.
+        #    The *_ARGS variables are split on purpose: several arguments. The log is kept for the
+        #    Error Prone findings (step 3).
+        build_log="${RUNNER_TEMP:-/tmp}/vidocq-build.log"
         # shellcheck disable=SC2086
         if ! mvn ${MAVEN_ARGS_IN} "org.cyclonedx:cyclonedx-maven-plugin:${CYCLONEDX_VERSION}:makeAggregateBom" \
             -DoutputFormat=json -DoutputName=bom \
-            -DincludeTestScope=false -DincludeProvidedScope=false -DincludeSystemScope=false; then
+            -DincludeTestScope=false -DincludeProvidedScope=false -DincludeSystemScope=false 2>&1 \
+            | tee "${build_log}"; then
           echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
           if [ "${BLOCKING}" = "true" ]; then exit 1; fi
           echo "::warning::The build failed, no SonarQube analysis (report mode: not blocking)."
           exit 0
         fi
+        reports=()
         # 2. Security scans: their reports become external issues; they never stop the analysis.
         if [ "${SECURITY_SCANS}" = "true" ]; then
           bash "${ACTION_PATH}/security-scans.sh" || echo "::warning::The security scans failed."
           sarif=$(cat "${RUNNER_TEMP:-/tmp}/vidocq-security/sarif-paths" 2>/dev/null || true)
-          if [ -n "${sarif}" ]; then
-            args+=("-Dsonar.sarifReportPaths=${sarif}")
+          if [ -n "${sarif}" ]; then reports+=("${sarif}"); fi
+        fi
+        # 3. Error Prone, when the build ran it (a repository's errorprone profile in maven-args, in
+        #    report mode): its warnings become external issues too, minus the modules SonarQube
+        #    does not analyse. Through the generic format, as reliability issues: a SARIF import
+        #    would count each of them as a vulnerability.
+        generic=()
+        ep="${RUNNER_TEMP:-/tmp}/vidocq-errorprone"
+        mkdir -p "${ep}"
+        if ! found=$(python3 "${ACTION_PATH}/errorprone-sarif.py" "${build_log}" "${ep}/raw.sarif"); then
+          echo "::warning::Cannot read the Error Prone findings of the build log."
+        elif [ "${found}" -gt 0 ]; then
+          if python3 "${ACTION_PATH}/normalize-sarif.py" "${GITHUB_WORKSPACE:-$PWD}" "${ep}/raw.sarif" "${ep}/error-prone.sarif" error-prone > /dev/null \
+              && kept=$(python3 "${ACTION_PATH}/sarif-to-generic.py" "${ep}/error-prone.sarif" "${ep}/error-prone.json" "${GITHUB_WORKSPACE:-$PWD}" error-prone RELIABILITY MEDIUM LOGICAL); then
+            echo "Error Prone: ${kept} finding(s)"
+            if [ "${kept}" -gt 0 ]; then generic+=("${ep}/error-prone.json"); fi
+          else
+            echo "::warning::Cannot convert the Error Prone report."
           fi
         fi
-        # 3. The analysis of what the build left in target/.
+        if [ "${#reports[@]}" -gt 0 ]; then
+          args+=("-Dsonar.sarifReportPaths=$(IFS=,; echo "${reports[*]}")")
+        fi
+        if [ "${#generic[@]}" -gt 0 ]; then
+          args+=("-Dsonar.externalIssuesReportPaths=$(IFS=,; echo "${generic[*]}")")
+        fi
+        # 4. The analysis of what the build left in target/.
         # shellcheck disable=SC2086
         if mvn ${ANALYSIS_ARGS} "org.sonarsource.scanner.maven:sonar-maven-plugin:${SCANNER_VERSION}:sonar" "${args[@]}"; then
           echo "SONAR_ANALYSED=true" >> "$GITHUB_ENV"
