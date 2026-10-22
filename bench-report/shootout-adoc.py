@@ -126,7 +126,9 @@ def main(results_path, out_path, subjects, spectrum_targets):
         "layer": [
             {"mark": {"type": "bar", "cornerRadiusEnd": 4, "height": {"band": 0.62}},
              "encoding": {"x": {"field": "rate", "type": "quantitative", "title": "req/s, p99 < %g ms" % slo,
-                                "axis": {"format": "~s", "grid": True, "tickCount": 5}},
+                                "axis": {"format": "~s", "grid": True, "tickCount": 5},
+                                # Up to the highest rate tested, so the room left above a bar shows.
+                                "scale": {"domain": [0, rates[-1]]}},
                           "color": {"condition": {"test": "datum.subject", "value": ACCENT}, "value": CONTEXT}}},
             {"mark": {"type": "text", "align": "left", "dx": 6, "color": INK_SECONDARY},
              "encoding": {"x": {"field": "rate", "type": "quantitative"}, "text": {"field": "text"}}},
