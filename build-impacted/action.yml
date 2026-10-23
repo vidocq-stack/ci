@@ -34,6 +34,12 @@ inputs:
   maven-args:
     description: 'Common Maven args for every consumer build'
     default: '-B -ntp'
+  companion-branches:
+    description: >
+      Rebuild each consumer on the branch named like the PR's head branch when the consumer
+      has one (a change spanning several repos), else on its default branch. Applies only to
+      a PR from a branch of the producer repo itself, never to a fork PR. 'false' turns it off.
+    default: 'true'
 
 runs:
   using: composite
@@ -113,6 +119,10 @@ runs:
         VERSION_SUFFIX: ${{ inputs.version-suffix }}
         BOT_TOKEN: ${{ inputs.bot-token }}
         MVN_ARGS: ${{ inputs.maven-args }}
+        COMPANION_BRANCHES: ${{ inputs.companion-branches }}
+        HEAD_REF: ${{ github.head_ref }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
 
@@ -120,6 +130,14 @@ runs:
           echo "No impacted consumer on the forge — nothing to rebuild."
           exit 0
         fi
+
+        # A change spanning several repos: each consumer is rebuilt on its branch named like
+        # the PR's head branch, if it has one (see companion-branch.sh).
+        companion=$(bash "${ACTION_PATH}/companion-branch.sh" select)
+        if [ -n "$companion" ]; then
+          echo "Companion branch: consumers that have '$companion' are rebuilt on it."
+        fi
+        on_companion=()
 
         # short-name (lowercase last slug segment) -> PR version already in local ~/.m2.
         # Seeded with the producer; each rebuilt consumer is added so the next level
@@ -134,11 +152,13 @@ runs:
         clone_with_retry() {
           # git has no built-in retry; the forge occasionally returns 504 on clone under load.
           # Retry with exponential backoff, cleaning the dest between attempts. The token in the
-          # URL is stripped from log output (${url##*@}).
-          local url="$1" dest="$2" attempt=1 max=5 delay=5
+          # URL is stripped from log output (${url##*@}). An empty branch clones the default one.
+          local url="$1" dest="$2" branch="${3:-}" attempt=1 max=5 delay=5
+          local branch_args=()
+          [ -n "$branch" ] && branch_args=(--branch "$branch")
           while :; do
             rm -rf "$dest"
-            if git clone --quiet --depth 1 "$url" "$dest"; then return 0; fi
+            if git clone --quiet --depth 1 ${branch_args[@]+"${branch_args[@]}"} "$url" "$dest"; then return 0; fi
             if [ "$attempt" -ge "$max" ]; then
               echo "::error::git clone failed after ${max} attempts: ${url##*@}" >&2
               return 1
@@ -208,7 +228,14 @@ runs:
           else
             clone_url="${GITHUB_SERVER_URL%/}/${slug}.git"
           fi
-          clone_with_retry "$clone_url" "$dir"
+          branch=$(bash "${ACTION_PATH}/companion-branch.sh" lookup "$clone_url" "$companion")
+          if [ -n "$branch" ]; then
+            echo "  branch: $branch (companion branch of the PR)"
+            on_companion+=("$slug")
+          else
+            echo "  branch: default"
+          fi
+          clone_with_retry "$clone_url" "$dir" "$branch"
           pushd "$dir" >/dev/null
 
           # 1) Pin every upstream rebuilt in this run to its local PR version.
@@ -242,3 +269,7 @@ runs:
         done < /tmp/impacted.txt
 
         echo "All impacted consumers rebuilt OK against the PR artifacts."
+        if [ "${#on_companion[@]}" -gt 0 ]; then
+          # Merge these right after the producer: until then their main does not build.
+          echo "::notice::Rebuilt on the companion branch '$companion': ${on_companion[*]}"
+        fi

@@ -43,3 +43,12 @@ jobs:
         with:
           fetch-depth: 0
       - uses: https://codefloe.com/Vidocq/ci/dco-check@main
+
+  # The actions' own script tests (local git repositories, no network).
+  action-tests:
+    runs-on: vidocq-runner
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          command -v git >/dev/null || { apt-get update && apt-get install -y --no-install-recommends git; }
+          bash build-impacted/companion-branch-test.sh
