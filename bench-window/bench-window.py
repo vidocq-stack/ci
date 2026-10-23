@@ -4,10 +4,13 @@ Usage: bench-window.py status|open|close [--dry-run]
 
   open    stops each CI runner, letting its running jobs finish (up to BENCH_GRACE seconds), then its
           Docker-in-Docker container; records the CPU governor and turbo of the host, then sets governor
-          `performance` and turbo off.
-  close   puts the governor and turbo back as `open` found them, starts each Docker-in-Docker container,
-          then its runner. Safe to run when the window is already closed: it is also the safety net.
+          `performance` and turbo off; starts the bench runner.
+  close   stops the bench runner, letting its job finish; puts the governor and turbo back as `open` found
+          them; starts each Docker-in-Docker container, then its runner. Safe to run when the window is
+          already closed.
   status  prints the state of the runner containers.
+
+Run it from a runner of another host: `open` waits for the jobs of the runners it stops, its own included.
 
   --dry-run prints the calls that would change something instead of making them.
 
@@ -18,6 +21,7 @@ Environment:
   PORTAINER_ENDPOINT  Portainer environment id (default: the only environment of the instance)
   BENCH_RUNNERS       CI runner containers, comma-separated; each has a `<name>-dind` companion
                       (default CodefloeRunnerMontreuil01,CodefloeRunnerMontreuil02)
+  BENCH_RUNNER        the bench runner container, running only inside the window (default: none)
   BENCH_GRACE         seconds a runner gets to finish its jobs once asked to stop (default 3600). The
                       runner waits only if its config.yaml sets runner.shutdown_timeout at least as long.
   BENCH_STATE         file where `open` keeps the CPU settings it found, for `close` (default
@@ -124,6 +128,7 @@ def main(argv):
     portainer = Portainer(os.environ["PORTAINER_URL"], os.environ["PORTAINER_TOKEN"], "--dry-run" in argv)
     portainer.use_endpoint(os.environ.get("PORTAINER_ENDPOINT", ""))
     runners = [r.strip() for r in os.environ.get("BENCH_RUNNERS", DEFAULT_RUNNERS).split(",") if r.strip()]
+    bench_runner = os.environ.get("BENCH_RUNNER", "").strip()
     grace = int(os.environ.get("BENCH_GRACE", "3600"))
     state_file = os.environ.get("BENCH_STATE", "bench-window.json")
 
@@ -131,6 +136,8 @@ def main(argv):
         for runner in runners:
             for container in (runner, runner + "-dind"):
                 print("%s\t%s" % (container, portainer.state(container)))
+        if bench_runner:
+            print("%s\t%s" % (bench_runner, portainer.state(bench_runner)))
     elif command == "open":
         for runner in runners:
             portainer.stop(runner, grace)
@@ -143,7 +150,11 @@ def main(argv):
         print("CPU settings found: governor %(governor)s, no_turbo %(no_turbo)s" % found)
         now = set_cpu(portainer, "performance", "1" if found["no_turbo"] != "none" else "none")
         print("CPU settings for the window: governor %(governor)s, no_turbo %(no_turbo)s" % now)
+        if bench_runner:
+            portainer.start(bench_runner)
     else:
+        if bench_runner:
+            portainer.stop(bench_runner, grace)
         found = {"governor": "powersave", "no_turbo": "0"}
         if os.path.exists(state_file):
             with open(state_file, encoding="utf-8") as fh:

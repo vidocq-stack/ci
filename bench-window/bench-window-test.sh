@@ -116,5 +116,14 @@ check "status lists each runner and its Docker-in-Docker container" \
   "CodefloeRunnerMontreuil01	running|CodefloeRunnerMontreuil01-dind	running|CodefloeRunnerMontreuil02	running|CodefloeRunnerMontreuil02-dind	running" \
   "$(echo "$out" | paste -sd'|' -)"
 
+bench_calls() { grep -E "^(POST|DELETE) " "$TMP/calls.log" | grep -E "Bench01|containers/create" | sed -E 's#/api/endpoints/3/docker/containers/##'; }
+rm -f "$TMP/bench-window.json"
+BENCH_RUNNER=Bench01 window open > /dev/null
+check "open starts the bench runner once the CPU is set" \
+  "POST create|POST create|POST Bench01/start" "$(bench_calls | paste -sd'|' -)"
+BENCH_RUNNER=Bench01 window close > /dev/null
+check "close stops the bench runner, with its grace, before the CPU is restored" \
+  "POST Bench01/stop?t=3600|POST create" "$(bench_calls | paste -sd'|' -)"
+
 echo
 if [ "$failures" -eq 0 ]; then echo "all tests passed"; else echo "$failures test(s) failed"; exit 1; fi
