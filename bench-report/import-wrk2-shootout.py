@@ -6,6 +6,10 @@ Usage: import-wrk2-shootout.py <raw-dir> <out.json>
   fingerprint.json         machine, settings and versions of the run
   _summary.tsv             one line per target: image size (MB) and idle RSS in its first columns
   <target>-rate<N>.txt     the `wrk --latency` output of <target> at the offered rate N
+  <target>-rate<N>.interference
+                           optional, one line: start and end (epoch s), samples, mean and max CPU used
+                           by containers outside the benchmark during that measurement (% of one CPU),
+                           busiest of them
 
 The results are flat rows (benchmark, target, parameters, metric, value, unit), the shape the
 PostgreSQL importer of Grafana and the report generators read. The HdrHistogram percentile
@@ -122,6 +126,13 @@ def main(raw_dir, out_path):
         for metric, value in metrics.items():
             unit = "req/s" if metric == "achieved_rps" else "count" if metric in ("socket_errors", "non_2xx") else "ms"
             row(target, params, metric, value, unit)
+        interference = os.path.join(raw_dir, "%s-rate%d.interference" % (target, rate))
+        if os.path.exists(interference):
+            with open(interference, encoding="utf-8") as fh:
+                cols = fh.readline().rstrip("\n").split("\t")
+            if len(cols) >= 5 and int(cols[2]) > 0:
+                row(target, params, "foreign_cpu_mean", float(cols[3]), "%")
+                row(target, params, "foreign_cpu_max", float(cols[4]), "%")
         series.append({"benchmark": BENCHMARK, "target": target, "params": params,
                        "kind": "latency_spectrum", "x": "percentile", "y": "latency_ms", "points": spectrum})
 
