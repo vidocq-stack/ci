@@ -7,7 +7,7 @@ importer come with P1.
 
 | Script | Input | Output |
 |---|---|---|
-| `import-wrk2-shootout.py <raw-dir> <out.json>` | The directory the Chappe shootout harness writes (`chappe-bench/target/shootout`: `fingerprint.json`, `_summary.tsv`, `<target>-rate<N>.txt`) | `results.json`, schema 1 |
+| `import-wrk2-shootout.py <raw-dir> <out.json>` | The directory the Chappe shootout harness writes (`chappe-bench/target/shootout`: `fingerprint.json`, `_summary.tsv`, `<target>-rate<N>.txt` and, when the harness watched for interference, `<target>-rate<N>.interference`) | `results.json`, schema 1 |
 | `shootout-adoc.py <results.json> <out.adoc>` | A shootout `results.json` | The generated sections of a Performance page: sustained throughput, latency against load, latency spectrum, footprint, run environment |
 
 Both use the Python 3 standard library only.
@@ -35,8 +35,9 @@ Both use the Python 3 standard library only.
 
 * `results` are flat rows, one measured value each, the shape of the `result` table of the ADR.
   Shootout metrics: `p50`, `p75`, `p90`, `p99`, `p99.9`, `p99.99`, `p99.999`, `max` (ms),
-  `achieved_rps`, `socket_errors`, `non_2xx` per offered rate; `image_size` and `idle_rss` (MiB)
-  per target.
+  `achieved_rps`, `socket_errors`, `non_2xx` per offered rate; `foreign_cpu_mean` and
+  `foreign_cpu_max` (% of one CPU used by containers outside the benchmark during the measurement)
+  when the run has `.interference` files; `image_size` and `idle_rss` (MiB) per target.
 * `series` keep a curve per run: here the HdrHistogram percentile spectrum, downsampled to eight
   points per decade of `1/(1-percentile)` (about 40 points instead of several hundred).
 
@@ -51,4 +52,6 @@ native) are drawn in the accent colour, the others in grey; the latency spectrum
 servers at most (`--spectrum`), in the fixed categorical order.
 
 A run that is not a reference run — CPU governor other than `performance`, turbo on, or
-uncommitted changes — gets a warning at the top of the generated sections.
+uncommitted changes — gets a warning at the top of the generated sections. A measurement during
+which other containers used more CPU than `params.interference_cpu_pct` of the fingerprint is left
+out of the charts and tables (shown as `disturbed`), and listed in a second warning.

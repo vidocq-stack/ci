@@ -91,6 +91,15 @@ def main(results_path, out_path, subjects, spectrum_targets):
             runs.setdefault(r["target"], {}).setdefault(rate, {})[r["metric"]] = r["value"]
     targets = [t for t in fp["targets"] if t in runs]
 
+    # A measurement during which other containers used more CPU than the threshold is left out (ADR 0001).
+    limit = fp["params"].get("interference_cpu_pct")
+    disturbed = []
+    if limit is not None:
+        for t in targets:
+            for rate in sorted(runs[t]):
+                if runs[t][rate].get("foreign_cpu_max", 0) > limit:
+                    disturbed.append((t, rate, runs[t].pop(rate)["foreign_cpu_max"]))
+
     def clean(m):
         return m["p99"] < slo and m.get("socket_errors", 0) == 0 and m.get("non_2xx", 0) == 0
 
@@ -99,7 +108,7 @@ def main(results_path, out_path, subjects, spectrum_targets):
         passing = [rate for rate, m in runs[t].items() if clean(m)]
         best[t] = max(passing) if passing else 0
     ranked = sorted(targets, key=lambda t: (-best[t], label(t)))
-    rates = sorted({rate for t in targets for rate in runs[t]})
+    rates = sorted({rate for t in targets for rate in runs[t]} | {rate for _, rate, _ in disturbed})
     reference = best.get(subjects[0]) or rates[len(rates) // 2]
 
     out = []
@@ -110,6 +119,11 @@ def main(results_path, out_path, subjects, spectrum_targets):
                    "report, not the performance of a version.\n====\n" % (
                        fp["host"]["governor"], "off" if fp["host"]["no_turbo"] == "1" else "on",
                        ", uncommitted changes in the working tree" if fp["dirty"] else ""))
+    if disturbed:
+        out.append("[WARNING]\n====\nLeft out, as other containers used more than %g %% of a CPU during the "
+                   "measurement: %s. The sustained rate of these servers may be understated.\n====\n" % (
+                       limit, ", ".join("%s at %s req/s (%g %%)" % (label(t), rate_text(rate), cpu)
+                                        for t, rate, cpu in disturbed)))
 
     out.append("== Sustained throughput\n")
     out.append("The highest offered rate each server sustains with a p99 latency under %g ms and no error, "
@@ -167,7 +181,9 @@ def main(results_path, out_path, subjects, spectrum_targets):
         },
         "resolve": {"scale": {"y": "shared"}},
     }))
-    rows = [[label(t)] + [ms_text(runs[t][r]["p99"]) if r in runs[t] else "-" for r in rates] for t in ranked]
+    left_out = {(t, rate) for t, rate, _ in disturbed}
+    rows = [[label(t)] + [ms_text(runs[t][r]["p99"]) if r in runs[t] else "disturbed" if (t, r) in left_out else "-"
+                          for r in rates] for t in ranked]
     out.append(table(["Server"] + ["p99 @ %s" % rate_text(r) for r in rates], rows,
                      ",".join(["3"] + ["1"] * len(rates))))
 
