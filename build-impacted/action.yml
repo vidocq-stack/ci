@@ -31,6 +31,14 @@ inputs:
   graph-ref:
     description: 'Branch of the dependency-graph repo to read the graph + resolver from'
     default: 'main'
+  require-fresh-graph:
+    description: >
+      Fail when the graph (graph/inverted.json, its generated_at) is older than the producer's
+      data file (data/<owner>_<repo>.json, its updated_at): a stale graph may not know every
+      consumer, and the rebuild would then check too few repositories without saying so.
+      'false' (the default, for now) only prints a warning; it becomes 'true' once the
+      dependency-graph repository rebuilds the graph with every data update.
+    default: 'false'
   maven-args:
     description: 'Common Maven args for every consumer build'
     default: '-B -ntp'
@@ -51,6 +59,8 @@ runs:
         BOT_TOKEN: ${{ inputs.bot-token }}
         GRAPH_REPO: ${{ inputs.graph-repo }}
         GRAPH_REF: ${{ inputs.graph-ref }}
+        REQUIRE_FRESH_GRAPH: ${{ inputs.require-fresh-graph }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         if ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
@@ -74,6 +84,10 @@ runs:
         curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/inverted.json     "$RAW/graph/inverted.json"
         curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
         curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
+
+        # A graph older than the producer data may miss consumers: an error when
+        # require-fresh-graph is true, a warning otherwise.
+        python3 "${ACTION_PATH}/graph-freshness.py" /tmp/inverted.json /tmp/data.json "$REQUIRE_FRESH_GRAPH"
 
         # Artifacts this repo produces (source of truth kept by update-dep-graph).
         ARTIFACTS=$(python3 - <<'PY'

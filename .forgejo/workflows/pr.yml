@@ -52,4 +52,5 @@ jobs:
       - run: |
           command -v git >/dev/null || { apt-get update && apt-get install -y --no-install-recommends git; }
           bash build-impacted/companion-branch-test.sh
+          bash build-impacted/graph-freshness-test.sh
           bash bench-window/bench-window-test.sh
