@@ -65,69 +65,8 @@ runs:
         GRAPH_REF: ${{ inputs.graph-ref }}
         REQUIRE_FRESH_GRAPH: ${{ inputs.require-fresh-graph }}
         ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        if ! command -v python3 >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 \
-           || ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
-          apt-get update && apt-get install -y --no-install-recommends python3 jq curl git ca-certificates
-        fi
-
-        # Forge slug -> data file name: Vidocq/vauban -> Vidocq_vauban.json
-        DATA_FILE="${PRODUCER_SLUG/\//_}.json"
-        FORGE="${GITHUB_SERVER_URL%/}"
-        RAW="${FORGE}/${GRAPH_REPO}/raw/branch/${GRAPH_REF}"
-        echo "Producer=$PRODUCER_SLUG / data file=$DATA_FILE / graph repo=$GRAPH_REPO ref=$GRAPH_REF"
-
-        # The dependency graph is public, so the token is optional. On an external fork PR
-        # BOT_TOKEN is empty (org secrets are withheld from forks): drop the auth header and
-        # read anonymously. Internal PRs still pass the token to lift rate limits.
-        if [ -n "${BOT_TOKEN:-}" ]; then auth=(-H "Authorization: token ${BOT_TOKEN}"); else auth=(); fi
-        # Retry on transient forge failures (504 gateway timeout, dropped connections).
-        # --retry-all-errors retries on HTTP 5xx too, not just connection errors.
-        retry_curl=(--retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15)
-        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/inverted.json     "$RAW/graph/inverted.json"
-        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/resolve_impact.py "$RAW/scripts/resolve_impact.py"
-        curl -fsSL "${retry_curl[@]}" ${auth[@]+"${auth[@]}"} -o /tmp/data.json         "$RAW/data/${DATA_FILE}"
-
-        # A graph older than the producer data may miss consumers: an error when
-        # require-fresh-graph is true, a warning otherwise.
-        python3 "${ACTION_PATH}/graph-freshness.py" /tmp/inverted.json /tmp/data.json "$REQUIRE_FRESH_GRAPH"
-
-        # Artifacts this repo produces (source of truth kept by update-dep-graph).
-        ARTIFACTS=$(python3 - <<'PY'
-        import json
-        d = json.load(open("/tmp/data.json"))
-        print(" ".join(sorted({f"{p['groupId']}:{p['artifactId']}" for p in d.get("produces", [])})))
-        PY
-        )
-        if [ -z "$ARTIFACTS" ]; then
-          echo "No io.vidocq.* artifact in data/${DATA_FILE} — graph out of sync?" >&2
-          exit 1
-        fi
-        echo "Produces: $ARTIFACTS"
-
-        # --ordered = producer-before-consumer topological order (required for the
-        # sequential rebuild: each level installs locally before the next consumes it).
-        MATRIX=$(python3 /tmp/resolve_impact.py \
-          --graph /tmp/inverted.json --changed $ARTIFACTS --format matrix --ordered)
-        echo "Ordered matrix (raw): $MATRIX"
-
-        # Keep only consumers that already exist on the forge (Codefloe). The migrated graph still
-        # lists historical/not-yet-migrated consumers; each rejoins automatically once
-        # created — no manual flag. Order is preserved (jq keeps array order).
-        : > /tmp/impacted.txt
-        for r in $(echo "$MATRIX" | jq -r '.include[].repo'); do
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused --connect-timeout 15 \
-            ${auth[@]+"${auth[@]}"} "${GITHUB_SERVER_URL%/}/api/v1/repos/$r")
-          if [ "$code" = "200" ]; then
-            echo "  keep $r"
-            echo "$r" >> /tmp/impacted.txt
-          else
-            echo "  drop $r (not on the forge yet, HTTP $code)"
-          fi
-        done
-        echo "Impacted consumers to rebuild: $(wc -l < /tmp/impacted.txt)"
+      # Writes /tmp/impacted.txt (shared with resolve-impacted, which turns it into a matrix).
+      run: bash "${ACTION_PATH}/resolve-consumers.sh"
 
     - name: Rebuild impacted consumers against local PR artifacts
       shell: bash
@@ -170,73 +109,9 @@ runs:
         LOGS="${RUNNER_TEMP:-/tmp}/downstream-logs"
         rm -rf "$LOGS"; mkdir -p "$LOGS"
 
-        clone_with_retry() {
-          # git has no built-in retry; the forge occasionally returns 504 on clone under load.
-          # Retry with exponential backoff, cleaning the dest between attempts. The token in the
-          # URL is stripped from log output (${url##*@}). An empty branch clones the default one.
-          local url="$1" dest="$2" branch="${3:-}" attempt=1 max=5 delay=5
-          local branch_args=()
-          [ -n "$branch" ] && branch_args=(--branch "$branch")
-          while :; do
-            rm -rf "$dest"
-            if git clone --quiet --depth 1 ${branch_args[@]+"${branch_args[@]}"} "$url" "$dest"; then return 0; fi
-            if [ "$attempt" -ge "$max" ]; then
-              echo "::error::git clone failed after ${max} attempts: ${url##*@}" >&2
-              return 1
-            fi
-            echo "  clone attempt ${attempt}/${max} failed (${url##*@}); retrying in ${delay}s..." >&2
-            sleep "$delay"; attempt=$((attempt + 1)); delay=$((delay * 2))
-          done
-        }
-
-        read_base_version() {
-          # Echo the root pom version with any -SNAPSHOT suffix stripped.
-          python3 - "$1" <<'PY'
-        import re, sys, xml.etree.ElementTree as ET
-        root = ET.parse(sys.argv[1]).getroot()
-        ns = root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
-        v = root.find(f"{{{ns}}}version") if ns else root.find("version")
-        if v is None or not v.text:
-            sys.stderr.write("root <version> not found\n"); sys.exit(1)
-        print(re.sub(r"-SNAPSHOT$", "", v.text.strip()))
-        PY
-        }
-
-        sync_plugin_descriptors() {
-          # versions:set does not touch resources; maven-plugin modules embed a
-          # plugin.xml with a hardcoded <version> that must follow the new version.
-          python3 - "$1" <<'PY'
-        import re, sys, xml.etree.ElementTree as ET
-        from pathlib import Path
-        repo = Path(sys.argv[1])
-        rp = ET.parse(repo / "pom.xml").getroot()
-        ns = rp.tag[1:].split("}", 1)[0] if rp.tag.startswith("{") else ""
-        v = rp.find(f"{{{ns}}}version") if ns else rp.find("version")
-        version = v.text.strip()
-        n = 0
-        for pom in repo.rglob("pom.xml"):
-            if "target" in pom.parts:
-                continue
-            try:
-                r = ET.parse(pom).getroot()
-            except ET.ParseError:
-                continue
-            pns = r.tag[1:].split("}", 1)[0] if r.tag.startswith("{") else ""
-            pkg = r.find(f"{{{pns}}}packaging") if pns else r.find("packaging")
-            if pkg is None or (pkg.text or "").strip() != "maven-plugin":
-                continue
-            px = pom.parent / "src/main/resources/META-INF/maven/plugin.xml"
-            if not px.is_file():
-                continue
-            content = px.read_text(encoding="utf-8")
-            new = re.sub(r"(<artifactId>[^<]+</artifactId>\s*\n\s*<version>)[^<]+(</version>)",
-                         rf"\g<1>{version}\g<2>", content, count=1)
-            if new != content:
-                px.write_text(new, encoding="utf-8"); n += 1
-        print(f"  plugin.xml synced: {n}")
-        PY
-        }
-
+        # One consumer at a time, in topological order: clone (companion branch aware), pin
+        # every upstream already rebuilt in this run, give it its own PR version, install
+        # (rebuild-consumer.sh, shared with build-one-consumer).
         while IFS= read -r slug; do
           [ -z "$slug" ] && continue
           short="${slug##*/}"; short="${short,,}"
@@ -256,45 +131,16 @@ runs:
           else
             echo "  branch: default"
           fi
-          clone_with_retry "$clone_url" "$dir" "$branch"
-          pushd "$dir" >/dev/null
 
-          # 1) Pin every upstream rebuilt in this run to its local PR version.
-          #    -D<prop>=<val> on the CLI does not reliably override <version>${prop}</version>
-          #    resolution, so we physically rewrite the property in every reactor pom.
-          #    One pass, without starting Maven (pin-upstreams.py makes the same edits as one
-          #    versions:set-property per upstream). When it cannot tell exactly which poms Maven
-          #    would rewrite, it changes nothing and exits non-zero: Maven then does it.
           pins=()
           for up in "${!PRV[@]}"; do pins+=(--pin "${up}=${PRV[$up]}"); done
-          if ! python3 "${ACTION_PATH}/pin-upstreams.py" --maven-args="$MVN_ARGS" "${pins[@]}" .; then
-            echo "::warning::${slug}: upstream versions not pinned in one pass, falling back to one versions:set-property per upstream"
-            for up in "${!PRV[@]}"; do
-              if grep -rqlF "<${up}.version>" --include=pom.xml .; then
-                echo "  set ${up}.version=${PRV[$up]}"
-                mvn $MVN_ARGS versions:set-property \
-                  -Dproperty="${up}.version" -DnewVersion="${PRV[$up]}" \
-                  -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
-              fi
-            done
-          fi
-
-          # 2) Give this consumer its own release-style PR version so the next level
-          #    resolves it from local M2 (release = immutable, never re-fetched).
-          base=$(read_base_version pom.xml)
-          cver="${base}-${VERSION_SUFFIX}"
-          echo "  consumer version: $cver"
-          mvn $MVN_ARGS versions:set \
-            -DnewVersion="$cver" -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
-          sync_plugin_descriptors .
-
-          # 3) install (runs unit + integration tests) -> available for downstream levels.
-          #    The log is kept for the flaky-test report (pipefail keeps Maven's exit status).
+          # Listed before the build, so the flaky-test report reads the log of a failed build too.
           printf '%s\t%s\n' "$slug" "$LOGS/$short.log" >> "$LOGS/consumers.tsv"
-          mvn $MVN_ARGS install </dev/null 2>&1 | tee "$LOGS/$short.log"
+          bash "${ACTION_PATH}/rebuild-consumer.sh" --slug "$slug" --clone-url "$clone_url" \
+            --dir "$dir" --branch "$branch" --suffix "$VERSION_SUFFIX" \
+            --log "$LOGS/$short.log" --version-out "$WORK/$short.version" "${pins[@]}" </dev/null
 
-          PRV["$short"]="$cver"
-          popd >/dev/null
+          PRV["$short"]="$(cat "$WORK/$short.version")"
           rm -rf "$dir"        # keep the M2, drop the checkout
           echo "::endgroup::"
         done < /tmp/impacted.txt
