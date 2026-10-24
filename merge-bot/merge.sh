@@ -183,9 +183,22 @@ else
   # (pr-validate) as part of the required checks, which takes 3-5 minutes on the
   # fast runner but 10+ minutes on the slower ones — the previous 10-minute
   # budget lost the race whenever a slow runner picked the job up.
+  # A failed request (HTTP error, network hiccup, non-JSON body) must not end
+  # the job: under `set -e -o pipefail` it used to kill the bot on the first
+  # poll, typically right after the force-push while the forge was still
+  # indexing the new head. Count it as "still pending" and give up only after
+  # 12 failures in a row (one minute).
+  unreachable=0
   for attempt in $(seq 1 360); do
-    status=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" \
-      | python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))')
+    if body=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status") \
+        && status=$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))' <<<"$body" 2>/dev/null); then
+      unreachable=0
+    else
+      unreachable=$((unreachable + 1))
+      status="unreachable"
+      info "status API not answering for ${new_head} (${unreachable}/12 in a row), retrying in 5s..."
+      (( unreachable < 12 )) || die "status API failed 12 times in a row for ${new_head}"
+    fi
     [[ "$status" == "success" ]] && break
     [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
     sleep 5
