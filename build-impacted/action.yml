@@ -255,14 +255,22 @@ runs:
           # 1) Pin every upstream rebuilt in this run to its local PR version.
           #    -D<prop>=<val> on the CLI does not reliably override <version>${prop}</version>
           #    resolution, so we physically rewrite the property in every reactor pom.
-          for up in "${!PRV[@]}"; do
-            if grep -rqlF "<${up}.version>" --include=pom.xml .; then
-              echo "  set ${up}.version=${PRV[$up]}"
-              mvn $MVN_ARGS versions:set-property \
-                -Dproperty="${up}.version" -DnewVersion="${PRV[$up]}" \
-                -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
-            fi
-          done
+          #    One pass, without starting Maven (pin-upstreams.py makes the same edits as one
+          #    versions:set-property per upstream). When it cannot tell exactly which poms Maven
+          #    would rewrite, it changes nothing and exits non-zero: Maven then does it.
+          pins=()
+          for up in "${!PRV[@]}"; do pins+=(--pin "${up}=${PRV[$up]}"); done
+          if ! python3 "${ACTION_PATH}/pin-upstreams.py" --maven-args="$MVN_ARGS" "${pins[@]}" .; then
+            echo "::warning::${slug}: upstream versions not pinned in one pass, falling back to one versions:set-property per upstream"
+            for up in "${!PRV[@]}"; do
+              if grep -rqlF "<${up}.version>" --include=pom.xml .; then
+                echo "  set ${up}.version=${PRV[$up]}"
+                mvn $MVN_ARGS versions:set-property \
+                  -Dproperty="${up}.version" -DnewVersion="${PRV[$up]}" \
+                  -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
+              fi
+            done
+          fi
 
           # 2) Give this consumer its own release-style PR version so the next level
           #    resolves it from local M2 (release = immutable, never re-fetched).
