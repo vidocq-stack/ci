@@ -47,8 +47,11 @@ runs:
         TAR_OPTIONS: '--exclude=io/vidocq/*-PR[0-9]*'
       with:
         path: ~/.m2/repository
-        key: m2-${{ runner.os }}-${{ github.repository }}-${{ hashFiles('**/pom.xml') }}
+        # The job is part of the key: otherwise the first job to save a set of poms (usually sonar) wins, and the
+        # dependencies another job adds (the downstream consumers of pr-validate) are never cached.
+        key: m2-${{ runner.os }}-${{ github.repository }}-${{ github.job }}-${{ hashFiles('**/pom.xml') }}
         restore-keys: |
+          m2-${{ runner.os }}-${{ github.repository }}-${{ github.job }}-
           m2-${{ runner.os }}-${{ github.repository }}-
           m2-${{ runner.os }}-
 
