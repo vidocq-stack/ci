@@ -1,0 +1,74 @@
+name: 'Resolve impacted downstream consumers'
+description: >
+  Resolve the transitive downstream consumers of the current repo from the Vidocq dependency
+  graph (the first step of build-impacted, same scripts: graph download, freshness check,
+  forge filter) and output them as a job matrix, one entry per consumer, for the flat parallel
+  downstream check (one build-one-consumer job per consumer). Needs no Java nor Maven, and no
+  checkout: it only reads the public dependency-graph repository and the forge API.
+
+inputs:
+  producer-slug:
+    description: 'Forge slug of the repo under PR, e.g. Vidocq/vauban (pass ${{ github.repository }})'
+    required: true
+  bot-token:
+    description: >
+      Optional Codefloe token (org secret VIDOCQ_BOT_TOKEN), only to lift API rate limits. Empty
+      on a fork pull request: the graph and the consumer repositories are public, so the step
+      then reads anonymously.
+    required: false
+    default: ''
+  graph-repo:
+    description: 'owner/name of the PUBLIC dependency-graph repo (read anonymously — no token needed)'
+    default: 'Vidocq/dep-graph'
+  graph-ref:
+    description: 'Branch of the dependency-graph repo to read the graph + resolver from'
+    default: 'main'
+  require-fresh-graph:
+    description: >
+      Fail when the graph is older than the producer's data file (see build-impacted). 'false'
+      only prints a warning.
+    default: 'true'
+
+outputs:
+  matrix:
+    description: 'JSON for strategy.matrix: {"include":[{"repo":"Vidocq/foy"},...]} (topological order)'
+    value: ${{ steps.matrix.outputs.matrix }}
+  count:
+    description: 'Number of consumers in the matrix ("0": nothing to rebuild)'
+    value: ${{ steps.matrix.outputs.count }}
+  upstreams:
+    description: >
+      JSON object: for each consumer, the other impacted consumers it depends on (directly or
+      not), space-separated in topological order. Pass
+      fromJSON(needs.<job>.outputs.upstreams)[matrix.repo] to build-one-consumer.
+    value: ${{ steps.matrix.outputs.upstreams }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve impacted consumers (topological order, forge-filtered)
+      shell: bash
+      env:
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        GRAPH_REPO: ${{ inputs.graph-repo }}
+        GRAPH_REF: ${{ inputs.graph-ref }}
+        REQUIRE_FRESH_GRAPH: ${{ inputs.require-fresh-graph }}
+        SHARED: ${{ github.action_path }}/../build-impacted
+      run: |
+        set -euo pipefail
+        RESOLVE_DIR="${RUNNER_TEMP:-/tmp}/resolve-impacted" bash "$SHARED/resolve-consumers.sh"
+
+    - name: Write the matrix
+      id: matrix
+      shell: bash
+      env:
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP:-/tmp}/resolve-impacted"
+        out=$(python3 "${ACTION_PATH}/impacted-matrix.py" \
+          --graph "$dir/inverted.json" --producer "$PRODUCER_SLUG" --impacted "$dir/impacted.txt")
+        printf '%s\n' "$out"
+        printf '%s\n' "$out" >> "$GITHUB_OUTPUT"

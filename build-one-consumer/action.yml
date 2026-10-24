@@ -1,0 +1,104 @@
+name: 'Build one downstream consumer (flat mode)'
+description: >
+  PR-only, one job per consumer (a matrix fed by resolve-impacted): rebuild the producer under
+  pull request at its PR version in this job, without its tests, then build ONE consumer
+  against it, with its tests. Flat mode: only the producer's version is pinned in the consumer;
+  every other io.vidocq upstream comes from central-snapshots as published, which is what
+  Central holds right after the producer is merged. An intermediate upstream that has a
+  companion branch for the pull request is rebuilt first, in this job (mini-chain).
+  Needs the producer checked out (actions/checkout) and Java + Maven on the PATH (setup-maven).
+
+inputs:
+  consumer:
+    description: 'Forge slug of the consumer to build, e.g. Vidocq/foy (pass ${{ matrix.repo }})'
+    required: true
+  upstreams:
+    description: >
+      The impacted intermediate upstreams of the consumer, space-separated, in topological order
+      (pass fromJSON(needs.<impacted job>.outputs.upstreams)[matrix.repo]). Only those that have
+      the companion branch are rebuilt; empty: none.
+    default: ''
+  producer-slug:
+    description: 'Forge slug of the repo under PR, e.g. Vidocq/vauban (pass ${{ github.repository }})'
+    required: true
+  producer-version:
+    description: 'Release-style PR version of the producer (no -SNAPSHOT); rebuilt and installed by this action'
+    required: true
+  version-suffix:
+    description: 'Suffix appended to the consumer base version, e.g. PR42.abc12345 (no -SNAPSHOT)'
+    required: true
+  producer-dir:
+    description: 'Directory of the producer checkout'
+    default: '.'
+  producer-maven-args:
+    description: 'Maven args of the producer rebuild (versions:set, then install -DskipTests)'
+    default: '-B -ntp'
+  maven-args:
+    description: >
+      Maven args of the consumer build. The default reruns a failing test once (surefire and
+      failsafe); a test that then passes is reported as flaky, as in build-impacted. A value
+      given here replaces the whole default.
+    default: '-B -ntp -Dsurefire.rerunFailingTestsCount=1 -Dfailsafe.rerunFailingTestsCount=1'
+  companion-branches:
+    description: >
+      Build the consumer, and rebuild its intermediate upstreams, on the branch named like the
+      PR's head branch when they have one. PR from a branch of the producer repo only, never
+      from a fork. 'false' turns it off.
+    default: 'true'
+  bot-token:
+    description: 'Optional Codefloe token (VIDOCQ_BOT_TOKEN), only for clone rate limits; empty on fork PRs'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Rebuild the producer at its PR version (no tests)
+      shell: bash
+      env:
+        PRODUCER_VERSION: ${{ inputs.producer-version }}
+        PRODUCER_DIR: ${{ inputs.producer-dir }}
+        PRODUCER_MVN_ARGS: ${{ inputs.producer-maven-args }}
+        SHARED: ${{ github.action_path }}/../build-impacted
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+          apt-get update && apt-get install -y --no-install-recommends python3 git ca-certificates
+        fi
+        bash "${ACTION_PATH}/rebuild-producer.sh"
+
+    - name: Build ${{ inputs.consumer }} against the PR producer (flat)
+      shell: bash
+      env:
+        CONSUMER: ${{ inputs.consumer }}
+        UPSTREAMS: ${{ inputs.upstreams }}
+        PRODUCER_SLUG: ${{ inputs.producer-slug }}
+        PRODUCER_VERSION: ${{ inputs.producer-version }}
+        VERSION_SUFFIX: ${{ inputs.version-suffix }}
+        MVN_ARGS: ${{ inputs.maven-args }}
+        BOT_TOKEN: ${{ inputs.bot-token }}
+        COMPANION_BRANCHES: ${{ inputs.companion-branches }}
+        HEAD_REF: ${{ github.head_ref }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        SHARED: ${{ github.action_path }}/../build-impacted
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/build-consumer.sh"
+
+    # Same report as build-impacted: a test that failed, then passed on rerun, becomes a warning
+    # and a row of the job summary. Only reports, never fails.
+    - name: Report flaky tests of the consumer build
+      if: always()
+      shell: bash
+      env:
+        SHARED: ${{ github.action_path }}/../build-impacted
+      run: |
+        set -uo pipefail
+        list="${RUNNER_TEMP:-/tmp}/downstream-logs/consumers.tsv"
+        if [ ! -s "$list" ]; then
+          echo "No consumer build log to read."
+          exit 0
+        fi
+        args=()
+        while IFS=$'\t' read -r slug log; do args+=("${slug}=${log}"); done < "$list"
+        python3 "$SHARED/flakes.py" "${args[@]}" || true
