@@ -35,8 +35,10 @@ runs:
     # One cache per repository and set of poms. An exact hit is not saved again; a miss
     # restores the newest cache of the same repository, else of any repository, and saves a
     # new one at the end of the job. Artifacts installed at a pull-request version
-    # (io/vidocq/**/<version>-PR<n>.<sha>) are left out of the saved cache: they are
-    # release-style, so they are never resolved again and would only make the cache bigger.
+    # (io/vidocq/**/<version>-PR<n>.<sha>) or at a nightly version
+    # (io/vidocq/**/<version>-NIGHTLY.<sha>, downstream-nightly.yml) are left out of the saved
+    # cache: they are release-style, so they are never resolved again and would only make the
+    # cache bigger.
     # actions/cache cannot leave them out through `path` (a `!` pattern is ignored under a
     # directory it archives whole), so GNU tar's TAR_OPTIONS does it, on this step only (its
     # save runs at the end of the job, with the same environment).
@@ -44,7 +46,7 @@ runs:
       if: inputs.cache == 'maven'
       uses: actions/cache@v4
       env:
-        TAR_OPTIONS: '--exclude=io/vidocq/*-PR[0-9]*'
+        TAR_OPTIONS: '--exclude=io/vidocq/*-PR[0-9]* --exclude=io/vidocq/*-NIGHTLY*'
       with:
         path: ~/.m2/repository
         # The job is part of the key: otherwise the first job to save a set of poms (usually sonar) wins, and the
