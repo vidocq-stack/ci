@@ -54,4 +54,5 @@ jobs:
           bash build-impacted/companion-branch-test.sh
           bash build-impacted/graph-freshness-test.sh
           bash build-impacted/pin-upstreams-test.sh
+          bash build-impacted/flakes-test.sh
           bash bench-window/bench-window-test.sh

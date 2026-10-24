@@ -40,8 +40,12 @@ inputs:
       dependency-graph repository rebuilds the graph with every data update.
     default: 'false'
   maven-args:
-    description: 'Common Maven args for every consumer build'
-    default: '-B -ntp'
+    description: >
+      Common Maven args for every consumer build. The default reruns a failing test once
+      (surefire and failsafe): a test that then passes does not fail the pull request, and is
+      reported as flaky in a warning and in the job summary. Only the consumer builds get it,
+      never the producer's own build. A value given here replaces the whole default.
+    default: '-B -ntp -Dsurefire.rerunFailingTestsCount=1 -Dfailsafe.rerunFailingTestsCount=1'
   companion-branches:
     description: >
       Rebuild each consumer on the branch named like the PR's head branch when the consumer
@@ -162,6 +166,9 @@ runs:
 
         WORK="${RUNNER_TEMP:-/tmp}/downstream"
         mkdir -p "$WORK"
+        # Build logs of the consumers, read by the flaky-test report step.
+        LOGS="${RUNNER_TEMP:-/tmp}/downstream-logs"
+        rm -rf "$LOGS"; mkdir -p "$LOGS"
 
         clone_with_retry() {
           # git has no built-in retry; the forge occasionally returns 504 on clone under load.
@@ -282,7 +289,9 @@ runs:
           sync_plugin_descriptors .
 
           # 3) install (runs unit + integration tests) -> available for downstream levels.
-          mvn $MVN_ARGS install </dev/null
+          #    The log is kept for the flaky-test report (pipefail keeps Maven's exit status).
+          printf '%s\t%s\n' "$slug" "$LOGS/$short.log" >> "$LOGS/consumers.tsv"
+          mvn $MVN_ARGS install </dev/null 2>&1 | tee "$LOGS/$short.log"
 
           PRV["$short"]="$cver"
           popd >/dev/null
@@ -295,3 +304,23 @@ runs:
           # Merge these right after the producer: until then their main does not build.
           echo "::notice::Rebuilt on the companion branch '$companion': ${on_companion[*]}"
         fi
+
+    # A test that failed, then passed when run again, is listed by surefire/failsafe under
+    # "Flakes:". Each one becomes a warning and a row of the job summary, naming the consumer,
+    # so that it gets a BUG.md entry instead of going unnoticed. Runs after a failed rebuild
+    # too; it only reports and never fails.
+    - name: Report flaky tests of the consumer builds
+      if: always()
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+        list="${RUNNER_TEMP:-/tmp}/downstream-logs/consumers.tsv"
+        if [ ! -s "$list" ]; then
+          echo "No consumer build log to read."
+          exit 0
+        fi
+        args=()
+        while IFS=$'\t' read -r slug log; do args+=("${slug}=${log}"); done < "$list"
+        python3 "${ACTION_PATH}/flakes.py" "${args[@]}" || true
