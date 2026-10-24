@@ -19,7 +19,8 @@
 # <NAME.version>: the consumer then resolves that upstream from central-snapshots, not from the
 # version just pinned, and the build says nothing about the change under test.
 #
-# Env: MVN_ARGS (common Maven args, word-split as given), DIR is left in place for the caller.
+# Env: MVN_ARGS (common Maven args, word-split as given); UNPINNED_OUT, when set, is a file to
+# which each NAME of --warn-unpinned that was not pinned is appended. DIR is left in place.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +73,7 @@ if [ "${#pins[@]}" -gt 0 ]; then
 fi
 for up in ${warn_unpinned[@]+"${warn_unpinned[@]}"}; do
   if ! grep -rqlF "<${up}.version>" --include=pom.xml .; then
+    if [ -n "${UNPINNED_OUT:-}" ]; then printf '%s\n' "$up" >> "$UNPINNED_OUT"; fi
     echo "::warning title=Upstream not pinned in ${slug}::no pom of ${slug} declares <${up}.version>, so it was not pinned to the pull-request version: ${slug} resolves ${up} as declared (usually its SNAPSHOT on central-snapshots), and this build does not check the change under test against it."
   fi
 done

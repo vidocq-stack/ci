@@ -98,7 +98,7 @@ check "flat: the consumer gets its own PR version" "1" \
 check "flat: the consumer runs its tests" "cyrano -B -ntp install" "$(grep ' install' "$TMP/mvn-calls")"
 check "flat: the build log is listed for the flaky-test report" \
   "Vidocq/cyrano	$TMP/runner/downstream-logs/cyrano.log" "$(cat "$TMP/runner/downstream-logs/consumers.tsv")"
-check "flat: the job summary has the result" "1" "$(grep -c '| Vidocq/cyrano | default | .* | none | success |' "$TMP/summary")"
+check "flat: the job summary has the result" "1" "$(grep -c '| Vidocq/cyrano | default | vauban=0.4.0-PR7.abcdef12 | | none | success |' "$TMP/summary")"
 
 # Mini-chain: an intermediate upstream that has the companion branch is rebuilt first.
 check "chain: the build succeeds" "0" "$(run CONSUMER=Vidocq/cyrano UPSTREAMS=Vidocq/ravel)"
@@ -126,6 +126,8 @@ check "companion: the summary names the branch" "1" "$(grep -c '| Vidocq/foy | f
 check "unpinned: the build still runs" "0" "$(run CONSUMER=Vidocq/grimm UPSTREAMS=Vidocq/ravel HEAD_REF=)"
 check "unpinned: a warning says the producer was not pinned" "1" \
   "$(grep -c '::warning title=Upstream not pinned in Vidocq/grimm::no pom of Vidocq/grimm declares <vauban.version>' "$TMP/out")"
+check "unpinned: the summary names the upstream not pinned" "1" \
+  "$(grep -c '| Vidocq/grimm | default | vauban=0.4.0-PR7.abcdef12 | vauban | none | success |' "$TMP/summary")"
 
 # A failing consumer build fails the step, and the summary says so.
 check "failure: the step fails" "1" "$(run CONSUMER=Vidocq/cyrano MVN_FAIL=cyrano HEAD_REF=)"

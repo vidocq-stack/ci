@@ -52,6 +52,9 @@ WORK="${RUNNER_TEMP:-/tmp}/downstream"
 LOGS="${RUNNER_TEMP:-/tmp}/downstream-logs"
 mkdir -p "$WORK"
 rm -rf "$LOGS"; mkdir -p "$LOGS"
+# Upstreams the consumer could not be pinned to (no <name.version> in its poms), for the summary.
+UNPINNED="$WORK/unpinned.txt"
+: > "$UNPINNED"
 
 # short name -> PR version installed in the local repository: the producer, then each
 # intermediate rebuilt on its companion branch.
@@ -69,9 +72,9 @@ summary() {
     {
       echo "### Flat downstream build of ${CONSUMER}"
       echo
-      echo "| Consumer | Branch | Pinned to a PR version | Rebuilt first (companion) | Result | Build time |"
-      echo "|---|---|---|---|---|---|"
-      echo "| ${CONSUMER} | ${consumer_branch:-default} | $(for k in "${!PRV[@]}"; do printf '%s=%s ' "$k" "${PRV[$k]}"; done)| ${chain[*]:-none} | ${result} | $((took / 60)) min $((took % 60)) s |"
+      echo "| Consumer | Branch | PR versions | Not pinned (no property) | Rebuilt first (companion) | Result | Build time |"
+      echo "|---|---|---|---|---|---|---|"
+      echo "| ${CONSUMER} | ${consumer_branch:-default} | $(for k in "${!PRV[@]}"; do printf '%s=%s ' "$k" "${PRV[$k]}"; done)| $(sort -u "$UNPINNED" | tr '\n' ' ')| ${chain[*]:-none} | ${result} | $((took / 60)) min $((took % 60)) s |"
       echo
     } >> "$GITHUB_STEP_SUMMARY"
   fi
@@ -128,7 +131,7 @@ echo "::group::Build $CONSUMER (pinned: ${!PRV[*]})"
 mapfile -t args < <(pin_args)
 # Listed before the build, so the flaky-test report reads the log of a failed build too.
 printf '%s\t%s\n' "$CONSUMER" "$LOGS/$s.log" >> "$LOGS/consumers.tsv"
-bash "$SHARED/rebuild-consumer.sh" --slug "$CONSUMER" --clone-url "$url" \
+UNPINNED_OUT="$UNPINNED" bash "$SHARED/rebuild-consumer.sh" --slug "$CONSUMER" --clone-url "$url" \
   --dir "$WORK/$s" --branch "$consumer_branch" --suffix "$VERSION_SUFFIX" \
   --log "$LOGS/$s.log" "${args[@]}" </dev/null
 rm -rf "${WORK:?}/$s"
