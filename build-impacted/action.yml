@@ -36,9 +36,9 @@ inputs:
       Fail when the graph (graph/inverted.json, its generated_at) is older than the producer's
       data file (data/<owner>_<repo>.json, its updated_at): a stale graph may not know every
       consumer, and the rebuild would then check too few repositories without saying so.
-      'false' (the default, for now) only prints a warning; it becomes 'true' once the
-      dependency-graph repository rebuilds the graph with every data update.
-    default: 'false'
+      'false' only prints a warning. 'true' by default since the dependency-graph repository
+      rebuilds the graph in the same commit as every data update (Vidocq/dep-graph#3).
+    default: 'true'
   maven-args:
     description: >
       Common Maven args for every consumer build. The default reruns a failing test once
