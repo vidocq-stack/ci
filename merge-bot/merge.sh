@@ -55,6 +55,7 @@ if [[ "${TRIGGER_EVENT:-}" == "issue_comment" ]]; then
   esac
 fi
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API="${BASE_URL%/}/api/v1"
 auth_hdr="Authorization: token ${BOT_TOKEN}"
 
@@ -165,15 +166,22 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
   exit 0
 fi
 
+# The base branch says which checks it requires: wait for those only. The
+# commit's combined state also covers checks it does not require, such as the
+# SonarQube analysis in report mode, and waiting for it made /merge give up on a
+# green pull request (Vidocq/ci#47).
 # Repos without required status checks (enable_status_check=false, e.g.
 # GestionProjet or governance) never report a commit status, so waiting for
 # "success" would burn the whole 30-minute budget and fail. Skip the wait.
 # NOTE: use the read-level /branches/{branch} endpoint — /branch_protections/
 # requires admin rights the bot token does not have (it returned an error page,
 # and the fail-safe fallback made the bot wait forever on check-less repos).
-checks_required=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branches/${base_ref}" \
-  | python3 -c 'import sys,json; print(str(json.load(sys.stdin).get("enable_status_check", True)).lower())' \
-  || echo "true")
+# If the branch cannot be read, fall back to waiting for every status.
+branch_json=$(mktemp)
+curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branches/${base_ref}" > "$branch_json" 2>/dev/null \
+  && python3 -c 'import sys,json; json.load(open(sys.argv[1]))' "$branch_json" 2>/dev/null \
+  || echo '{}' > "$branch_json"
+checks_required=$(python3 -c 'import sys,json; print(str(json.load(open(sys.argv[1])).get("enable_status_check", True)).lower())' "$branch_json")
 
 if [[ "$checks_required" != "true" ]]; then
   info "Branch protection on ${base_ref} does not require status checks — skipping check wait"
@@ -188,22 +196,23 @@ else
   # poll, typically right after the force-push while the forge was still
   # indexing the new head. Count it as "still pending" and give up only after
   # 12 failures in a row (one minute).
+  status_json=$(mktemp)
   unreachable=0
   for attempt in $(seq 1 360); do
-    if body=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status") \
-        && status=$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("state"))' <<<"$body" 2>/dev/null); then
+    if curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" > "$status_json" \
+        && verdict=$(python3 "${HERE}/required-checks.py" "$branch_json" "$status_json" 2>/dev/null); then
       unreachable=0
     else
       unreachable=$((unreachable + 1))
-      status="unreachable"
+      verdict="unreachable"
       info "status API not answering for ${new_head} (${unreachable}/12 in a row), retrying in 5s..."
       (( unreachable < 12 )) || die "status API failed 12 times in a row for ${new_head}"
     fi
-    [[ "$status" == "success" ]] && break
-    [[ "$status" == "failure" || "$status" == "error" ]] && die "required status checks on ${new_head} reported ${status}"
+    [[ "$verdict" == "success" ]] && break
+    [[ "$verdict" == failure:* ]] && die "required status check on ${new_head} reported ${verdict}"
     sleep 5
   done
-  [[ "$status" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${status})"
+  [[ "$verdict" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${verdict})"
 fi
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
