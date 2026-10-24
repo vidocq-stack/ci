@@ -43,6 +43,12 @@ inputs:
       branch is brought up to date and every commit re-signed, but the PR
       is left open for a human (or a later /merge) to merge it.
     default: 'true'
+  checks-timeout-minutes:
+    description: >-
+      How long to wait for the checks the base branch requires before giving
+      up, in whole minutes, from 1 to 80 (the reusable workflow's job stops at
+      90). Raise it for a repository whose pr-validate runs longer.
+    default: '60'
 
 runs:
   using: composite
@@ -60,6 +66,7 @@ runs:
         BOT_NAME: ${{ inputs.bot-name }}
         BOT_EMAIL: ${{ inputs.bot-email }}
         MERGE_AFTER_REBASE: ${{ inputs.merge }}
+        CHECKS_TIMEOUT_MINUTES: ${{ inputs.checks-timeout-minutes }}
         # What actually triggered this run. The calling workflow gates on it
         # too, but that workflow is copied into every consumer repository and
         # drifts; this action is resolved from @main, so the guard in merge.sh

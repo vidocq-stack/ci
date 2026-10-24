@@ -16,6 +16,7 @@
 #   BOT_NAME, BOT_EMAIL, MERGE_AFTER_REBASE (true/false, default true)
 #   TRIGGER_EVENT, TRIGGER_COMMENTER, TRIGGER_COMMENT — what set this run off
 #   TRIGGER_BOT_LOGIN — the bot's own account (default vidocq-ci-bot)
+#   CHECKS_TIMEOUT_MINUTES — how long to wait for the required checks (default 60, at most 80)
 #
 # Assumes the calling workflow already ran actions/checkout@v4 with
 # fetch-depth: 0 and a token with push rights (VIDOCQ_BOT_TOKEN).
@@ -34,6 +35,13 @@ require_env() {
 
 require_env PR_NUMBER REPO BASE_URL BOT_TOKEN \
             GIT_SIGNING_PRIVATE_KEY GIT_SIGNING_PASSPHRASE GIT_SIGNING_KEY_ID
+
+# The budget for the required checks, refused here rather than after the rebase
+# and force-push. 80 minutes at most: the calling job stops at 90, and a wait it
+# cuts short ends the run without the failure comment (Vidocq/ci#49).
+checks_timeout_minutes="${CHECKS_TIMEOUT_MINUTES-60}"
+[[ "$checks_timeout_minutes" =~ ^[1-9][0-9]?$ ]] && (( checks_timeout_minutes <= 80 )) \
+  || die "CHECKS_TIMEOUT_MINUTES must be a whole number of minutes from 1 to 80 (got '${checks_timeout_minutes}')"
 
 # ---------------------------------------------------------------- 0. is this trigger real?
 #
@@ -172,7 +180,7 @@ fi
 # green pull request (Vidocq/ci#47).
 # Repos without required status checks (enable_status_check=false, e.g.
 # GestionProjet or governance) never report a commit status, so waiting for
-# "success" would burn the whole 30-minute budget and fail. Skip the wait.
+# "success" would burn the whole checks budget and fail. Skip the wait.
 # NOTE: use the read-level /branches/{branch} endpoint — /branch_protections/
 # requires admin rights the bot token does not have (it returned an error page,
 # and the fail-safe fallback made the bot wait forever on check-less repos).
@@ -187,10 +195,12 @@ if [[ "$checks_required" != "true" ]]; then
   info "Branch protection on ${base_ref} does not require status checks — skipping check wait"
 else
   info "Waiting for required status checks on ${new_head}"
-  # 360 attempts * 5s = 30 minutes: some consumer repos run a full Maven build
-  # (pr-validate) as part of the required checks, which takes 3-5 minutes on the
-  # fast runner but 10+ minutes on the slower ones — the previous 10-minute
-  # budget lost the race whenever a slow runner picked the job up.
+  # CHECKS_TIMEOUT_MINUTES, 60 by default, on the clock: some repos run a full
+  # Maven build (pr-validate) as part of the required checks, and Vauban's
+  # rebuilds its consumers too, about 48 minutes. The 10-minute budget, then the
+  # 30-minute one, lost the race whenever a slow runner or a slow repository
+  # held the checks (Vidocq/ci#49). Counting attempts instead of minutes also
+  # left out the time each status request takes.
   # A failed request (HTTP error, network hiccup, non-JSON body) must not end
   # the job: under `set -e -o pipefail` it used to kill the bot on the first
   # poll, typically right after the force-push while the forge was still
@@ -198,7 +208,9 @@ else
   # 12 failures in a row (one minute).
   status_json=$(mktemp)
   unreachable=0
-  for attempt in $(seq 1 360); do
+  deadline=$((SECONDS + checks_timeout_minutes * 60))
+  verdict="pending"
+  while (( SECONDS < deadline )); do
     if curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" > "$status_json" \
         && verdict=$(python3 "${HERE}/required-checks.py" "$branch_json" "$status_json" 2>/dev/null); then
       unreachable=0
@@ -212,7 +224,7 @@ else
     [[ "$verdict" == failure:* ]] && die "required status check on ${new_head} reported ${verdict}"
     sleep 5
   done
-  [[ "$verdict" == "success" ]] || die "required status checks on ${new_head} did not succeed within 30 minutes (last state: ${verdict})"
+  [[ "$verdict" == "success" ]] || die "required status checks on ${new_head} did not succeed within ${checks_timeout_minutes} minutes (last state: ${verdict})"
 fi
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"

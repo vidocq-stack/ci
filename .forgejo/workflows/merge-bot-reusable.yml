@@ -26,6 +26,11 @@ on:
         required: false
         default: 'true'
         type: string
+      checks-timeout-minutes:
+        description: 'Minutes to wait for the required checks, 1 to 80 — raise it for a slow pr-validate'
+        required: false
+        default: '60'
+        type: string
     # No `secrets:` declaration: Forgejo documents on.workflow_call.inputs and
     # .outputs, not .secrets, and declaring it made the forge schedule this file
     # on push and pull_request and fail the run before any job existed. Callers
@@ -56,7 +61,9 @@ jobs:
        github.event.comment.user.login != 'vidocq-ci-bot' &&
        (startsWith(github.event.comment.body, '/merge') || startsWith(github.event.comment.body, '/rebase')))
     runs-on: vidocq-runner
-    timeout-minutes: 45
+    # The checks budget (checks-timeout-minutes, 80 at most) plus the rebase,
+    # the re-signing and the push.
+    timeout-minutes: 90
     steps:
       - name: Resolve PR number, actor and mode
         id: ctx
@@ -112,6 +119,7 @@ jobs:
           git-signing-passphrase: ${{ secrets.CI_BOT_GPG_PASSPHRASE }}
           git-signing-key-id: ${{ secrets.CI_BOT_GPG_KEY_ID }}
           merge: ${{ steps.ctx.outputs.merge }}
+          checks-timeout-minutes: ${{ inputs.checks-timeout-minutes || '60' }}
 
       - name: Comment on success (rebase-only)
         if: success() && github.event_name == 'issue_comment' && steps.ctx.outputs.merge == 'false'
