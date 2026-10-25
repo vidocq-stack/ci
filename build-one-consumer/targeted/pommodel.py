@@ -312,11 +312,21 @@ def load_reactor(path):
     return mods
 
 
-def scan_sources(m, artifact_ids, cap=1 << 20):
+TEST_SOURCE_DIRS = ('test', 'it', 'testFixtures', 'integration-test')
+
+
+def is_test_source(rel):
+    """True for a path under src/test/, src/it/, ... (relative to the module directory)."""
+    parts = rel.replace(os.sep, '/').split('/')
+    return len(parts) > 1 and parts[0] == 'src' and (parts[1] in TEST_SOURCE_DIRS or parts[1].startswith('test'))
+
+
+def scan_sources(m, artifact_ids, cap=1 << 20, where=None):
     """Reasons for a module whose src/ names a producer artifact as text: a test or a tool may
     resolve it at run time (ShrinkWrap, a CLI, the local repository by coordinates). Any text
     file counts (binary files, with a NUL byte, and files over `cap` bytes are skipped); the
-    artifactId must stand alone, so "groupId:artifactId[:version]" matches too."""
+    artifactId must stand alone, so "groupId:artifactId[:version]" matches too. `where`:
+    None (every file under src/), 'main' (not under a test source directory) or 'test'."""
     if not artifact_ids:
         return []
     rx = re.compile(r'(?<![\w.-])(' + '|'.join(re.escape(a) for a in sorted(artifact_ids, key=len, reverse=True))
@@ -326,6 +336,8 @@ def scan_sources(m, artifact_ids, cap=1 << 20):
         dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.'))
         for name in sorted(files):
             path = os.path.join(d, name)
+            if where is not None and is_test_source(os.path.relpath(path, m.basedir)) != (where == 'test'):
+                continue
             try:
                 if os.path.getsize(path) > cap:
                     continue

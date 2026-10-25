@@ -431,6 +431,8 @@ add_module src-coord acme-src-coord jar acme-parent "" ""
 mkdir -p "$ROOT/src-coord/src/test/java" && echo 'var a = resolve("io.vidocq.knock:knock-api:1.0");' > "$ROOT/src-coord/src/test/java/T.java"
 add_module src-bare acme-src-bare jar acme-parent "" ""
 mkdir -p "$ROOT/src-bare/src/main/resources" && echo 'extension: knock-core' > "$ROOT/src-bare/src/main/resources/catalog.yml"
+add_module src-coord-user acme-src-coord-user jar acme-parent "$(dep $G:acme-src-coord 0.4.0-PR1.x)" ""
+add_module src-bare-user acme-src-bare-user jar acme-parent "$(dep $G:acme-src-bare 0.4.0-PR1.x)" ""
 add_module src-quiet acme-src-quiet jar acme-parent "" ""
 mkdir -p "$ROOT/src-quiet/src/main/resources" && echo 'see knock-core-extras and myknock-api' > "$ROOT/src-quiet/src/main/resources/notes.txt"
 printf 'knock-core\0binary' > "$ROOT/src-quiet/src/main/resources/blob.bin"
@@ -456,6 +458,9 @@ check "nested: a profile-only module under a pom module does not reach its child
 check "sources: a producer coordinate in a test source" "affected" "$(status src-coord)"
 check "sources: a producer artifactId in a resource" "affected" "$(status src-bare)"
 check "sources: longer names and binary files do not count" "skip" "$(status src-quiet)"
+check "sources: a mention in test sources only does not reach the module's dependents" "skip" "$(status src-coord-user)"
+check "sources: a mention in main sources does" "affected" "$(status src-bare-user)"
+check "sources: the test-only reason says so" "1" "$(reason src-coord | grep -c 'tests only')"
 check "sources: the reason names the file" "1" "$(reason src-coord | grep -c 'src/test/java/T.java')"
 
 # --- A malformed graph turns the pruning off (review M7) -------------------------------------

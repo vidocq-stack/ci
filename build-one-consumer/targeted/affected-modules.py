@@ -22,7 +22,8 @@ references too: a reactor module named that way is a reactor edge, an external o
 closure (its version from the token, the module's dependencyManagement or its dependencies), and
 one that cannot be resolved makes the module affected (doubt). So do a nested pom that does not
 parse or names a coordinate that cannot be resolved, and a producer artifactId named in any text
-file of the module's src/ (a test that resolves it at run time).
+file of the module's src/ (a test or the module's code may resolve it at run time; when only its
+test sources name it, the module's own artifact does not change, so its dependents are not added).
 
 A producer artifact can also reach a module through an external artifact (a jar of another
 repository that depends on the producer). The external io.vidocq artifacts of the modules not
@@ -203,10 +204,23 @@ class Analysis:
             reasons |= set(m.doubts)
             reasons |= set(self.chain_reasons(m))
             if m.packaging != 'pom':
-                reasons |= set(pommodel.scan_sources(m, artifact_ids))
+                main = pommodel.scan_sources(m, artifact_ids, where='main')
+                reasons |= set(main)
+                if not main:
+                    tests = pommodel.scan_sources(m, artifact_ids, where='test')
+                    if tests:
+                        self.test_only[ga] = tests[0] + ' (tests only: its dependents are not affected)'
             if reasons:
                 hits[ga] = sorted(reasons)
         return hits
+
+    def close(self, direct):
+        """Direct hits closed over the reactor, plus the modules whose test sources only name a
+        producer artifact: their tests run, their artifact does not change, so no dependent."""
+        affected = pommodel.close_dependents({ga: '; '.join(sorted(r)) for ga, r in direct.items()}, self.mods)
+        for ga, why in self.test_only.items():
+            affected.setdefault(ga, why)
+        return affected
 
     def closure_needs(self, affected):
         """{key: entry} for the suspect externals of the modules not affected yet; key =
@@ -286,8 +300,9 @@ class Analysis:
         return hits
 
     def run(self):
+        self.test_only = {}
         direct = {ga: set(r) for ga, r in self.direct_hits().items()}
-        affected = pommodel.close_dependents({ga: '; '.join(sorted(r)) for ga, r in direct.items()}, self.mods)
+        affected = self.close(direct)
         needs = self.closure_needs(affected)
         report = {'pruning': self.pruning, 'synthetic': len(needs), 'modules': len(self.mods),
                   'direct': {self.rel[ga]: '; '.join(sorted(r)) for ga, r in sorted(direct.items())}}
@@ -298,8 +313,7 @@ class Analysis:
         if needs:
             for ga, reasons in self.read_closures(needs).items():
                 direct.setdefault(ga, set()).update(reasons)
-            affected = pommodel.close_dependents({ga: '; '.join(sorted(r)) for ga, r in direct.items()},
-                                                 self.mods)
+            affected = self.close(direct)
         skip = sorted(self.rel[ga] for ga, m in self.mods.items()
                       if ga not in affected and m.packaging != 'pom')
         report.update(
