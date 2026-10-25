@@ -45,6 +45,21 @@ inputs:
       PR's head branch when they have one. PR from a branch of the producer repo only, never
       from a fork. 'false' turns it off.
     default: 'true'
+  tests:
+    description: >
+      'full' (default): every test of the consumer runs, as always. 'targeted': the consumer
+      still compiles, test-compiles, packages and installs every module in the same single
+      install, but test execution is turned off in the modules whose build cannot see any
+      artifact of the producer (effective-POM analysis, build-one-consumer/targeted/). Falls back
+      to 'full' on any doubt (intermediate upstreams, companion branch, analysis or Maven
+      error...), with the reason in the job summary.
+    default: 'full'
+  graph-repo:
+    description: 'owner/name of the PUBLIC dependency-graph repo; tests=targeted only, to prune the analysis'
+    default: 'Vidocq/dep-graph'
+  graph-ref:
+    description: 'Branch of the dependency-graph repo (tests=targeted only)'
+    default: 'main'
   bot-token:
     description: 'Optional Codefloe token (VIDOCQ_BOT_TOKEN), only for clone rate limits; empty on fork PRs'
     required: false
@@ -59,6 +74,7 @@ runs:
         PRODUCER_VERSION: ${{ inputs.producer-version }}
         PRODUCER_DIR: ${{ inputs.producer-dir }}
         PRODUCER_MVN_ARGS: ${{ inputs.producer-maven-args }}
+        TESTS: ${{ inputs.tests }}
         SHARED: ${{ github.action_path }}/../build-impacted
         ACTION_PATH: ${{ github.action_path }}
       run: |
@@ -79,6 +95,9 @@ runs:
         MVN_ARGS: ${{ inputs.maven-args }}
         BOT_TOKEN: ${{ inputs.bot-token }}
         COMPANION_BRANCHES: ${{ inputs.companion-branches }}
+        TESTS: ${{ inputs.tests }}
+        GRAPH_REPO: ${{ inputs.graph-repo }}
+        GRAPH_REF: ${{ inputs.graph-ref }}
         HEAD_REF: ${{ github.head_ref }}
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         SHARED: ${{ github.action_path }}/../build-impacted

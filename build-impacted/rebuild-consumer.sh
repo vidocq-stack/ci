@@ -6,13 +6,16 @@
 #   rebuild-consumer.sh --slug OWNER/NAME --clone-url URL --dir DIR --suffix SUFFIX
 #                       [--branch BRANCH] [--pin NAME=VERSION]... [--log FILE]
 #                       [--version-out FILE] [--skip-tests] [--warn-unpinned NAME]
+#                       [--prepare SCRIPT]
 #
 #   1. clone URL (BRANCH, or the default branch) into DIR, with retries;
 #   2. pin each NAME.version property of the consumer's reactor to VERSION, in one pass
 #      without Maven (pin-upstreams.py), else one versions:set-property per pin;
 #   3. give the consumer its own release-style version <base>-SUFFIX (versions:set), and keep
 #      the hand-written plugin.xml descriptors in step;
-#   4. mvn install (tests run unless --skip-tests), the output copied to FILE with --log.
+#   4. --prepare: run SCRIPT (bash, in DIR) just before the install; build-one-consumer's
+#      targeted test mode edits the poms there;
+#   5. mvn install (tests run unless --skip-tests), the output copied to FILE with --log.
 #
 # --version-out writes the consumer version to a file, so the caller can pin it in the next
 # consumers. --warn-unpinned NAME prints a warning when no pom of the consumer declares
@@ -26,7 +29,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MVN_ARGS="${MVN_ARGS--B -ntp}"
 
-slug="" url="" dir="" suffix="" branch="" log="" version_out="" skip_tests=false
+slug="" url="" dir="" suffix="" branch="" log="" version_out="" skip_tests=false prepare=""
 pins=() warn_unpinned=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
     --version-out) version_out="$2"; shift 2 ;;
     --skip-tests) skip_tests=true; shift ;;
     --warn-unpinned) warn_unpinned+=("$2"); shift 2 ;;
+    --prepare) prepare="$2"; shift 2 ;;
     *) echo "rebuild-consumer.sh: unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -88,6 +92,7 @@ mvn $MVN_ARGS versions:set \
   -DnewVersion="$cver" -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null
 python3 "$HERE/sync-plugin-descriptors.py" .
 if [ -n "$version_out" ]; then printf '%s\n' "$cver" > "$version_out"; fi
+if [ -n "$prepare" ]; then bash "$prepare" </dev/null; fi
 
 # 3) install (runs unit + integration tests unless --skip-tests) -> available for downstream
 #    levels. The log is kept for the flaky-test report (pipefail keeps Maven's exit status).

@@ -26,6 +26,12 @@
 #   COMPANION_BRANCHES, HEAD_REF, HEAD_REPO, GITHUB_REPOSITORY   see companion-branch.sh
 #   GITHUB_SERVER_URL   forge base URL
 #   SHARED              directory of the shared scripts (../build-impacted)
+#   TESTS               full (default): every test of the consumer runs | targeted: test
+#                       execution is turned off in the modules that cannot see any artifact of
+#                       the producer (targeted/targeted-tests.sh); full instead, with the
+#                       reason, when the consumer has intermediate upstreams or a companion
+#                       branch, or on any doubt of the analysis
+#   GRAPH_REPO, GRAPH_REF  dependency graph read by the targeted analysis (Vidocq/dep-graph, main)
 #
 # Writes the consumer's build log and lists it in $RUNNER_TEMP/downstream-logs/consumers.tsv for
 # the flaky-test report, and one summary table to $GITHUB_STEP_SUMMARY when set.
@@ -37,6 +43,11 @@ SHARED="${SHARED:-$HERE/../build-impacted}"
 : "${VERSION_SUFFIX:?VERSION_SUFFIX}" "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL}"
 export MVN_ARGS="${MVN_ARGS--B -ntp}"
 UPSTREAMS="${UPSTREAMS:-}"
+TESTS="${TESTS:-full}"
+case "$TESTS" in
+  full|targeted) ;;
+  *) echo "::error::tests must be 'full' or 'targeted', not '$TESTS'" >&2; exit 1 ;;
+esac
 
 short_name() { local s="${1##*/}"; printf '%s\n' "${s,,}"; }
 clone_url() {
@@ -55,6 +66,9 @@ rm -rf "$LOGS"; mkdir -p "$LOGS"
 # Upstreams the consumer could not be pinned to (no <name.version> in its poms), for the summary.
 UNPINNED="$WORK/unpinned.txt"
 : > "$UNPINNED"
+# One line for the summary: how the consumer's tests ran (written by targeted-tests.sh).
+export TESTS_MODE_OUT="$WORK/tests-mode.txt"
+echo full > "$TESTS_MODE_OUT"
 
 # short name -> PR version installed in the local repository: the producer, then each
 # intermediate rebuilt on its companion branch.
@@ -72,9 +86,9 @@ summary() {
     {
       echo "### Flat downstream build of ${CONSUMER}"
       echo
-      echo "| Consumer | Branch | PR versions | Not pinned (no property) | Rebuilt first (companion) | Result | Build time |"
-      echo "|---|---|---|---|---|---|---|"
-      echo "| ${CONSUMER} | ${consumer_branch:-default} | $(for k in "${!PRV[@]}"; do printf '%s=%s ' "$k" "${PRV[$k]}"; done)| $(sort -u "$UNPINNED" | tr '\n' ' ')| ${chain[*]:-none} | ${result} | $((took / 60)) min $((took % 60)) s |"
+      echo "| Consumer | Branch | PR versions | Not pinned (no property) | Rebuilt first (companion) | Result | Build time | Tests |"
+      echo "|---|---|---|---|---|---|---|---|"
+      echo "| ${CONSUMER} | ${consumer_branch:-default} | $(for k in "${!PRV[@]}"; do printf '%s=%s ' "$k" "${PRV[$k]}"; done)| $(sort -u "$UNPINNED" | tr '\n' ' ')| ${chain[*]:-none} | ${result} | $((took / 60)) min $((took % 60)) s | $(head -n 1 "$TESTS_MODE_OUT" 2>/dev/null) |"
       echo
     } >> "$GITHUB_STEP_SUMMARY"
   fi
@@ -127,13 +141,31 @@ if [ -n "$consumer_branch" ]; then
 else
   echo "  branch: default"
 fi
+# Targeted tests: never with a mini-chain or a companion branch (the changed set would have to
+# include their artifacts too), and never on any doubt of the analysis.
+prepare=()
+if [ "$TESTS" = targeted ]; then
+  why=""
+  if [ -n "$UPSTREAMS" ]; then
+    why="the consumer has impacted intermediate upstreams ($UPSTREAMS)"
+  elif [ -n "$consumer_branch" ]; then
+    why="the consumer is built on its companion branch '$consumer_branch'"
+  fi
+  if [ -n "$why" ]; then
+    echo "full (fallback: $why)" > "$TESTS_MODE_OUT"
+    echo "Tests: full (fallback: $why)"
+  else
+    prepare=(--prepare "$HERE/targeted/targeted-tests.sh")
+    export GRAPH_URL="${GRAPH_URL:-${GITHUB_SERVER_URL%/}/${GRAPH_REPO:-Vidocq/dep-graph}/raw/branch/${GRAPH_REF:-main}/graph/inverted.json}"
+  fi
+fi
 echo "::group::Build $CONSUMER (pinned: ${!PRV[*]})"
 mapfile -t args < <(pin_args)
 # Listed before the build, so the flaky-test report reads the log of a failed build too.
 printf '%s\t%s\n' "$CONSUMER" "$LOGS/$s.log" >> "$LOGS/consumers.tsv"
 UNPINNED_OUT="$UNPINNED" bash "$SHARED/rebuild-consumer.sh" --slug "$CONSUMER" --clone-url "$url" \
   --dir "$WORK/$s" --branch "$consumer_branch" --suffix "$VERSION_SUFFIX" \
-  --log "$LOGS/$s.log" "${args[@]}" </dev/null
+  --log "$LOGS/$s.log" ${prepare[@]+"${prepare[@]}"} "${args[@]}" </dev/null
 rm -rf "${WORK:?}/$s"
 echo "::endgroup::"
 if [ -n "$consumer_branch" ] || [ "${#chain[@]}" -gt 0 ]; then

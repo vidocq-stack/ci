@@ -142,6 +142,43 @@ check "chain failure: the consumer is not built" "0" "$(grep -c '^cyrano' "$TMP/
 # A consumer missing from the forge fails (clone error), it is never silently skipped.
 check "missing consumer: the step fails" "1" "$(run CONSUMER=Vidocq/nowhere HEAD_REF=)"
 
+# Test mode. The default and an explicit 'full' run exactly the same Maven commands.
+run CONSUMER=Vidocq/cyrano HEAD_REF= >/dev/null
+cp "$TMP/mvn-calls" "$TMP/calls-default"
+check "default: the summary says every test ran" "1" "$(grep -c '| success | .* | full |$' "$TMP/summary")"
+check "tests=full: the build succeeds" "0" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=full)"
+check "tests=full: byte for byte the commands of the default" "" "$(diff "$TMP/calls-default" "$TMP/mvn-calls")"
+check "tests=full: no effective POM" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"
+
+# Targeted, the analysis runs between versions:set and the install, which stays the same command.
+printf 'io.vidocq.vauban:vauban-core\n' > "$TMP/producer-artifacts.txt"
+check "targeted: the build succeeds" "0" \
+  "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt")"
+check "targeted: the effective POM of the consumer runs after its versions:set, before its install" \
+  "versions:set|effective-pom|install" \
+  "$(grep '^cyrano ' "$TMP/mvn-calls" | grep -oE 'versions:set |:effective-pom| install' | sed 's/^://; s/ //g' | paste -sd'|' -)"
+check "targeted: the install is the command of the full mode" "cyrano -B -ntp install" "$(grep ' install' "$TMP/mvn-calls")"
+check "targeted: never -DskipTests on the command line" "0" "$(grep -c -- '-DskipTests' "$TMP/mvn-calls")"
+check "targeted: a failed analysis falls back to full, and the summary says why" "1" \
+  "$(grep -c '| full (fallback: Maven wrote no effective POM of the consumer) |$' "$TMP/summary")"
+
+check "targeted, no producer artifact list: the build succeeds" "0" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=targeted)"
+check "targeted, no producer artifact list: falls back to full" "1" \
+  "$(grep -c '| full (fallback: the producer artifact list is missing or empty (see the producer rebuild step)) |$' "$TMP/summary")"
+
+run CONSUMER=Vidocq/cyrano UPSTREAMS=Vidocq/ravel HEAD_REF= TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
+check "targeted, intermediate upstreams: falls back to full without any analysis" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"
+check "targeted, intermediate upstreams: the summary says why" "1" \
+  "$(grep -c '| full (fallback: the consumer has impacted intermediate upstreams (Vidocq/ravel)) |$' "$TMP/summary")"
+
+run CONSUMER=Vidocq/foy TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
+check "targeted, companion branch of the consumer: falls back to full without any analysis" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"
+check "targeted, companion branch of the consumer: the summary says why" "1" \
+  "$(grep -c "| full (fallback: the consumer is built on its companion branch 'feat/x') |\$" "$TMP/summary")"
+
+check "an unknown test mode fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=some)"
+check "an unknown test mode builds nothing" "0" "$(cat "$TMP/mvn-calls" 2>/dev/null | grep -c ' install')"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"
   exit 1
