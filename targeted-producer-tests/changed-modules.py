@@ -11,8 +11,13 @@ A changed path belongs to the deepest reactor module whose directory holds it, a
 select-tck.py. Those modules, every reactor module that depends on them by any reference
 (pommodel.close_dependents: dependencies of every scope, plugins, plugin dependencies, processor
 paths, plugin configurations, parents, BOM imports, nested builds), and every non-pom module
-whose src/ names the artifactId of one of those non-pom modules as text (a test may resolve it at
-run time; its own artifact does not change, so its dependents are not added), are affected. Documentation outside src/ (*.md, *.adoc, docs/, LICENSE*, NOTICE*) is ignored.
+whose src/ names the artifactId of one of those non-pom modules as text (main sources: with its
+dependents; test sources only: with the modules using its test classes), are affected. Documentation outside every module (*.md, *.adoc, docs/, LICENSE*, NOTICE*) is
+ignored; inside a module directory it belongs to that module (it may be packaged or tested).
+
+With --build-effective-pom, the analysis model (--effective-pom) may add profiles such as -Ptck,
+so that what those profiles use counts, and only the modules of the build's own reactor are
+ever put in the skip list.
 
 The report has the same shape as affected-modules.py's: "decision" is "targeted" (with "skip",
 the unaffected non-pom modules), "all" (nothing to skip) or "full" with a "reason": an empty
@@ -43,11 +48,12 @@ def is_doc(path):
             or name.startswith(('LICENSE', 'NOTICE')))
 
 
-def analyse(eff, repo, changed):
+def analyse(eff, repo, changed, build_eff=None):
     if not changed:
         raise Fallback('the changed-file list is empty')
     repo = os.path.realpath(repo)
     mods = pommodel.load_reactor(eff)
+    built = set(pommodel.load_reactor(build_eff)) if build_eff else set(mods)
     rel, by_dir = {}, {}
     for ga, m in mods.items():
         r = os.path.relpath(os.path.realpath(m.basedir), repo)
@@ -60,27 +66,44 @@ def analyse(eff, repo, changed):
         norm = os.path.normpath(path)
         if norm.startswith('..') or os.path.isabs(norm):
             raise Fallback(f'changed path {path} escapes the repository')
-        if is_doc(norm):
-            continue
         d = os.path.dirname(norm)
         while d not in by_dir and d not in ('', '.'):
             d = os.path.dirname(d)
         if d in ('', '.'):
+            if is_doc(norm):
+                continue                  # documentation outside every module
             raise Fallback(f'{path} belongs to the root module (root pom, .mvn/, CI configuration, '
                            'scripts): it may change every module')
         seeds.setdefault(by_dir[d], f'owns {path}')
     if not seeds:
         raise Fallback('only documentation changed: nothing to select')
-    affected = pommodel.close_dependents(seeds, mods)
-    # A module whose src/ names a changed jar may resolve it at run time: its tests run. Its own
-    # artifact does not change, so its dependents are not added, nor what names it in turn. pom
-    # modules (aggregators, parents) are no artifact a test resolves: their names do not count.
-    ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom'}
-    for ga, m in mods.items():
-        if ga not in affected and m.packaging != 'pom':
-            for why in pommodel.scan_sources(m, ids):
-                affected[ga] = why
-    skip = sorted(rel[ga] for ga, m in mods.items() if ga not in affected and m.packaging != 'pom')
+    # A module whose src/ names an affected jar may resolve it at run time. Named in its main
+    # sources or resources, the module's own behaviour changes: it is a seed, with its
+    # dependents. Named in its test sources only, its tests run, and so do the modules using its
+    # test classes (pommodel.close_with_test_only). pom modules (aggregators, parents) are no
+    # artifact anything resolves: their names do not count.
+    test_only = {}
+    while True:
+        affected = pommodel.close_with_test_only(seeds, test_only, mods)
+        ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom'}
+        grew = False
+        for ga, m in mods.items():
+            if ga in affected or m.packaging == 'pom':
+                continue
+            main = pommodel.scan_sources(m, ids, where='main')
+            if main:
+                seeds[ga] = main[0]
+                grew = True
+            elif ga not in test_only:
+                tests = pommodel.scan_sources(m, ids, where='test')
+                if tests:
+                    test_only[ga] = tests[0] + ' (tests only)'
+                    grew = True
+        if not grew:
+            break
+    # Only modules the build itself runs (the default reactor) are ever edited.
+    skip = sorted(rel[ga] for ga, m in mods.items()
+                  if ga not in affected and m.packaging != 'pom' and ga in built)
     return {
         'decision': 'targeted' if skip else 'all',
         'changed': {rel[ga]: why for ga, why in sorted(seeds.items())},
@@ -95,12 +118,14 @@ def main(argv):
     ap.add_argument('--effective-pom', required=True)
     ap.add_argument('--repo', required=True)
     ap.add_argument('--changed-files', required=True)
+    ap.add_argument('--build-effective-pom', help='effective POM of the build itself (default '
+                    'profiles), when --effective-pom adds profiles (-Ptck): only its modules are skipped')
     ap.add_argument('--report', required=True)
     a = ap.parse_args(argv)
     try:
         with open(a.changed_files, encoding='utf-8') as f:
             changed = [line.strip() for line in f if line.strip()]
-        report = analyse(a.effective_pom, a.repo, changed)
+        report = analyse(a.effective_pom, a.repo, changed, a.build_effective_pom)
     except Fallback as e:
         report = {'decision': 'full', 'reason': str(e)}
     except pommodel.PomError as e:

@@ -31,6 +31,8 @@ runs:
         MVN_ARGS: ${{ inputs.maven-args }}
       run: |
         set -euo pipefail
+        # Never run the TCK while targeted-producer-tests edits (skipTests in the poms) are in place.
+        bash "${{ github.action_path }}/../targeted-producer-tests/guard.sh"
         if [ "$TCK_PRE_INSTALL" = "true" ]; then
           echo "Pre-install: mvn $MVN_ARGS install -DskipTests"
           mvn $MVN_ARGS install -DskipTests

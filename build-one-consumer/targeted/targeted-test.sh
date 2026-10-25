@@ -568,7 +568,7 @@ check "restore: full mode with the reason" "1" "$(grep -c '^full (fallback: the 
 build_fixture; snapshot
 check "restore: an internal error after the edits still exits 0" "0" "$(run_targeted SKIP_TESTS_PY="$TMP/bad-skip.py" BAD_SKIP=garbage-result)"
 check "restore: ... every pom back byte for byte" "" "$(diff -r "$TMP/acme-before" "$ROOT")"
-check "restore: ... an honest summary" "1" "$(grep -c 'Tests: full (fallback: internal error at line [0-9]*' "$TMP/summary")"
+check "restore: ... an honest summary" "1" "$(grep -c 'Tests: full (fallback: internal error at skip-lib.sh:[0-9]*' "$TMP/summary")"
 build_fixture
 check "restore impossible: the step fails" "1" "$(run_targeted SKIP_TESTS_PY="$TMP/bad-skip.py" BAD_SKIP=drop-backup)"
 check "restore impossible: the mode line says so" "1" "$(grep -c '^failed: ' "$TMP/mode.txt")"

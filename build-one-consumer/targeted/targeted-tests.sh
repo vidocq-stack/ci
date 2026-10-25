@@ -46,7 +46,6 @@ DEPENDENCY_PLUGIN=org.apache.maven.plugins:maven-dependency-plugin:3.8.1
 REPO="$PWD"
 SUBJECT="${CONSUMER:-the consumer}"
 NOTICE_TITLE="Targeted tests"
-SCRIPT_NAME=targeted-tests.sh
 # fallback, finish, decide and the ERR trap, shared with the producer side.
 # shellcheck source=skip-lib.sh
 . "$HERE/skip-lib.sh"

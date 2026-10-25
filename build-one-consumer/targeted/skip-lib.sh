@@ -8,7 +8,10 @@
 #   SKIP_TESTS_PY  the pom editor (skip-tests.py)
 #   SUBJECT        what the tests belong to, in annotations and the summary (a forge slug)
 #   NOTICE_TITLE   title of the ::notice / ::error annotations
-#   SCRIPT_NAME    the calling script, for internal error messages
+#   EDIT_MARKER    optional: a file written before the first pom edit (a copy of the backup
+#                  list) and removed once the poms are restored; later steps refuse to run Maven
+#                  while it exists (targeted-producer-tests/guard.sh). GITHUB_ENV then also gets
+#                  TARGETED_PRODUCER_EDITS=<that file>.
 # and runs under `set -euo pipefail` and `set -E`.
 #
 # fallback <reason>  every test runs: the poms are put back from their copies and compared
@@ -51,7 +54,9 @@ fallback() { # fallback <reason>: every test runs; never with a pom left edited
   trap - ERR
   set +e
   local mode="full (fallback: $1)"
-  if [ "$edits_started" = true ] && ! restore_poms; then
+  if [ "$edits_started" = true ] && restore_poms; then
+    rm -f "${EDIT_MARKER:-/nonexistent/marker}"
+  elif [ "$edits_started" = true ]; then
     mode="failed: the poms edited for the targeted tests could not be restored ($1)"
     printf '%s\n' "$mode" > "$MODE_OUT"
     echo "::error title=${NOTICE_TITLE}::${SUBJECT}: $mode"
@@ -64,7 +69,7 @@ fallback() { # fallback <reason>: every test runs; never with a pom left edited
   summary_section "$mode"
   exit 0
 }
-trap 'fallback "internal error at line $LINENO of $SCRIPT_NAME"' ERR
+trap 'fallback "internal error at ${BASH_SOURCE[0]##*/}:$LINENO"' ERR
 
 finish() { # finish <mode line>: the mode line first, then the details (never fatal)
   printf '%s\n' "$1" > "$MODE_OUT"
@@ -115,6 +120,10 @@ decide() {
         cp "$REPO/$rel/pom.xml" "$BACKUP/$rel/pom.xml"
       done < "$BACKUP/list"
       edits_started=true
+      if [ -n "${EDIT_MARKER:-}" ]; then
+        cp "$BACKUP/list" "$EDIT_MARKER"
+        if [ -n "${GITHUB_ENV:-}" ]; then echo "TARGETED_PRODUCER_EDITS=$EDIT_MARKER" >> "$GITHUB_ENV"; fi
+      fi
       python3 "$SKIP_TESTS_PY" --repo "$REPO" --report "$DIR/report.json" --out "$DIR/skipped.json" \
         || fallback "the pom edits failed"
       n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["skipped"]))' "$DIR/skipped.json")

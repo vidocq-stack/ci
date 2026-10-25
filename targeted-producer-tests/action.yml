@@ -1,23 +1,31 @@
 name: 'Targeted producer tests'
 description: >
-  PR-only, opt-in, for a repository's own pull request: place it after the PR version is set and
-  just before the build's `mvn install`. In mode 'targeted', it keeps the tests of the modules the
-  pull request changes and of every reactor module depending on them, and turns off test
-  execution (skipTests/skipITs/invoker.skip written into the poms) in every other non-pom module:
-  every module still compiles, packages and installs in the same install. Falls back to every
-  test on any doubt (a change in the root module or outside every module, an empty list, an
-  effective-POM failure, any error), with the reason in a notice and the job summary. Mode 'full'
-  (the default) does nothing. Needs the repository checked out and Java + Maven on the PATH.
+  PR-only, opt-in, for a repository's own pull request, in three steps around the build's
+  `mvn install`. Before it, mode 'targeted': from the pull request's changed paths (computed with
+  git against the merge base), keep the tests of the changed modules, of every reactor module
+  depending on them and of the modules naming them in src/ (the -Ptck model counts too when the
+  repository declares ci.tck.modules), and turn off test execution (skipTests/skipITs/invoker.skip
+  written into the poms) in every other non-pom module: every module still compiles, packages
+  and installs in the same install. Right after it, mode 'restore' with `if: always()`: every
+  edited pom is put back byte for byte, or the step fails. Mode 'guard' fails while edits are
+  still in place (run-tck calls it). Every doubt runs every test, with the reason in a notice and
+  the job summary. Mode 'full' (the default) does nothing. Needs the repository checked out with
+  its git remote, and Java + Maven on the PATH.
 
 inputs:
-  changed-files:
-    description: 'File listing the pull request changed paths, one per line, relative to the repository root'
-    required: true
   mode:
-    description: "'full' (default): nothing changes, every test runs. 'targeted': as described above."
+    description: "'full' (default: nothing), 'targeted' (before the install), 'restore' (right after it, if: always()), 'guard'"
     default: 'full'
+  changed-files:
+    description: >
+      Optional cross-check: a file listing the changed paths as the forge reports them (one per
+      line). The paths come from git; any path of this list that git does not report means full.
+    default: ''
+  base-ref:
+    description: "The pull request's base branch (default: github.base_ref)"
+    default: ''
   maven-args:
-    description: 'Maven args of the effective-POM run: the same profiles and properties as the install that follows'
+    description: 'Maven args of the effective-POM runs: the same profiles and properties as the install'
     default: '-B -ntp'
   working-directory:
     description: 'Repository root'
@@ -26,21 +34,23 @@ inputs:
 outputs:
   mode:
     description: '"targeted": tests skipped in `skipped` modules; "full": every test runs (mode full, or a fallback)'
-    value: ${{ steps.prepare.outputs.mode }}
+    value: ${{ steps.run.outputs.mode }}
   skipped:
     description: 'Number of modules whose tests are skipped (0 in full mode)'
-    value: ${{ steps.prepare.outputs.skipped }}
+    value: ${{ steps.run.outputs.skipped }}
 
 runs:
   using: composite
   steps:
-    - name: Turn off the tests of the modules the pull request does not reach
-      id: prepare
+    - name: Targeted producer tests (${{ inputs.mode }})
+      id: run
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         MODE: ${{ inputs.mode }}
         CHANGED_FILES: ${{ inputs.changed-files }}
+        BASE_REF: ${{ inputs.base-ref || github.base_ref }}
+        PR_NUMBER: ${{ github.event.number }}
         MVN_ARGS: ${{ inputs.maven-args }}
         ACTION_PATH: ${{ github.action_path }}
       run: bash "$ACTION_PATH/producer-tests.sh"
