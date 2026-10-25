@@ -59,9 +59,10 @@ runs:
     # analysis read again, instead of a new build and analysis, when that analysis is still the pull request's last
     # one: the record of a code tree is keyed with the date of the analysis it records, and looked up with the date of
     # the pull request's last analysis.
-    # A pull request that changes documentation only has the code tree of its merge base with the base branch: no new
-    # code, so no build and no analysis; the comment says so (Vidocq/ci#57).
-    - name: Does the pull request change documentation only?
+    # A pull request that changes no code a pull request builds (documentation, or workflows it cannot run: ci#79) has the
+    # code tree of its merge base with the base branch: no new code, so no build and no analysis; the comment says so
+    # (Vidocq/ci#57).
+    - name: Does the pull request change no code it builds?
       id: docs
       if: github.event_name == 'pull_request' && inputs.sonar-token != ''
       shell: bash
@@ -312,8 +313,9 @@ runs:
 
         if os.environ.get("DOCS_ONLY") == "true":
             comment(["### SonarQube quality gate: ➖ no code to analyse", "",
-                     "Commit `%s` changes documentation only: its code is that of `%s`, where it leaves `%s`. No new code, "
-                     "so no build and no analysis." % (head, os.environ.get("DOCS_BASE", "")[:8], os.environ.get("BASE_REF", ""))])
+                     "Commit `%s` changes no code a pull request builds: documentation, or workflows it cannot run. Its code "
+                     "is that of `%s`, where it leaves `%s`: no new code, so no build and no analysis."
+                     % (head, os.environ.get("DOCS_BASE", "")[:8], os.environ.get("BASE_REF", ""))])
             sys.exit(0)
 
         if unreachable:
