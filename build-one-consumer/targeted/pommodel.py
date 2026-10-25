@@ -322,19 +322,41 @@ def load_reactor(path):
 
 
 JVM_SOURCES = ('.java', '.kt', '.groovy', '.scala')
-BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.S)
-LINE_COMMENT = re.compile(r'(?m)^\s*//.*$')
-TRAILING_COMMENT = re.compile(r'(?m)(;|\{|\}|\))\s*//.*$')
-
-
 def strip_comments(source):
-    """Remove Javadoc and block comments, whole-line // comments, and // comments after a
-    statement end (;, {, } or )): a name there is never resolved at run time. Known limit: a
-    comment marker inside a string literal ("/*", or "); //") may drop the rest of that literal
-    from the search; rare, accepted."""
-    source = BLOCK_COMMENT.sub(' ', source)
-    source = LINE_COMMENT.sub('', source)
-    return TRAILING_COMMENT.sub(r'\1', source)
+    """Remove the comments of Java, Kotlin, Groovy or Scala source (Javadoc, /* */ and //): a
+    name there is never resolved at run time. A small lexer: string literals ("...", with
+    escapes), character literals ('...') and text blocks (\"\"\"...\"\"\") are kept as they are,
+    so a comment marker inside them ("glob:**/*.jar") opens no comment. An unterminated literal
+    or comment keeps the rest of the source (a mention is never dropped by mistake)."""
+    out, i, n = [], 0, len(source)
+    while i < n:
+        c = source[i]
+        if source.startswith('"""', i):
+            end = source.find('"""', i + 3)
+            end = n if end < 0 else end + 3
+            out.append(source[i:end])
+            i = end
+        elif c in '"\'':
+            j = i + 1
+            while j < n and source[j] != c and source[j] != '\n':
+                j += 2 if source[j] == '\\' else 1
+            j = min(j + 1, n)
+            out.append(source[i:j])
+            i = j
+        elif source.startswith('//', i):
+            end = source.find('\n', i)
+            i = n if end < 0 else end
+        elif source.startswith('/*', i):
+            end = source.find('*/', i + 2)
+            if end < 0:
+                out.append(source[i:])
+                break
+            out.append(' ')
+            i = end + 2
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
 
 
 TEST_SOURCE_DIRS = ('test', 'it', 'testFixtures', 'integration-test')

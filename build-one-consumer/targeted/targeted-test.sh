@@ -442,6 +442,8 @@ add_module src-comment acme-src-comment jar acme-parent "" ""
 mkdir -p "$ROOT/src-comment/src/main/java" && printf '/**\n * Works like knock-core.\n */\nclass C { // see knock-api\n  // knock-core\n  String s = "http://x"; /* knock-core */\n}\n' > "$ROOT/src-comment/src/main/java/C.java"
 add_module src-string acme-src-string jar acme-parent "" ""
 mkdir -p "$ROOT/src-string/src/main/java" && printf 'class S { String a = "x"; // comment\n  String c = "io.vidocq.knock:knock-core"; }\n' > "$ROOT/src-string/src/main/java/S.java"
+add_module src-glob acme-src-glob jar acme-parent "" ""
+mkdir -p "$ROOT/src-glob/src/main/java" && printf 'class M {\n  static final String JARS = "glob:**/*.jar";\n  static final String CORE = "io.vidocq.knock:knock-core";\n  /** Docs. */\n  void run() {}\n}\n' > "$ROOT/src-glob/src/main/java/M.java"
 add_module src-quiet acme-src-quiet jar acme-parent "" ""
 mkdir -p "$ROOT/src-quiet/src/main/resources" && echo 'see knock-core-extras and myknock-api' > "$ROOT/src-quiet/src/main/resources/notes.txt"
 printf 'knock-core\0binary' > "$ROOT/src-quiet/src/main/resources/blob.bin"
@@ -477,6 +479,27 @@ check "test-jar: and the test-jar user propagates to its own dependents" "affect
 check "test-jar: the reason names the test classes" "1" "$(reason tj-user | grep -c 'uses the test classes of acme-src-coord')"
 check "comments: a producer named only in Java comments does not count" "skip" "$(status src-comment)"
 check "comments: a string literal does" "affected" "$(status src-string)"
+check "comments: a /* inside a string literal opens no comment (glob case)" "affected" "$(status src-glob)"
+lexer() { python3 - "$HERE" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from pommodel import strip_comments as s
+cases = {
+    'glob literal': 'a = "glob:**/*.jar"; b = "knock-core"; /** doc */',
+    'escaped quote': 'a = "x\\"/*"; b = "knock-core"; /* c */',
+    'char literal quote': "c = '\"'; b = \"knock-core\"; // t",
+    'text block': 'a = """\n  /* not a comment\n  """; b = "knock-core"; /* c */',
+    'quote in a line comment': "// it's\nb = \"knock-core\";",
+    'quote in a block comment': '/* "x */ b = "knock-core";',
+    'trailing line comment kept code': 'b = "knock-core"; // "x',
+}
+bad = [k for k, v in cases.items() if 'knock-core' not in s(v)]
+gone = [k for k, v in {'javadoc': '/** knock-core */ x;', 'line': '// knock-core', 'block': 'x; /* knock-core */'}.items()
+        if 'knock-core' in s(v)]
+print('ok' if not bad and not gone else f'kept-lost={bad} comments-left={gone}')
+PY
+}
+check "comments: the lexer keeps literals and drops comments" "ok" "$(lexer)"
 check "sources: the reason names the file" "1" "$(reason src-coord | grep -c 'src/test/java/T.java')"
 
 # --- A malformed graph turns the pruning off (review M7) -------------------------------------
