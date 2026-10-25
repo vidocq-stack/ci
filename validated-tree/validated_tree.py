@@ -23,7 +23,12 @@ the documentation files, the same ones the docs-only change set of pr-validate a
 *.adoc, docs/, LICENSE, LICENSE.*, NOTICE, NOTICE.*, never under a src/ directory (it may be
 packaged). Commits do not count, only content: a docs-only commit, a rebase on a main that moved
 by documentation only, or the merge-bot's re-signing of an unchanged rebase keep the id. CI
-configuration (.forgejo/) is code: a workflow change must run to exercise itself.
+configuration (.forgejo/) is code: a workflow change must run to exercise itself. The exception is
+a workflow a pull request cannot run: a .forgejo/workflows/*.yml|yaml whose triggers (`on:`) have
+no pull_request or pull_request_target and that no such workflow names (a reusable workflow it
+calls). ci.yml (push on main), release or scheduled workflows are not exercised by the pull
+request's run, so a change to them proves nothing a build of the same code has not proved. A
+workflow whose triggers cannot be read counts as code.
 
 A run may reuse a validation only when nothing outside the tree can change the result:
   - a pull_request event (a push to main always builds);
@@ -45,7 +50,7 @@ import urllib.parse
 import urllib.request
 
 DOCS = ("*.md", "*.adoc", "docs/*", "LICENSE", "LICENSE.*", "NOTICE", "NOTICE.*")
-ID_VERSION = "validated-tree/1"
+ID_VERSION = "validated-tree/2"
 
 
 def is_doc(path):
@@ -54,12 +59,65 @@ def is_doc(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in DOCS)
 
 
-def tree_id(ls_tree):
-    """ls_tree: the output of `git ls-tree -r --full-tree HEAD` ("<mode> <type> <object>\\t<path>")."""
+PR_TRIGGERS = ("pull_request", "pull_request_target")
+WORKFLOW = re.compile(r"^\.forgejo/workflows/[^/]+\.ya?ml$")
+
+
+def triggers(text):
+    """The trigger names of a workflow's top-level `on:` key, or None when they cannot be read.
+    Handles `on: name`, `on: [a, b]`, `on: {a: ..}` and the block form (one key per line)."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"""^(?:on|"on"|'on')\s*:\s*(.*?)\s*(?:#.*)?$""", line)
+        if not m:
+            continue
+        value = m.group(1)
+        if value:
+            # Inline forms: every identifier of the value counts. Too many names can only add a pull
+            # request trigger, which keeps the file as code: the safe direction.
+            return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", value)) or None
+        names, indent = set(), None
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or nxt.lstrip().startswith("#"):
+                continue
+            if not nxt[0].isspace():
+                break
+            width = len(nxt) - len(nxt.lstrip())
+            if indent is None:
+                indent = width
+            if width != indent:
+                continue
+            item = nxt.strip()
+            km = re.match(r"^(?:-\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::|$)", item)
+            if not km:
+                return None
+            names.add(km.group(1))
+        return names or None
+    return None
+
+
+def pr_inert_workflows(read, paths):
+    """Of the workflow files among `paths`, those a pull request cannot run. `read(path)` returns the
+    file's text at the revision. A workflow named by a pull-request workflow stays code."""
+    workflows = [p for p in paths if WORKFLOW.match(p)]
+    texts = {p: read(p) for p in workflows}
+    pr_texts, candidates = [], []
+    for p, text in texts.items():
+        names = triggers(text)
+        if names is None or names & set(PR_TRIGGERS):
+            pr_texts.append(text)
+        else:
+            candidates.append(p)
+    return {p for p in candidates if not any(p in t or os.path.basename(p) in t for t in pr_texts)}
+
+
+def tree_id(ls_tree, inert=frozenset()):
+    """ls_tree: the output of `git ls-tree -r --full-tree HEAD` ("<mode> <type> <object>\\t<path>");
+    inert: paths left out besides the documentation (workflows a pull request cannot run)."""
     digest = hashlib.sha256(ID_VERSION.encode() + b"\n")
     for line in ls_tree.splitlines():
         meta, _, path = line.partition("\t")
-        if not path or is_doc(path):
+        if not path or is_doc(path) or path in inert:
             continue
         mode, _, obj = meta.split(" ")
         digest.update(("%s %s %s\n" % (mode, obj, path)).encode())
@@ -154,7 +212,10 @@ def main(argv):
         rev = dict(zip(argv[1::2], argv[2::2])).get("--rev", "HEAD")
         out = subprocess.run(["git", "ls-tree", "-r", "--full-tree", rev],
                              check=True, capture_output=True, text=True).stdout
-        print(tree_id(out))
+        paths = [line.partition("\t")[2] for line in out.splitlines()]
+        read = lambda p: subprocess.run(["git", "show", "%s:%s" % (rev, p)],
+                                        check=True, capture_output=True, text=True).stdout
+        print(tree_id(out, pr_inert_workflows(read, paths)))
         return 0
     if argv[:1] == ["check"]:
         args = dict(zip(argv[1::2], argv[2::2]))

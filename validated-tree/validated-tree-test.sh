@@ -65,6 +65,66 @@ check "a workflow change changes the id" "different" "$([ "$(id)" != "$base" ] &
 put .forgejo/workflows/pr.yml 'on: pull_request'
 commit "workflow back"
 
+# Workflows a pull request cannot run (no pull_request / pull_request_target trigger, not called by one that
+# has) are not code for the pull request: a change there proves nothing a build of the same code has not proved.
+same_or_diff() { [ "$(id)" = "$1" ] && echo same || echo different; }
+put .forgejo/workflows/ci.yml 'on:
+  push:
+    branches: [main]
+jobs: {}'
+commit "a main-only workflow"
+wf_base=$(id)
+check "adding a push-only workflow leaves the id unchanged" "$base" "$wf_base"
+put .forgejo/workflows/ci.yml 'on:
+  push:
+    branches: [main]
+jobs: {build: {runs-on: x}}'
+commit "ci.yml changed"
+check "changing a push-only workflow (block form) leaves the id unchanged" "same" "$(same_or_diff "$wf_base")"
+put .forgejo/workflows/release.yml 'on: workflow_dispatch'
+put .forgejo/workflows/sched.yml 'on: [schedule, push]'
+commit "more inert workflows"
+check "inline and list forms without a pull request trigger are inert" "same" "$(same_or_diff "$wf_base")"
+put .forgejo/workflows/sonar.yml 'on:
+  push:
+  pull_request:
+jobs: {}'
+commit "a pull-request workflow"
+check "a workflow with a pull_request trigger is code" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
+put .forgejo/workflows/both.yml 'on: [push, pull_request_target]'
+commit "pull_request_target"
+check "pull_request_target counts as a pull request trigger" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
+put .forgejo/workflows/reusable.yml 'on: workflow_call
+jobs: {}'
+put .forgejo/workflows/sonar.yml 'on:
+  push:
+  pull_request:
+jobs:
+  call:
+    uses: ./.forgejo/workflows/reusable.yml'
+commit "a reusable workflow called by a pull-request workflow"
+wf_base=$(id)
+put .forgejo/workflows/reusable.yml 'on: workflow_call
+jobs: {x: {runs-on: y}}'
+commit "the called workflow changes"
+check "a workflow called by a pull-request workflow is code" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
+put .forgejo/workflows/odd.yml 'name: no trigger key here'
+commit "a workflow whose triggers cannot be read"
+check "a workflow whose triggers cannot be read is code" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
+put .forgejo/workflows/ci.yml 'on:
+  pull_request:
+jobs: {}'
+commit "ci.yml now runs on pull requests"
+check "a push-only workflow that gains a pull request trigger is code" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
+put .forgejo/actions/local/action.yml 'runs: {using: composite}'
+commit "a local action"
+check "other .forgejo files stay code" "different" "$(same_or_diff "$wf_base")"
+
 put core/src/main/java/A.java 'class A { int x; }'
 commit "code"
 check "a code change changes the id" "different" "$([ "$(id)" != "$base" ] && echo different || echo same)"
