@@ -130,11 +130,23 @@ jobs:
             -d '{"body":"✅ rebased onto the base branch and re-signed every commit. Still open — use /merge when ready."}' \
             "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
 
+      # Quotes the reason merge.sh gave (MERGE_BOT_REASON_FILE), e.g. a WIP pull request or a train member
+      # (Vidocq/vidocq#285); the generic message otherwise. The reason never starts the comment, so it can
+      # never read as a trigger.
       - name: Comment on failure
         if: failure() && github.event_name == 'issue_comment'
         env:
           BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          REASON_FILE: ${{ runner.temp }}/merge-bot-reason
         run: |
+          body=$(python3 -c '
+          import json, os, sys
+          try:
+              reason = open(sys.argv[1], encoding="utf-8").read().strip()
+          except OSError:
+              reason = ""
+          text = "❌ merge-bot failed: " + reason if reason else "❌ merge-bot failed — see the Actions run log for details."
+          print(json.dumps({"body": text}))' "$REASON_FILE")
           curl -fsS -X POST -H "Authorization: token $BOT_TOKEN" -H "Content-Type: application/json" \
-            -d '{"body":"❌ merge-bot failed — see the Actions run log for details."}' \
+            -d "$body" \
             "https://codefloe.com/api/v1/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"

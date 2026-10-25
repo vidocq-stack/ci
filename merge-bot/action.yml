@@ -74,4 +74,6 @@ runs:
         TRIGGER_EVENT: ${{ github.event_name }}
         TRIGGER_COMMENTER: ${{ github.event.comment.user.login }}
         TRIGGER_COMMENT: ${{ github.event.comment.body }}
+        # Why the bot refused, quoted by the calling workflow's failure comment (merge-bot-reusable.yml).
+        MERGE_BOT_REASON_FILE: ${{ runner.temp }}/merge-bot-reason
       run: bash "${{ github.action_path }}/merge.sh"

@@ -17,13 +17,20 @@
 #   TRIGGER_EVENT, TRIGGER_COMMENTER, TRIGGER_COMMENT — what set this run off
 #   TRIGGER_BOT_LOGIN — the bot's own account (default vidocq-ci-bot)
 #   CHECKS_TIMEOUT_MINUTES — how long to wait for the required checks (default 60, at most 80)
+#   MERGE_BOT_REASON_FILE — optional: every refusal is also written there, for the failure comment
 #
 # Assumes the calling workflow already ran actions/checkout@v4 with
 # fetch-depth: 0 and a token with push rights (VIDOCQ_BOT_TOKEN).
 
 set -euo pipefail
 
-die()  { echo "❌ $*" >&2; exit 1; }
+# A refusal is also written to MERGE_BOT_REASON_FILE, which the calling workflow quotes in its failure
+# comment: "see the run log" told nobody that the pull request was WIP.
+die()  {
+  echo "❌ $*" >&2
+  if [[ -n "${MERGE_BOT_REASON_FILE:-}" ]]; then printf '%s\n' "$*" > "$MERGE_BOT_REASON_FILE" || true; fi
+  exit 1
+}
 info() { echo "ℹ️  $*"; }
 ok()   { echo "✅ $*"; }
 
@@ -86,6 +93,24 @@ mergeable=$(python3 -c 'import sys,json; print(json.load(sys.stdin).get("mergeab
   || die "PR #${PR_NUMBER} has conflicts with ${base_ref} — resolve locally and retry /merge or /rebase"
 
 info "PR #${PR_NUMBER}: ${head_ref} → ${base_ref}"
+
+# Never merge work in progress, a member of a PR train or a blocked pull request (Vidocq/vidocq#285). Asked
+# before the rebase and the force-push, which would otherwise start a new validation for nothing, and again
+# right before the merge: the title or a label may change while the checks run. A rebase-only run (/rebase)
+# is still allowed: it merges nothing.
+# shellcheck source=refusal.sh
+. "${HERE}/refusal.sh"
+refuse_unmergeable() {
+  local file why
+  file=$(mktemp)
+  printf '%s' "$1" > "$file"
+  why=$(merge_refusal "$file")
+  rm -f "$file"
+  [[ -z "$why" ]] || die "PR #${PR_NUMBER} is not merged: ${why}."
+}
+if [[ "${MERGE_AFTER_REBASE:-true}" == "true" ]]; then
+  refuse_unmergeable "$pr_json"
+fi
 
 # ---------------------------------------------------------------- 2. signing setup
 
@@ -226,6 +251,10 @@ else
   done
   [[ "$verdict" == "success" ]] || die "required status checks on ${new_head} did not succeed within ${checks_timeout_minutes} minutes (last state: ${verdict})"
 fi
+
+pr_json=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/pulls/${PR_NUMBER}") \
+  || die "could not fetch PR #${PR_NUMBER} again before merging it"
+refuse_unmergeable "$pr_json"
 
 info "Merging PR #${PR_NUMBER} (fast-forward-only)"
 merge_body=$(python3 -c "
