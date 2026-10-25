@@ -23,6 +23,13 @@ inputs:
   maven-args:
     description: 'Common Maven args'
     default: '-B -ntp'
+  skip-tests:
+    description: >
+      'true' (default): deploy with -DskipTests, after a separate build-and-test step. 'false': the
+      deploy runs the tests itself, in one pass, so the caller drops its build step. Only safe when
+      the reactor sets maven-deploy-plugin's deployAtEnd to true (every pom, BOM and parents
+      included): otherwise the modules built before a failing test are already published.
+    default: 'true'
 
 runs:
   using: composite
@@ -109,13 +116,16 @@ runs:
         MVN_ARGS: ${{ inputs.maven-args }}
         SNAPSHOT_PROFILE: ${{ inputs.snapshot-profile }}
         RELEASE_PROFILE: ${{ inputs.release-profile }}
+        SKIP_TESTS: ${{ inputs.skip-tests }}
       run: |
         set -euo pipefail
+        SKIP_ARG=-DskipTests
+        if [ "$SKIP_TESTS" = "false" ]; then SKIP_ARG=""; fi
         VERSION=$(mvn -q -DforceStdout -N help:evaluate -Dexpression=project.version)
         if [[ "$VERSION" == *-SNAPSHOT ]]; then
           echo "Version $VERSION → publishing SNAPSHOT to central-snapshots (maven-deploy-plugin)"
-          mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy -DskipTests
+          mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy $SKIP_ARG
         else
           echo "Version $VERSION → publishing RELEASE via central-publishing-maven-plugin"
-          mvn $MVN_ARGS -P"$RELEASE_PROFILE" deploy -DskipTests -Dgpg.passphrase="$GPG_PASSPHRASE"
+          mvn $MVN_ARGS -P"$RELEASE_PROFILE" deploy $SKIP_ARG -Dgpg.passphrase="$GPG_PASSPHRASE"
         fi
