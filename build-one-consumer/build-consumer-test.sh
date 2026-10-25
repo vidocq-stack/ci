@@ -71,6 +71,23 @@ case " \$* " in
     props=\$(grep -o '<[a-z.]*\.version>[^<]*' pom.xml | sed 's/^<//; s/>/=/' | sort | tr '\n' ' ')
     echo "\$name \$props" >> "$TMP/installs"
     [ "\$name" = "\${MVN_FAIL:-}" ] && exit 1
+    # Test failures of the consumer (STUB_PR_FAIL with the producer pinned, STUB_BASE_FAIL without).
+    if [ -n "\${STUB_PR_FAIL:-}\${STUB_BASE_FAIL:-}" ] && [ "\${name%-baseline}" = "\${STUB_CONSUMER:-cyrano}" ]; then
+      if grep -q '<vauban.version>0.4.0-PR7' pom.xml; then fails="\${STUB_PR_FAIL:-}"; else fails="\${STUB_BASE_FAIL:-}"; fi
+      mkdir -p target/surefire-reports
+      { echo '<testsuite name="acme.ATest">'
+        for t in a b c; do
+          case " \$fails " in *" \$t "*) echo "<testcase classname=\"acme.ATest\" name=\"\$t\"><failure/></testcase>" ;;
+                              *) echo "<testcase classname=\"acme.ATest\" name=\"\$t\"/>" ;; esac
+        done
+        echo '</testsuite>'; } > target/surefire-reports/TEST-acme.ATest.xml
+      if [ -n "\$fails" ]; then
+        echo "[ERROR] Tests run: 3, Failures: \$(echo \$fails | wc -w | tr -d ' '), Errors: 0, Skipped: 0"
+        case " \$* " in *" -Dmaven.test.failure.ignore=true "*) exit 0 ;; esac
+        echo "[INFO] BUILD FAILURE"
+        exit 1
+      fi
+    fi
     ;;
 esac
 exit 0
@@ -188,6 +205,27 @@ run CONSUMER=Vidocq/foy TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifac
 check "targeted, companion branch of the consumer: falls back to full without any analysis" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"
 check "targeted, companion branch of the consumer: the summary says why" "1" \
   "$(grep -c "| full (fallback: the consumer is built on its companion branch 'feat/x') |\$" "$TMP/summary")"
+
+# Baseline on failure: off by default.
+check "baseline off: a failing consumer fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= STUB_PR_FAIL=a STUB_BASE_FAIL=a)"
+check "baseline off: no baseline build" "0" "$(grep -c 'vauban.version=0.4.0-SNAPSHOT' "$TMP/installs")"
+
+check "baseline: the same failures on main pass the step" "0" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL=a STUB_BASE_FAIL='a b')"
+check "baseline: a prominent warning" "1" "$(grep -c '^::warning title=Pre-existing failures in Vidocq/cyrano::' "$TMP/out")"
+check "baseline: the summary section" "1" "$(grep -c '^### Pre-existing failures, not caused by this PR' "$TMP/summary")"
+check "baseline: the result column says so" "1" "$(grep -c '| success (pre-existing failures only) |' "$TMP/summary")"
+check "baseline: the baseline is the same commit without the producer pin, tests failing on main ignored" "1" \
+  "$(grep -c '^cyrano-baseline -B -ntp -fae -Dmaven.test.failure.ignore=true install' "$TMP/mvn-calls")"
+check "baseline: the pull-request rerun keeps the pin and goes on past failures" "1" \
+  "$(grep -c '^cyrano -B -ntp -fae -Dmaven.test.failure.ignore=true install' "$TMP/mvn-calls")"
+check "baseline: a new failure fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL='a c' STUB_BASE_FAIL=a)"
+check "baseline: the summary names it" "1" "$(grep -c '^- `acme.ATest#c`' "$TMP/summary")"
+check "baseline: a green baseline fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL=a)"
+check "baseline: ... without the pull-request rerun" "0" "$(grep -c '^cyrano -B -ntp -fae' "$TMP/mvn-calls")"
+check "baseline: never on a companion-branch run" "1" "$(run CONSUMER=Vidocq/foy BASELINE_ON_FAILURE=true STUB_CONSUMER=foy STUB_PR_FAIL=a STUB_BASE_FAIL=a)"
+check "baseline: ... no baseline build there" "0" "$(grep -c '^foy-baseline' "$TMP/mvn-calls")"
+check "baseline: a failure before the build (clone) is not compared" "1" "$(run CONSUMER=Vidocq/nowhere HEAD_REF= BASELINE_ON_FAILURE=true)"
+check "baseline: an unknown value fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=maybe)"
 
 check "an unknown test mode fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=some)"
 check "an unknown test mode builds nothing" "0" "$(cat "$TMP/mvn-calls" 2>/dev/null | grep -c ' install')"

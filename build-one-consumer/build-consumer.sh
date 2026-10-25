@@ -37,6 +37,10 @@
 #                       closure of the externals of repositories that do not consume the
 #                       producer (faster, but the graph is not checked); false (default): every
 #                       suspect external gets its closure resolved
+#   BASELINE_ON_FAILURE false (default) | true: when the consumer build fails, rebuild the same
+#                       consumer commit against the producer's current main SNAPSHOT and pass,
+#                       with a warning, only if every failure is pre-existing (baseline/baseline.sh);
+#                       never on a companion-branch run
 #   GRAPH_REPO, GRAPH_REF  dependency graph read when GRAPH_PRUNING is true (Vidocq/dep-graph, main)
 #
 # Writes the consumer's build log and lists it in $RUNNER_TEMP/downstream-logs/consumers.tsv for
@@ -50,6 +54,12 @@ SHARED="${SHARED:-$HERE/../build-impacted}"
 export MVN_ARGS="${MVN_ARGS--B -ntp}"
 UPSTREAMS="${UPSTREAMS:-}"
 TESTS="${TESTS:-full}"
+BASELINE_ON_FAILURE="${BASELINE_ON_FAILURE:-false}"
+case "$BASELINE_ON_FAILURE" in
+  true|false) ;;
+  *) echo "::error::baseline-on-failure must be 'true' or 'false', not '$BASELINE_ON_FAILURE'" >&2; exit 1 ;;
+esac
+baseline_note=""
 case "$TESTS" in
   full|targeted) ;;
   *) echo "::error::tests must be 'full' or 'targeted', not '$TESTS'" >&2; exit 1 ;;
@@ -87,6 +97,7 @@ started=$(date +%s)
 summary() {
   local rc=$? result=success
   [ "$rc" -eq 0 ] || result="failure (exit $rc)"
+  [ "$rc" -ne 0 ] || [ -z "$baseline_note" ] || result="success ($baseline_note)"
   local took=$(( $(date +%s) - started ))
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
@@ -181,11 +192,31 @@ echo "::group::Build $CONSUMER (pinned: ${!PRV[*]})"
 mapfile -t args < <(pin_args)
 # Listed before the build, so the flaky-test report reads the log of a failed build too.
 printf '%s\t%s\n' "$CONSUMER" "$LOGS/$s.log" >> "$LOGS/consumers.tsv"
+build_rc=0
 UNPINNED_OUT="$UNPINNED" bash "$SHARED/rebuild-consumer.sh" --slug "$CONSUMER" --clone-url "$url" \
   --dir "$WORK/$s" --branch "$consumer_branch" --suffix "$VERSION_SUFFIX" \
-  --log "$LOGS/$s.log" ${prepare[@]+"${prepare[@]}"} "${args[@]}" </dev/null
-rm -rf "${WORK:?}/$s"
-echo "::endgroup::"
+  --log "$LOGS/$s.log" ${prepare[@]+"${prepare[@]}"} "${args[@]}" </dev/null || build_rc=$?
+if [ "$build_rc" -ne 0 ]; then
+  echo "::endgroup::"
+  # Baseline on failure: only when the consumer and every intermediate come from what Central
+  # holds (no companion branch), so the baseline differs from the pull-request build by the
+  # producer alone.
+  if [ "$BASELINE_ON_FAILURE" = true ] && [ -z "$consumer_branch" ] && [ "${#chain[@]}" -eq 0 ]; then
+    if CONSUMER="$CONSUMER" PR_DIR="$WORK/$s" PR_LOG="$LOGS/$s.log" VERSION_SUFFIX="$VERSION_SUFFIX" \
+         TARGETED_REPORT="${RUNNER_TEMP:-/tmp}/targeted/consumer/report.json" SHARED="$SHARED" \
+         bash "$HERE/baseline/baseline.sh" </dev/null; then
+      baseline_note="pre-existing failures only"
+    else
+      exit "$build_rc"
+    fi
+  else
+    [ "$BASELINE_ON_FAILURE" = true ] && echo "Baseline on failure: not on a companion-branch run."
+    exit "$build_rc"
+  fi
+else
+  echo "::endgroup::"
+fi
+rm -rf "${WORK:?}/$s" "${WORK:?}/$s-baseline"
 if [ -n "$consumer_branch" ] || [ "${#chain[@]}" -gt 0 ]; then
   echo "::notice::${CONSUMER} built against the companion branch '$companion' of: ${consumer_branch:+$CONSUMER }${chain[*]:-}"
 fi

@@ -26,6 +26,24 @@ raw results, delta against the previous run.
 
 ---
 
+## 2026-10-25 — build-one-consumer `baseline-on-failure` (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
+- **Setup**: the real `build-one-consumer/build-consumer.sh` of this branch, for chappe → foy:
+  - chappe `c6cff89` installed at `0.4.0-PR0.tgi`;
+  - foy `9fe2487` plus a throwaway local commit adding one failing test to `foy-core`, served from a local file://
+    forge;
+  - `TESTS=full` and the default `maven-args` (rerunFailingTestsCount=1);
+  - an isolated, warm Maven repository.
+
+| Scenario | baseline-on-failure | Job | Result |
+|---|---|---:|---|
+| a test that always fails (pre-existing) | false | 38 s | failure (the build stops at foy-core) |
+| a test that always fails (pre-existing) | true | 143 s (+105 s: baseline + PR rerun) | **success (pre-existing failures only)**, warning, summary lists `BaselineProbeTest#alwaysRed` |
+| a test that fails only with chappe's PR version (it asserts chappe-api is a SNAPSHOT) | true | 86 s (+48 s: the baseline only, which is green) | **failure**, summary: caused by the PR |
+
+---
+
 ## 2026-10-25 — targeted consumer tests with intermediate upstreams from central-snapshots (Vidocq/vidocq#285)
 
 - **Hardware/JVM**: Apple M5 Max (18 cores, 128 GB), Temurin 25, Maven 3.9.16, `CI=true`.

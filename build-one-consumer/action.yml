@@ -54,6 +54,16 @@ inputs:
       to 'full' on any doubt (a companion branch for the consumer or an intermediate upstream, analysis or Maven
       error...), with the reason in the job summary.
     default: 'full'
+  baseline-on-failure:
+    description: >
+      'false' (default): a failing consumer build fails the job, as always. 'true': when it fails,
+      the same consumer commit is rebuilt against the producer's current main SNAPSHOT (baseline,
+      same intermediates, same skip set) and the pull-request build again, both with -fae and
+      test failures ignored; the job passes, with a warning and a job-summary section, only when
+      every failure (test case, invoker build, build error by module and goal) also fails on the
+      baseline. Never on a companion-branch run. Costs one more consumer build when the failure is
+      the pull request's, two when it is pre-existing; nothing when the build passes.
+    default: 'false'
   graph-pruning:
     description: >
       tests=targeted only. 'true': trust the dependency graph to skip the closure resolution of
@@ -103,6 +113,7 @@ runs:
         BOT_TOKEN: ${{ inputs.bot-token }}
         COMPANION_BRANCHES: ${{ inputs.companion-branches }}
         TESTS: ${{ inputs.tests }}
+        BASELINE_ON_FAILURE: ${{ inputs.baseline-on-failure }}
         GRAPH_PRUNING: ${{ inputs.graph-pruning }}
         GRAPH_REPO: ${{ inputs.graph-repo }}
         GRAPH_REF: ${{ inputs.graph-ref }}
