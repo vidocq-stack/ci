@@ -27,8 +27,13 @@ run_dir() { rm -rf "$TMP/$1" "$TMP/$1.log" "$TMP/first" "$TMP/first.log"; mkdir 
 first_dir() { rm -rf "$TMP/first" "$TMP/first.log"; mkdir -p "$TMP/first"; : > "$TMP/first.log"; }
 # The surefire summary of a module, as the log prints it (the count check reads it).
 summary_line() { log "$1" "[ERROR] Tests run: $3, Failures: $2, Errors: 0, Skipped: 0"; }
+pom() { # pom <run> <module>: the module's pom (artifactId acme-<module>), as in a checkout
+  mkdir -p "$TMP/$1/$2"
+  [ -f "$TMP/$1/$2/pom.xml" ] || printf '<project><artifactId>acme-%s</artifactId></project>\n' "$2" > "$TMP/$1/$2/pom.xml"
+}
 testcase() { # testcase <run> <module> <plugin: surefire|failsafe> <class> <method> <ok|failure|error|flaky>
   local f="$TMP/$1/$2/target/$3-reports/TEST-$4.xml" body=""
+  pom "$1" "$2"; [ "$1" = first ] && pom pr "$2"
   mkdir -p "$(dirname "$f")"
   [ -f "$f" ] || printf '<?xml version="1.0"?>\n<testsuite name="%s">\n</testsuite>\n' "$4" > "$f"
   case "$6" in
@@ -108,7 +113,7 @@ builderr base acme-core compiler-plugin:3.14.0:compile
 log base "[ERROR] $TMP/base/core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (0.4.0-SNAPSHOT)"
 check "same build error both sides: exit 0" "0" "$(compare)"
 check "same build error both sides: listed by goal and by error line" \
-  "build error acme-core compiler-plugin:3.14.0:compile error core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (V)" "$(field pre_existing)"
+  "build error acme-core compiler-plugin:V:compile: Compilation failure error core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (V)" "$(field pre_existing)"
 
 # 7. Build error at another module or goal on the baseline: caused by the PR.
 run_dir pr; run_dir base
@@ -201,6 +206,42 @@ builderr pr acme-core compiler-plugin:3.14.0:compile; skipped pr "App"
 builderr base acme-core compiler-plugin:3.14.0:compile; skipped base "App"
 check "modules skipped in the PR rerun (on both sides): exit 1" "1" "$(compare)"
 check "modules skipped in the PR rerun: named" "1" "$(field reason | grep -c 'App')"
+
+# 17. Review 69-I5: a test plugin's execution failure that leaves no report is a build error.
+run_dir pr; run_dir base
+pom pr core; pom base core
+testcase pr app surefire acme.PTest p failure; testcase base app surefire acme.PTest p failure
+log pr "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project acme-core: Execution default-test of goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test failed."
+check "surefire execution failed, no report: exit 1" "1" "$(compare)"
+run_dir pr; run_dir base; first_dir
+pom pr core
+testcase first app surefire acme.PTest p failure; testcase pr app surefire acme.PTest p failure; testcase base app surefire acme.PTest p failure
+log first "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project acme-core: There are test failures."
+check "'There are test failures' in a module whose reports name none: exit 1" "1" "$(compare)"
+run_dir pr; run_dir base
+pom pr plugin
+invoker pr other it-x failure-build; invoker base other it-x failure-build
+log pr "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-invoker-plugin:3.9.0:verify (integration-tests) on project acme-plugin: 1 build failed."
+check "invoker 'build failed' with no failing report in that module: exit 1" "1" "$(compare)"
+
+# 18. Review 69-M3: the counts are compared per module.
+run_dir pr; run_dir base
+testcase pr core surefire acme.ATest p failure; testcase pr app surefire acme.BTest q failure
+log pr "[INFO] ------------------< io.vidocq.acme:acme-core >------------------"
+summary_line pr 2 5
+log pr "[INFO] ------------------< io.vidocq.acme:acme-app >-------------------"
+testcase base core surefire acme.ATest p failure; testcase base app surefire acme.BTest q failure
+check "a module whose log counts more failures than its reports, totals equal: doubt" "doubt" "$(compare > /dev/null; field decision)"
+
+# 19. Review 69-M4: errors without a file position are compared by their normalised message too.
+run_dir pr; run_dir base
+log pr "[ERROR] Failed to execute goal io.vidocq:vidocq-maven-plugin:0.4.0-PR7.abc:codegen (default) on project acme-core: no generator for NewThing"
+log base "[ERROR] Failed to execute goal io.vidocq:vidocq-maven-plugin:0.4.0-SNAPSHOT:codegen (default) on project acme-core: no generator for OldThing"
+check "same module and goal, another message: exit 1" "1" "$(compare)"
+run_dir pr; run_dir base
+log pr "[ERROR] Failed to execute goal io.vidocq:vidocq-maven-plugin:0.4.0-PR7.abc:codegen (default) on project acme-core: no generator for OldThing in $TMP/pr/core/x"
+log base "[ERROR] Failed to execute goal io.vidocq:vidocq-maven-plugin:0.4.0-SNAPSHOT:codegen (default) on project acme-core: no generator for OldThing in $TMP/base/core/x"
+check "same module, goal and message (versions and paths normalised): exit 0" "0" "$(compare)"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"

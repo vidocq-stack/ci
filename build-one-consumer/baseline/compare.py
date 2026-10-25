@@ -39,12 +39,18 @@ import xml.etree.ElementTree as ET
 GOAL = re.compile(r'\[ERROR\] Failed to execute goal (\S+) \([^)]*\) on project ([^\s:]+):?(.*)')
 ERROR_LINE = re.compile(r'\[ERROR\] (/\S+?):\[(\d+),(\d+)\] (.*)')
 SKIPPED = re.compile(r'^\[INFO\] (.+?) \.*\s*SKIPPED\s*$')
-BUILDING = re.compile(r'^\[INFO\] Building (.+?) \S+ +\[\d+/\d+\]')
+SECTION = re.compile(r'^\[INFO\] -+< [^:\s]+:([^\s>]+) >-+')
 TEST_SUMMARY = re.compile(r'Tests run: \d+, Failures: (\d+), Errors: (\d+)(?:, Skipped: \d+)?(?:, Flakes: \d+)?\s*$')
 # A test plugin failing because tests failed is what the reports say, not a build error (the first
 # pull-request build runs without -Dmaven.test.failure.ignore). A crash of the fork stays one.
-TEST_FAILURE_GOAL = re.compile(r'(surefire|failsafe|invoker)', re.I)
-TEST_FAILURE_MESSAGE = re.compile(r'There (are|were) test failures|There are failing tests|build\(s\) failed|failed\.?$', re.I)
+# A test plugin failing because tests failed is what the reports say, not a build error (the first
+# pull-request build runs without -Dmaven.test.failure.ignore): only when that module's reports do
+# name failing tests (surefire, failsafe) or failing builds (invoker). Any other failure of a test
+# plugin (an execution that failed, a crashed fork) stays a build error.
+TEST_PLUGIN = re.compile(r'(surefire|failsafe)', re.I)
+INVOKER_PLUGIN = re.compile(r'invoker', re.I)
+TESTS_FAILED = re.compile(r'There (are|were) test failures', re.I)
+BUILDS_FAILED = re.compile(r'\b\d+ builds? failed\b|build\(s\) failed', re.I)
 VERSION = re.compile(r'\b\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?\b')
 
 
@@ -65,11 +71,28 @@ def relative(path, root):
     return path
 
 
+def artifact_id(path):
+    try:
+        for el in ET.parse(path).getroot():
+            if strip(el.tag) == 'artifactId':
+                return (el.text or '').strip()
+    except (ET.ParseError, OSError):
+        pass
+    return None
+
+
+def normalise(message, roots):
+    for r in sorted({x for r in roots if r for x in (r, os.path.realpath(r))}, key=len, reverse=True):
+        message = message.replace(r.rstrip('/') + '/', '')
+    return VERSION.sub('V', message.strip())
+
+
 def collect(root, log, source=None):
     """Failures of one build: test cases keyed <module>:<surefire|failsafe>:<class>#<method>,
     invoker builds, build errors (by module and goal, and by normalised error line), the modules
     the reactor skipped, and the failures the log's test summaries count."""
     tests, invoker = set(), set()
+    per_module = {}                        # module dir -> {'tests': n, 'invoker': n} failing in reports
     for d, dirs, files in os.walk(root):
         dirs[:] = [x for x in dirs if not x.startswith('.') and x != 'node_modules']
         base = os.path.basename(d)
@@ -88,6 +111,7 @@ def collect(root, log, source=None):
                         continue
                     if {strip(c.tag) for c in case} & {'failure', 'error'}:
                         tests.add(f"{module}:{kind}:{case.get('classname', '?')}#{case.get('name', '?')}")
+                        per_module.setdefault(module, {'tests': 0, 'invoker': 0})['tests'] += 1
             elif base == 'invoker-reports' and name.startswith('BUILD-') and name.endswith('.xml'):
                 try:
                     job = ET.parse(path).getroot()
@@ -96,23 +120,34 @@ def collect(root, log, source=None):
                     continue
                 if job.get('result', '') not in ('success', 'skipped'):
                     invoker.add(f"invoker:{module}:{job.get('project', name)}")
+                    per_module.setdefault(module, {'tests': 0, 'invoker': 0})['invoker'] += 1
+    # artifactId -> failing counts, through each module's pom (in the checkout the build ran in).
+    by_artifact = {}
+    for module, counts in per_module.items():
+        aid = artifact_id(os.path.join(source or root, module, 'pom.xml')) or artifact_id(os.path.join(root, module, 'pom.xml'))
+        if aid:
+            by_artifact[aid] = counts
     errors, skipped = set(), set()
-    summaries, current = {}, ''
+    summaries, current, sections = {}, '', set()
     with open(log, encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.rstrip('\n')
-            m = BUILDING.match(line)
+            m = SECTION.match(line)
             if m:
                 current = m.group(1)
+                sections.add(current)
                 continue
             m = GOAL.search(line)
             if m:
                 coord, project, message = m.group(1), m.group(2), m.group(3)
-                if TEST_FAILURE_GOAL.search(coord) and TEST_FAILURE_MESSAGE.search(message.strip()):
+                counts = by_artifact.get(project, {'tests': 0, 'invoker': 0})
+                if TEST_PLUGIN.search(coord) and TESTS_FAILED.search(message) and counts['tests']:
+                    continue
+                if INVOKER_PLUGIN.search(coord) and BUILDS_FAILED.search(message) and counts['invoker']:
                     continue
                 coord = coord.split(':', 1)[-1]
                 coord = coord[len('maven-'):] if coord.startswith('maven-') else coord
-                errors.add(f'build error {project} {coord}')
+                errors.add(f'build error {project} {VERSION.sub("V", coord)}: {normalise(message, [root, source])}')
                 continue
             m = ERROR_LINE.search(line)
             if m:
@@ -126,8 +161,16 @@ def collect(root, log, source=None):
             m = TEST_SUMMARY.search(line)
             if m and 'Time elapsed' not in line:
                 summaries.setdefault(current, set()).add((int(m.group(1)), int(m.group(2)), line.split('] ', 1)[-1]))
-    signalled = sum(f + e for per in summaries.values() for f, e, _ in per)
-    return {'tests': tests, 'invoker': invoker, 'errors': errors, 'skipped': skipped, 'signalled': signalled}
+    counted = {k: sum(f + e for f, e, _ in per) for k, per in summaries.items()}
+    signalled = sum(counted.values())
+    # Per module: a module whose log counts more failing tests than its reports name.
+    short = []
+    for k, n in sorted(counted.items()):
+        reported = by_artifact.get(k, {'tests': 0})['tests']
+        if k in sections and n > reported:
+            short.append(f'{k} ({n} counted, {reported} reported)')
+    return {'tests': tests, 'invoker': invoker, 'errors': errors, 'skipped': skipped, 'signalled': signalled,
+            'short': short}
 
 
 def failures(side):
@@ -141,6 +184,10 @@ def decide(pr, base, first=None):
     out = {'pr': sorted(pr_all), 'baseline': sorted(base_all), 'new': [], 'pre_existing': [],
            'skipped': sorted(pr['skipped'])}
     for side, name in sides:
+        if side['short']:
+            out.update(decision='doubt', reason=f"the {name} log counts more failing tests than the reports name, "
+                       'in: ' + ', '.join(side['short']) + ' (a killed fork, a report elsewhere?)')
+            return out
         if side['signalled'] > len(side['tests']):
             out.update(decision='doubt', reason=f"the {name} log counts {side['signalled']} failing test(s), its "
                        f"surefire and failsafe reports name {len(side['tests'])} (a killed fork, a report "
