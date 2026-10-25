@@ -25,7 +25,7 @@ why() { printf '%s' "$1" > "$TMP/pr.json"; merge_refusal "$TMP/pr.json"; }
 
 check "a ready pull request may be merged" "" "$(why '{"title": "faster parser", "labels": []}')"
 check "a WIP: title is refused" \
-  "it is work in progress (the title starts with WIP:): remove WIP, let pr-validate go green, then /merge" \
+  "it is work in progress (the title says wip): remove WIP, let pr-validate go green, then /merge" \
   "$(why '{"title": "WIP: faster parser"}')"
 check "a draft is refused" \
   "it is work in progress (the forge reports a draft): remove WIP, let pr-validate go green, then /merge" \
@@ -36,8 +36,22 @@ check "the WIP label is refused" \
 check "a train member is refused, naming its top" \
   "it is a member of a PR train (label train-member): it is validated through the train's top PR #12 and merged by the train script after it, never on its own" \
   "$(why '{"title": "faster parser", "body": "Train-top: #12", "labels": [{"name": "train-member"}]}')"
-check "the blocked label is refused" "it carries the label blocked: remove it first" \
+check "the blocked label is refused" \
+  "it is blocked (label blocked): remove the blocked label, let pr-validate go green, then /merge" \
   "$(why '{"title": "faster parser", "labels": [{"name": "blocked"}]}')"
+# The maintainer's rule (75-I2), the same classification as pr-validate.
+check "wip anywhere in the title is refused" \
+  "it is work in progress (the title says wip): remove WIP, let pr-validate go green, then /merge" \
+  "$(why '{"title": "feat: thing (WIP)"}')"
+check "a Draft: prefix is refused" \
+  "it is work in progress (the title starts with Draft:): remove WIP, let pr-validate go green, then /merge" \
+  "$(why '{"title": "Draft: thing"}')"
+check "a label containing wip is refused" \
+  "it is work in progress (label wip-do-not-merge): remove WIP, let pr-validate go green, then /merge" \
+  "$(why '{"title": "thing", "labels": [{"name": "wip-do-not-merge"}]}')"
+check "a label containing blocked is refused" \
+  "it is blocked (label status/blocked): remove the blocked label, let pr-validate go green, then /merge" \
+  "$(why '{"title": "thing", "labels": [{"name": "status/blocked"}]}')"
 check "an unreadable pull request is refused" "its title and labels cannot be read, so it is not known to be ready" \
   "$(why 'not json')"
 
@@ -77,7 +91,7 @@ merge() { # merge [MERGE_AFTER_REBASE] -> "<exit status>|<reason file>|<tools ca
 
 pr "WIP: faster parser" ""
 check "/merge on a WIP pull request: refused before any git or gpg call, with the reason" \
-  "1|PR #7 is not merged: it is work in progress (the title starts with WIP:): remove WIP, let pr-validate go green, then /merge.|" \
+  "1|PR #7 is not merged: it is work in progress (the title says wip): remove WIP, let pr-validate go green, then /merge.|" \
   "$(merge)"
 
 pr "faster parser" "train-member" "Train-top: #12"

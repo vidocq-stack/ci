@@ -3,8 +3,9 @@ description: >
   Vidocq/vidocq#285. Owns every decision of a producer's pull-request validation, so that a change of policy
   reaches the producer repositories from @main, without touching their pr.yml. mode 'state', in the first job of
   the run, reads the pull request as it is now and says which jobs run: a train member (label train-member,
-  "Train-top: #N" in the description) builds nothing, a WIP pull request (title "WIP:"/"[WIP]", a draft, label
-  WIP) builds and tests the producer but not its consumers, and an edit or a label change that leaves the pull
+  "Train-top: #N" in the description) builds nothing, a WIP or blocked pull request ("wip" anywhere in the
+  title, a Draft:/[draft] prefix, a draft, a label containing "wip" or "blocked") builds and tests the producer
+  but not its consumers, and an edit or a label change that leaves the pull
   request as it was reproduces the verdict of the latest completed run on the same commit instead of building
   again. mode 'verdict', in the aggregator (`pr-validate`, required check), decides from toJSON(needs): it FAILS
   a train member, a WIP pull request, and any expected work that did not succeed; a skipped job never passes
@@ -22,8 +23,11 @@ inputs:
     description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN) to lift the API rate limits; empty on a fork pull request, which reads anonymously'
     default: ''
   wip-labels:
-    description: 'Comma-separated labels that make a pull request WIP (any case), on top of the WIP:/[WIP] title prefixes and the draft flag'
-    default: 'WIP'
+    description: 'Comma-separated substrings: a label whose name contains one (any case) makes the pull request WIP, on top of the title and draft rules'
+    default: 'wip'
+  blocked-labels:
+    description: 'Comma-separated substrings: a label whose name contains one (any case) makes the pull request blocked, failed like WIP'
+    default: 'blocked'
   train-label:
     description: 'The label of a train member'
     default: 'train-member'
@@ -76,6 +80,7 @@ runs:
         GATE_ATTEMPT: ${{ github.run_attempt }}
         GATE_RUN_ID: ${{ github.run_id }}
         GATE_WIP_LABELS: ${{ inputs.wip-labels }}
+        GATE_BLOCKED_LABELS: ${{ inputs.blocked-labels }}
         GATE_TRAIN_LABEL: ${{ inputs.train-label }}
         GATE_STATE_JOB: ${{ inputs.state-job }}
         GATE_AGGREGATOR: ${{ inputs.aggregator-job }}

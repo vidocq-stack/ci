@@ -16,10 +16,10 @@ re-run replays an old payload):
   train   the label TRAIN_LABEL. Validated through the train's top pull request, named by a line
           "Train-top: #N" in the description. No build runs, and the aggregator FAILS: a member is merged
           by the train script, after its top, never on its own.
-  wip     the title starts with "WIP:" or "[WIP]" (Forgejo's draft prefixes, any case), the forge reports a
-          draft, or a WIP label. The producer still builds and tests (feedback), the downstream check does
-          not run, and the aggregator FAILS. Never a skip: on Forgejo a skipped job satisfies the branch
-          protection.
+  wip     the maintainer's rule: "wip" anywhere in the title as a word (any case), a "Draft:" or "[draft]"
+          prefix, the forge's draft flag, a label containing "wip"; or blocked, a label containing "blocked".
+          The producer still builds and tests (feedback), the downstream check does not run, and the
+          aggregator FAILS. Never a skip: on Forgejo a skipped job satisfies the branch protection.
   ready   the full validation.
 
 A run triggered by an edit or a label change (any activity but opened, reopened, synchronize) on a commit
@@ -45,10 +45,13 @@ import time
 import urllib.error
 import urllib.request
 
-WIP_PREFIXES = ("WIP:", "[WIP]")
-DEFAULT_WIP_LABELS = "WIP"
+# The maintainer's rule ("WIP/blocked label, draft, WIP in the title: never merged"), shared by the check, the
+# merge-bot and the train script (Vidocq/vidocq#285, review 75-I2).
+WIP_WORD = re.compile(r"(?<![a-z0-9])wip(?![a-z0-9])", re.IGNORECASE)
+DRAFT_PREFIXES = ("draft:", "[draft]")
+DEFAULT_WIP_LABELS = "wip"          # substrings of a label name, any case
+DEFAULT_BLOCKED_LABELS = "blocked"  # idem
 DEFAULT_TRAIN_LABEL = "train-member"
-BLOCKED_LABEL = "blocked"
 TRAIN_TOP = re.compile(r"^[ \t>*_-]*train[ -]?top[ \t*_]*:[ \t*_]*#(\d+)\b", re.IGNORECASE | re.MULTILINE)
 # Activities that bring code to validate: a new or reopened pull request, a new head.
 FULL_ACTIVITIES = {"", "opened", "reopened", "synchronize", "synchronized"}
@@ -104,34 +107,44 @@ def split_labels(text):
     return [name.strip() for name in (text or "").split(",") if name.strip()]
 
 
-def classify(pr, wip_labels=DEFAULT_WIP_LABELS, train_label=DEFAULT_TRAIN_LABEL):
-    """What a pull request is. pr is the API (or event payload) pull request object."""
+def classify(pr, wip_labels=DEFAULT_WIP_LABELS, train_label=DEFAULT_TRAIN_LABEL,
+             blocked_labels=DEFAULT_BLOCKED_LABELS):
+    """What a pull request is. pr is the API (or event payload) pull request object.
+
+    WIP: "wip" anywhere in the title as a word (any case: "WIP: x", "x (WIP)", "[wip] x"), a "Draft:" or
+    "[draft]" prefix, the forge's draft flag, or a label whose name contains one of wip_labels. Blocked: a label
+    whose name contains one of blocked_labels. Either one makes the mode "wip" (not ready), unless the pull
+    request is a train member."""
     title = (pr.get("title") or "").strip()
     labels = label_names(pr)
     lowered = {name.lower() for name in labels}
-    wip_set = {name.lower() for name in split_labels(wip_labels)}
+    wip_parts = [part.lower() for part in split_labels(wip_labels)]
+    blocked_parts = [part.lower() for part in split_labels(blocked_labels)]
 
     wip = []
-    prefix = next((p for p in WIP_PREFIXES if title.upper().startswith(p)), None)
+    if WIP_WORD.search(title):
+        wip.append("the title says wip")
+    prefix = next((p for p in DRAFT_PREFIXES if title.lower().startswith(p)), None)
     if prefix:
-        wip.append(f"the title starts with {prefix}")
-    elif pr.get("draft"):
+        wip.append(f"the title starts with {title[:len(prefix)]}")
+    if pr.get("draft") and not wip:
         wip.append("the forge reports a draft")
-    hit = sorted(name for name in labels if name.lower() in wip_set)
+    hit = sorted(name for name in labels if any(part in name.lower() for part in wip_parts))
     if hit:
         wip.append("label " + ", ".join(hit))
+    blocked = sorted(name for name in labels if any(part in name.lower() for part in blocked_parts))
 
     match = TRAIN_TOP.search(pr.get("body") or "")
     top = match.group(1) if match else ""
     train = bool(train_label) and train_label.lower() in lowered
-    mode = "train" if train else ("wip" if wip else "ready")
+    mode = "train" if train else ("wip" if wip or blocked else "ready")
     return {
         "mode": mode,
         "wip": bool(wip),
-        "wip-reason": "; ".join(wip),
+        "blocked": bool(blocked),
+        "wip-reason": "; ".join(wip + (["label " + ", ".join(blocked)] if blocked else [])),
         "train": train,
         "train-top": top,
-        "blocked": BLOCKED_LABEL in lowered,
         "labels": labels,
         "title": title,
     }
@@ -149,20 +162,35 @@ def train_message(state):
 WIP_MESSAGE = "WIP: downstream not run; remove WIP to validate"
 
 
+def not_ready_message(state):
+    """The failure of a pull request in mode wip: WIP, blocked, or both."""
+    wip, blocked = state.get("wip", True), state.get("blocked", False)
+    if blocked and wip:
+        return "WIP and blocked: downstream not run; remove WIP and the blocked label to validate"
+    if blocked:
+        return "Blocked: downstream not run; remove the blocked label to validate"
+    return WIP_MESSAGE
+
+
 # -------------------------------------------------------------------------------------- previous runs
 
 def runs_of_commit(api, repo, head, workflow):
-    runs = []
+    """The runs of this workflow on exactly this commit. Codefloe ignores `limit` and answers every run of the
+    commit on page 1 (seen with 203 runs): a page that is not exactly `limit` long is the last one."""
+    runs, seen = [], set()
     for page in (1, 2, 3):
         doc = api.get(f"/repos/{repo}/actions/runs?head_sha={head}&limit=50&page={page}")
         batch = doc.get("workflow_runs") if isinstance(doc, dict) else None
         if not isinstance(batch, list):
             raise ApiError("the actions runs listing is not a list")
-        runs.extend(batch)
-        if len(batch) < 50:
+        for run in batch:
+            if isinstance(run, dict) and run.get("id") not in seen:
+                seen.add(run.get("id"))
+                runs.append(run)
+        if len(batch) != 50:
             break
-    return [r for r in runs
-            if r.get("workflow_id") == workflow and (r.get("commit_sha") or head) == head]
+    # A run that does not name its commit is not taken as being on it (fail closed).
+    return [r for r in runs if r.get("workflow_id") == workflow and r.get("commit_sha") == head]
 
 
 def workflow_file(api, repo, run_id, given=""):
@@ -184,7 +212,9 @@ def completed(run):
 
 
 RECORD = "PR-VALIDATE-RECORD"
-RECORD_LINE = re.compile(re.escape(RECORD) + r" (\{.*\})\s*$", re.MULTILINE)
+# At the start of a line, after the runner's timestamp only. The FIRST one counts: the Verdict step is the
+# aggregator's first step and prints it before anything a later step could print (review 75-M1).
+RECORD_LINE = re.compile(r"^(?:\S+Z )?" + re.escape(RECORD) + r" (\{[^\n]*\})[ \t\r]*$", re.MULTILINE)
 
 
 def judged(api, repo, run, aggregator):
@@ -202,24 +232,32 @@ def judged(api, repo, run, aggregator):
     status = str(job.get("status") or "")
     if status not in TERMINAL_JOB:
         return None, None, f"the {aggregator} job of run {name} is {status or 'unknown'}"
-    records = RECORD_LINE.findall(api.get_text(f"/repos/{repo}/actions/jobs/{job.get('id')}/logs"))
+    first = RECORD_LINE.search(api.get_text(f"/repos/{repo}/actions/jobs/{job.get('id')}/logs"))
     try:
-        record = json.loads(records[-1]) if records else None
+        record = json.loads(first.group(1)) if first else None
     except ValueError:
         record = None
     if not isinstance(record, dict):
         return None, None, f"run {name} recorded no verdict"
+    if str(record.get("run-id")) != str(run.get("id")) or str(record.get("job-id")) != str(job.get("id")):
+        return None, None, f"run {name}'s record names another run or job"
     if record.get("mode") not in ("ready", "wip", "train") or record.get("verdict") != status:
         return None, None, (f"run {name} judged nothing reusable (mode {record.get('mode')}, "
                             f"verdict {record.get('verdict')}, job {status})")
     return status, record["mode"], ""
 
 
-def latest_judgement(api, repo, head, workflow, aggregator, exclude=None, newer_than=None):
+def latest_judgement(api, repo, head, workflow, aggregator, exclude=None, newer_than=None, quiet=False):
     """The verdict of the latest completed run of this workflow on head (the one whose commit status stands),
-    as a dict, or (None, why)."""
-    runs = [r for r in runs_of_commit(api, repo, head, workflow)
-            if str(r.get("id")) != str(exclude) and completed(r)
+    as a dict, or (None, why). quiet: none when another run of the workflow on head is unfinished (queued,
+    waiting, running, a UI re-run): it will write its own verdict after this one (review 75-I1)."""
+    others = [r for r in runs_of_commit(api, repo, head, workflow) if str(r.get("id")) != str(exclude)]
+    if quiet:
+        busy = [r for r in others if not completed(r)]
+        if busy:
+            names = ", ".join(str(r.get("index_in_repo") or r.get("id")) for r in busy)
+            return None, f"another run of this workflow on this commit is in progress (run {names})"
+    runs = [r for r in others if completed(r)
             and (newer_than is None or int(r.get("id") or 0) > int(newer_than))]
     if not runs:
         return None, "no completed run of this workflow on this commit"
@@ -250,14 +288,17 @@ def notice(kind, title, message):
     print(f"::{kind} title={title}::{message}")
 
 
-def read_pr(api, repo, number, event_path):
-    """The pull request now, through the API; the event payload only when the API cannot be read."""
+def read_pr(api, repo, number, event_path, fallback=True):
+    """The pull request now, through the API; the event payload only when the API cannot be read (and
+    fallback allows it)."""
     try:
         pr = api.get(f"/repos/{repo}/pulls/{number}")
         if isinstance(pr, dict) and "title" in pr:
             return pr, "api"
         raise ApiError("not a pull request")
     except ApiError as err:
+        if not fallback:
+            return None, ""
         notice("warning", "pr-validate-gate", f"cannot read the pull request ({err}); using the event payload")
     try:
         with open(event_path, encoding="utf-8") as fh:
@@ -270,6 +311,16 @@ def read_pr(api, repo, number, event_path):
 
 
 # ---------------------------------------------------------------------------------------------- state
+
+def base_changed(event_path):
+    """An `edited` event that retargets the pull request carries changes.base: never reproduce then."""
+    try:
+        with open(event_path, encoding="utf-8") as fh:
+            changes = json.load(fh).get("changes")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+    return isinstance(changes, dict) and "base" in changes
+
 
 def cmd_state(a):
     api = Api(a.api, a.token)
@@ -284,9 +335,10 @@ def cmd_state(a):
     if pr is None:
         notice("error", "pr-validate-gate", "the pull request can be read neither from the API nor from the event")
         return 1
-    c = classify(pr, a.wip_labels, a.train_label)
+    c = classify(pr, a.wip_labels, a.train_label, a.blocked_labels)
     head = a.head or ((pr.get("head") or {}).get("sha") or "")
-    state = {"mode": c["mode"], "wip-reason": c["wip-reason"], "train-top": c["train-top"], "source": source,
+    state = {"mode": c["mode"], "wip": c["wip"], "blocked": c["blocked"], "wip-reason": c["wip-reason"],
+             "train-top": c["train-top"], "source": source,
              "head": head, "activity": a.activity, "attempt": a.attempt, "run-id": a.run_id,
              "started-at": started, "reproduce": False}
 
@@ -297,12 +349,14 @@ def cmd_state(a):
         why = f"activity '{a.activity or 'none'}' brings code to validate"
     elif str(a.attempt or "1") != "1":
         why = f"attempt {a.attempt}: a re-run validates again"
+    elif base_changed(a.event_path):
+        why = f"activity '{a.activity}': the base branch changed: full validation"
     elif not head or not a.run_id:
         why = "head commit or run unknown: full validation"
     else:
         try:
             workflow = workflow_file(api, a.repo, a.run_id, a.workflow)
-            prev, missing = latest_judgement(api, a.repo, head, workflow, a.aggregator, exclude=a.run_id)
+            prev, missing = latest_judgement(api, a.repo, head, workflow, a.aggregator, exclude=a.run_id, quiet=True)
         except ApiError as err:
             prev, missing = None, f"the previous runs cannot be read ({err})"
         if prev is None:
@@ -319,7 +373,7 @@ def cmd_state(a):
 
     run_producer = c["mode"] != "train" and not state["reproduce"]
     run_downstream = c["mode"] == "ready" and not state["reproduce"]
-    summary = {"train": train_message(state), "wip": f"{WIP_MESSAGE} ({c['wip-reason']})",
+    summary = {"train": train_message(state), "wip": f"{not_ready_message(state)} ({c['wip-reason']})",
                "ready": "ready"}[c["mode"]]
     notice("notice", "pr-validate-gate", f"{summary.rstrip('.')}. {why}")
     emit({"state": state, "mode": c["mode"], "run-producer": str(run_producer).lower(),
@@ -390,9 +444,13 @@ def decide(needs, state_job, a, api):
     # change decides; this one must neither pass a pull request that became WIP or a train member, nor write
     # a stale red over a newer verdict.
     if a.pr:
-        pr, _ = read_pr(api, a.repo, a.pr, a.event_path)
+        pr, _ = read_pr(api, a.repo, a.pr, a.event_path, fallback=False)
+        if pr is None:
+            # Fail closed (review 75-M3): without the state now, a pull request that became WIP or a train
+            # member during the run could pass.
+            return False, "the pull request state cannot be re-read at the end of the run: re-run the jobs", False, None
         if pr is not None:
-            now = classify(pr, a.wip_labels, a.train_label)
+            now = classify(pr, a.wip_labels, a.train_label, a.blocked_labels)
             if now["mode"] != mode:
                 newer = None
                 if a.run_id and state.get("head"):
@@ -406,7 +464,7 @@ def decide(needs, state_job, a, api):
                     ok = newer["verdict"] == "success"
                     return ok, (f"The pull request changed during this run ({mode} -> {now['mode']}); the newer run "
                                 f"{newer['run-index'] or newer['run-id']} already judged it: {newer['verdict']}."), False, None
-                extra = {"train": train_message(now), "wip": WIP_MESSAGE, "ready": ""}[now["mode"]]
+                extra = {"train": train_message(now), "wip": not_ready_message(now), "ready": ""}[now["mode"]]
                 return False, (f"The pull request changed during this run ({mode} -> {now['mode']}); the run "
                                f"triggered by that change gives the verdict. {extra}").strip(), False, None
 
@@ -421,10 +479,29 @@ def decide(needs, state_job, a, api):
             ran = f"the producer ran in run {prev.get('run-index') or prev.get('run-id')}"
         else:
             ran = f"producer: {producer}"
-        return False, f"{WIP_MESSAGE} ({state.get('wip-reason') or 'WIP'}; {ran}).", False, "wip"
+        return False, f"{not_ready_message(state)} ({state.get('wip-reason') or 'WIP'}; {ran}).", False, "wip"
     if state.get("reproduce"):
         prev = state.get("previous") or {}
         ref = prev.get("run-index") or prev.get("run-id")
+        # The run reproduced must still be the latest completed one, with no other run unfinished
+        # (review 75-I1): a re-run or a newer run may have judged this commit since the state job looked.
+        try:
+            workflow = workflow_file(api, a.repo, a.run_id, a.workflow)
+            latest, why = latest_judgement(api, a.repo, state.get("head") or "", workflow, a.aggregator,
+                                           exclude=a.run_id, quiet=True)
+        except ApiError as err:
+            latest, why = None, f"the runs cannot be re-read ({err})"
+        if latest is None:
+            return False, (f"The verdict of run {ref} cannot be reproduced: {why}. That run, or a re-run of "
+                           "this one, gives the verdict."), False, None
+        if latest["run-id"] != str(prev.get("run-id")):
+            newer = latest["run-index"] or latest["run-id"]
+            if latest["mode"] == mode:
+                return latest["verdict"] == "success", (
+                    f"A newer run {newer} judged this commit since run {ref}: its verdict stands, "
+                    f"{latest['verdict']} ({latest['run-url']})."), False, mode
+            return False, (f"A newer run {newer} judged this commit in another mode ({latest['mode']}): "
+                           "re-run all jobs to validate."), False, None
         if prev.get("verdict") == "success":
             return True, (f"Nothing relevant changed since run {ref} on this commit: its verdict stands, "
                           f"success ({prev.get('run-url') or ''})."), False, mode
@@ -434,9 +511,21 @@ def decide(needs, state_job, a, api):
     return ok, message, ok, mode
 
 
-def print_record(mode, verdict, a):
-    """The last line a later run reads back from this job's log (judged())."""
-    record = {"mode": mode, "verdict": verdict if mode else None, "run-id": a.run_id}
+def own_job_id(api, a):
+    """This aggregator job's id, so a later run can tell this record from any other line (review 75-M1)."""
+    try:
+        doc = api.get(f"/repos/{a.repo}/actions/runs/{a.run_id}/jobs")
+    except ApiError:
+        return None
+    jobs = doc if isinstance(doc, list) else (doc.get("jobs") if isinstance(doc, dict) else None)
+    hits = [j for j in jobs or [] if isinstance(j, dict) and j.get("name") == a.aggregator]
+    return str(hits[0].get("id")) if len(hits) == 1 else None
+
+
+def print_record(mode, verdict, a, job_id=None):
+    """The line a later run reads back from this job's log (judged()): the first one, at the start of a line,
+    naming this run and this job. Without the job id, it is never reproduced."""
+    record = {"mode": mode, "verdict": verdict if mode else None, "run-id": a.run_id, "job-id": job_id}
     print(f"{RECORD} {json.dumps(record, separators=(',', ':'))}")
 
 
@@ -458,9 +547,10 @@ def cmd_verdict(a):
         print_record(None, None, a)
         emit({"verdict": "failure", "notify": "false", "reason": message}, a.output)
         return 1
-    ok, message, notify, judged_mode = decide(needs, a.state_job, a, Api(a.api, a.token))
+    api = Api(a.api, a.token)
+    ok, message, notify, judged_mode = decide(needs, a.state_job, a, api)
     notice("notice" if ok else "error", "pr-validate", message)
-    print_record(judged_mode, "success" if ok else "failure", a)
+    print_record(judged_mode, "success" if ok else "failure", a, own_job_id(api, a) if judged_mode else None)
     emit({"verdict": "success" if ok else "failure", "notify": str(notify).lower(), "reason": message}, a.output)
     return 0 if ok else 1
 
@@ -476,7 +566,7 @@ def cmd_classify(a):
     except (OSError, ValueError):
         print("cannot read the pull request", file=sys.stderr)
         return 2
-    c = classify(pr, a.wip_labels, a.train_label)
+    c = classify(pr, a.wip_labels, a.train_label, a.blocked_labels)
     for key in ("mode", "wip", "wip-reason", "train", "train-top", "blocked"):
         value = c[key]
         print(f"{key}={str(value).lower() if isinstance(value, bool) else value}")
@@ -502,6 +592,7 @@ def main(argv):
     p.add_argument("--state-job", default=env("GATE_STATE_JOB", "") or "pr-state")
     p.add_argument("--aggregator", default=env("GATE_AGGREGATOR", "") or "pr-validate")
     p.add_argument("--wip-labels", default=env("GATE_WIP_LABELS", "") or DEFAULT_WIP_LABELS)
+    p.add_argument("--blocked-labels", default=env("GATE_BLOCKED_LABELS", "") or DEFAULT_BLOCKED_LABELS)
     p.add_argument("--train-label", default=env("GATE_TRAIN_LABEL", "") or DEFAULT_TRAIN_LABEL)
     p.add_argument("--output", default=env("GITHUB_OUTPUT", ""))
     a = p.parse_args(argv)

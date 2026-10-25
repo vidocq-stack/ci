@@ -128,6 +128,12 @@ check "but never by default" "1" "$(train check Vidocq/demo 13 11 12)"
 
 forge reset; forge pr 13 'title="WIP: three"'
 check "a WIP top: refused" "1" "$(train check Vidocq/demo 13 11 12)"
+forge reset; forge pr 13 'title="three (WIP)"'
+check "a top with wip anywhere in its title: refused" "1" "$(train check Vidocq/demo 13 11 12)"
+forge reset; forge pr 13 'labels=[{"name": "status/blocked"}]'
+check "a top with a label containing blocked: refused" "1" "$(train check Vidocq/demo 13 11 12)"
+forge reset; forge pr 12 'labels=[{"name": "train-member"}, {"name": "wip-later"}]'
+check "a member with a label containing wip: refused" "1" "$(train check Vidocq/demo 13 11 12)"
 forge reset; forge pr 13 'labels=[{"name": "train-member"}]'
 check "a top that is itself a member: refused" "1" "$(train check Vidocq/demo 13 11 12)"
 
