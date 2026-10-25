@@ -15,9 +15,10 @@ whose src/ names the artifactId of one of those non-pom modules as text (main so
 dependents; test sources only: with the modules using its test classes), are affected. Documentation outside every module (*.md, *.adoc, docs/, LICENSE*, NOTICE*) is
 ignored; inside a module directory it belongs to that module (it may be packaged or tested).
 
-With --build-effective-pom, the analysis model (--effective-pom) may add profiles such as -Ptck,
-so that what those profiles use counts, and only the modules of the build's own reactor are
-ever put in the skip list.
+With --build-effective-pom, the analysis model (--effective-pom) may add profiles such as -Ptck:
+the references of both models are combined (what -Ptck uses counts, and so does an
+activeByDefault profile that -Ptck turns off), and only the modules of the build's own reactor
+are ever put in the skip list. --keep-modules (ci.tck.modules) are never skipped.
 
 The report has the same shape as affected-modules.py's: "decision" is "targeted" (with "skip",
 the unaffected non-pom modules), "all" (nothing to skip) or "full" with a "reason": an empty
@@ -48,12 +49,34 @@ def is_doc(path):
             or name.startswith(('LICENSE', 'NOTICE')))
 
 
-def analyse(eff, repo, changed, build_eff=None):
+def combine(mods, build):
+    """The references of both models: a module of the build model gets the -Ptck model's
+    references added to its own (an activeByDefault profile that -Ptck turns off still counts),
+    and a module only in one model is analysed as that model has it."""
+    out = dict(build)
+    for ga, m in mods.items():
+        if ga not in out:
+            out[ga] = m
+            continue
+        b = out[ga]
+        b.refs = b.refs + m.refs
+        b.imports = sorted(set(b.imports) | set(m.imports))
+        b.nested_refs = b.nested_refs + m.nested_refs
+        b.doubts = b.doubts + [d for d in m.doubts if d not in b.doubts]
+    return out
+
+
+def analyse(eff, repo, changed, build_eff=None, keep=()):
     if not changed:
         raise Fallback('the changed-file list is empty')
     repo = os.path.realpath(repo)
     mods = pommodel.load_reactor(eff)
-    built = set(pommodel.load_reactor(build_eff)) if build_eff else set(mods)
+    if build_eff:
+        build = pommodel.load_reactor(build_eff)
+        built = set(build)
+        mods = combine(mods, build)
+    else:
+        built = set(mods)
     rel, by_dir = {}, {}
     for ga, m in mods.items():
         r = os.path.relpath(os.path.realpath(m.basedir), repo)
@@ -102,8 +125,11 @@ def analyse(eff, repo, changed, build_eff=None):
         if not grew:
             break
     # Only modules the build itself runs (the default reactor) are ever edited.
+    # The declared TCK runners (ci.tck.modules) are never skipped either: their TCK must run even
+    # if a later step forgot the restore.
+    keep = {os.path.normpath(k) for k in keep}
     skip = sorted(rel[ga] for ga, m in mods.items()
-                  if ga not in affected and m.packaging != 'pom' and ga in built)
+                  if ga not in affected and m.packaging != 'pom' and ga in built and rel[ga] not in keep)
     return {
         'decision': 'targeted' if skip else 'all',
         'changed': {rel[ga]: why for ga, why in sorted(seeds.items())},
@@ -118,6 +144,7 @@ def main(argv):
     ap.add_argument('--effective-pom', required=True)
     ap.add_argument('--repo', required=True)
     ap.add_argument('--changed-files', required=True)
+    ap.add_argument('--keep-modules', default='', help='comma-separated module paths never skipped (ci.tck.modules)')
     ap.add_argument('--build-effective-pom', help='effective POM of the build itself (default '
                     'profiles), when --effective-pom adds profiles (-Ptck): only its modules are skipped')
     ap.add_argument('--report', required=True)
@@ -125,7 +152,8 @@ def main(argv):
     try:
         with open(a.changed_files, encoding='utf-8') as f:
             changed = [line.strip() for line in f if line.strip()]
-        report = analyse(a.effective_pom, a.repo, changed, a.build_effective_pom)
+        keep = [k.strip() for k in a.keep_modules.split(',') if k.strip()]
+        report = analyse(a.effective_pom, a.repo, changed, a.build_effective_pom, keep)
     except Fallback as e:
         report = {'decision': 'full', 'reason': str(e)}
     except pommodel.PomError as e:

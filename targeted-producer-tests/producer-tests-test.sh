@@ -39,7 +39,7 @@ G=io.vidocq.rt
 dep() { printf '<dependency><groupId>%s</groupId><artifactId>%s</artifactId><version>1</version>%s</dependency>' "$G" "$1" "${2:-}"; }
 apt() { printf '<plugin><artifactId>maven-compiler-plugin</artifactId><configuration><annotationProcessorPaths><path><groupId>%s</groupId><artifactId>%s</artifactId><version>1</version></path></annotationProcessorPaths></configuration></plugin>' "$G" "$1"; }
 plug() { printf '<plugin><groupId>%s</groupId><artifactId>%s</artifactId><version>1</version></plugin>' "$G" "$1"; }
-module() { # module <dir> <artifactId> <packaging> <parent|-> <deps> [plugins] [tck-only deps] [tck-only module: yes]
+module() { # module <dir> <artifactId> <packaging> <parent|-> <deps> [plugins] [tck-only deps] [yes: tck-only module | default: default-only module] [default-only deps]
   local dir="$ROOT/$1" parent=""
   [ "$1" = "." ] && dir="$ROOT"
   mkdir -p "$dir/src/main/java"
@@ -47,8 +47,8 @@ module() { # module <dir> <artifactId> <packaging> <parent|-> <deps> [plugins] [
   printf '<project><modelVersion>4.0.0</modelVersion>%s<groupId>%s</groupId><artifactId>%s</artifactId><version>1</version><packaging>%s</packaging>%s</project>\n' \
     "$parent" "$G" "$2" "$3" "$([ "$1" = . ] && echo '<properties><ci.tck.modules>tck-runner</ci.tck.modules></properties>')" > "$dir/pom.xml"
   local p='<project><modelVersion>4.0.0</modelVersion>%s<groupId>%s</groupId><artifactId>%s</artifactId><version>1</version><packaging>%s</packaging><dependencies>%s</dependencies><build><directory>%s/target</directory><plugins>%s</plugins></build></project>\n'
-  [ "${8:-}" = yes ] || printf "$p" "$parent" "$G" "$2" "$3" "$5" "$dir" "${6:-}" >> "$EFF.body"
-  printf "$p" "$parent" "$G" "$2" "$3" "$5${7:-}" "$dir" "${6:-}" >> "$EFF_TCK.body"
+  [ "${8:-}" = yes ] || printf "$p" "$parent" "$G" "$2" "$3" "$5${9:-}" "$dir" "${6:-}" >> "$EFF.body"
+  [ "${8:-}" = default ] || printf "$p" "$parent" "$G" "$2" "$3" "$5${7:-}" "$dir" "${6:-}" >> "$EFF_TCK.body"
 }
 fixture() {
   rm -rf "$ROOT" "$TMP/origin.git" "$EFF.body" "$EFF_TCK.body"; : > "$EFF.body"; : > "$EFF_TCK.body"
@@ -73,6 +73,8 @@ fixture() {
   module t-plain        t-plain       jar root "$(dep t-helper)"
   module tck-runner     tck-runner    jar root "" "" "$(dep codegen)"
   module tck-extra      tck-extra     jar root "$(dep core)" "" "" yes
+  module abd            abd           jar root "" "" "" "" "$(dep codegen)"
+  module abd-only       abd-only      jar root "" "" "" default "$(dep codegen)"
   module exts           exts          pom root ""
   module exts/ext-x     ext-x         jar exts ""
   { echo '<projects>'; cat "$EFF.body"; echo '</projects>'; } > "$EFF"
@@ -82,7 +84,7 @@ fixture() {
 PY="$HERE/changed-modules.py"
 analyse() { # analyse <changed paths, one per line> -> exit status; report in $TMP/report.json
   printf '%s\n' "$1" > "$TMP/changed.txt"
-  python3 "$PY" --effective-pom "${2:-$EFF_TCK}" --build-effective-pom "$EFF" --repo "$ROOT" \
+  python3 "$PY" --effective-pom "${2:-$EFF_TCK}" --build-effective-pom "$EFF" --repo "$ROOT" --keep-modules tck-runner \
     --changed-files "$TMP/changed.txt" --report "$TMP/report.json" > "$TMP/analysis.out" 2>&1
   echo $?
 }
@@ -107,10 +109,12 @@ check "test-source mention: reaches the users of its test-jar" "kept" "$(skipped
 check "test-source mention: not its plain users" "skip" "$(skipped t-plain)"
 check "profile tck: a runner using codegen only in that profile keeps its TCK" "kept" "$(skipped tck-runner)"
 check "profile-only modules are never in the skip list" "0" "$(field skip | tr ' ' '\n' | grep -c '^tck-extra$')"
+check "default and -Ptck models combined: a default-profile dependency the -Ptck model drops still counts" "kept" "$(skipped abd)"
+check "default and -Ptck models combined: a module only in the default model is analysed" "kept" "$(skipped abd-only)"
 
 analyse 'core/src/main/java/C.java' > /dev/null
-check "core change: everything depending on core and what names those" \
-  "agg-mention codegen exts/ext-x plugin-p t-helper t-plain t-user tck-runner tooling-user u-app" "$(field skip)"
+check "core change: everything depending on core and what names those; never a ci.tck.modules runner" \
+  "abd abd-only agg-mention codegen exts/ext-x plugin-p t-helper t-plain t-user tooling-user u-app" "$(field skip)"
 
 analyse 'exts/pom.xml' > /dev/null
 check "pom parent change: its children; naming the pom module itself does not count" "exts exts/ext-x" "$(field affected)"
@@ -188,10 +192,10 @@ same_poms() { diff -r -x .git "$TMP/rt-before" "$ROOT"; }
 fixture; forge 'ext-knock/src/main/java/A.java'
 check "targeted: exits 0" "0" "$(run)"
 check "targeted: the changed paths come from git" "ext-knock/src/main/java/A.java" "$(cat "$TMP/work/changed-files.txt")"
-check "targeted: the unaffected non-pom modules of the default reactor are edited" \
-  "agg-mention codegen core ext-other exts/ext-x plugin-p t-helper t-plain t-user tck-runner tooling-user u-app" "$(edited)"
-check "targeted: the outputs" "targeted|12" "$(out mode)|$(out skipped)"
-check "targeted: a notice" "1" "$(grep -c '^::notice title=Targeted producer tests::Vidocq/rt: targeted: tests skipped in 12 module(s) (still compiled)' "$TMP/run.out")"
+check "targeted: the unaffected non-pom modules of the default reactor are edited, never a TCK runner" \
+  "abd abd-only agg-mention codegen core ext-other exts/ext-x plugin-p t-helper t-plain t-user tooling-user u-app" "$(edited)"
+check "targeted: the outputs" "targeted|13" "$(out mode)|$(out skipped)"
+check "targeted: a notice" "1" "$(grep -c '^::notice title=Targeted producer tests::Vidocq/rt: targeted: tests skipped in 13 module(s) (still compiled)' "$TMP/run.out")"
 check "targeted: the summary lists the affected modules" "1" "$(grep -c '| `ext-knock` | owns ext-knock/src/main/java/A.java |' "$TMP/summary")"
 check "targeted: two effective POMs, the second with -Ptck (ci.tck.modules), never -DskipTests" "1|1|0" \
   "$(grep -c '^rt -B -ntp org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom -Doutput=' "$TMP/mvn-calls")|$(grep -c '^rt -B -ntp -Ptck org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom' "$TMP/mvn-calls")|$(grep -c -- '-DskipTests' "$TMP/mvn-calls")"

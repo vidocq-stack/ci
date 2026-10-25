@@ -158,6 +158,7 @@ fi
 
 rc=0
 python3 "$CHANGED_MODULES_PY" --effective-pom "$analysis" --build-effective-pom "$DIR/effective-pom.xml" \
+  --keep-modules "$tck" \
   --repo "$REPO" --changed-files "$DIR/changed-files.txt" --report "$DIR/report.json" || rc=$?
 [ "$rc" -eq 0 ] || fallback "the analysis failed (exit $rc)"
 
