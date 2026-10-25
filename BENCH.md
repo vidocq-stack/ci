@@ -39,14 +39,29 @@ raw results, delta against the previous run.
 
 - **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
 - **Source**: vidocq `ee782c0` (origin/main).
-- **Setup**: the PR version was set as in vidocq's `pr.yml` (`versions:set 0.4.0-PR0.prod` plus the plugin.xml
-  sync). Then `targeted-producer-tests/producer-tests.sh` ran with `MODE=targeted` and a one-line
-  `pr-changed-files.txt`, followed by `mvn -B -ntp install` through `verify-mvn.sh` (isolated repository, warm).
-- **Network.** The same slow central-snapshots resolution as in the entry below: the full install took 579 s here,
-  against about 222 s at a quiet hour.
+- **Setup** (after the review fixes of Vidocq/ci#59), for each case:
+  1. one pull-request commit changing the file, on a `pr` branch;
+  2. the PR version set as in `pr.yml` (`versions:set 0.4.0-PR0.prod` plus the plugin.xml sync);
+  3. `producer-tests.sh` with `MODE=targeted` (changed paths from git, against `main`; `-Ptck` model read,
+     since vidocq declares `ci.tck.modules`);
+  4. `mvn -B -ntp install` through `verify-mvn.sh` (isolated repository, warm);
+  5. `MODE=restore`, then `MODE=guard`. Every pom was checked byte for byte against its state before step 3.
+- **Network**: the same slow central-snapshots resolution as in the entries below. The full install took 609 s.
 
-| Change | Non-pom modules keeping their tests | Analysis | Install | Full install | Tests run (targeted / full) |
-|---|---:|---:|---:|---:|---:|
+| Change | Non-pom modules keeping their tests | Analysis | Install | Full install | Tests run (targeted / full) | Restore / guard |
+|---|---:|---:|---:|---:|---:|---|
+| knock-health-extension (main source) | 67 / 77 | 4 s | 611 s (≈ full) | 609 s | 2 985 / 3 246 | ok / ok, poms identical |
+| vidocq-runtime-core (main source) | 69 / 77 | 5 s | 621 s (≈ full) | 609 s | 3 092 / 3 246 | ok / ok, poms identical |
+| petstore example (main source) | 1 / 77 | 5 s | 86 s (−86 %) | 609 s | 1 / 3 246 | ok / ok, poms identical |
+
+- **Why knock-extension no longer gains (it gave −78 % before the fixes).**
+  - `vidocq-runtime-tooling`'s `META-INF/vidocq/extension-catalog.properties` (a main resource) names every
+    extension artifact.
+  - Since the review, a mention in main sources or resources propagates. So tooling is a seed, then
+    `vidocq-runtime-maven-plugin` (which depends on tooling), then every example and extension.
+  - Any extension change on vidocq therefore keeps nearly every test.
+
+---|---:|---:|---:|---:|---:|
 | knock-health-extension (main source) | 7 / 77 | 3 s | 124 s (−78 %) | 579 s | 852 / 3 246 |
 | vidocq-runtime-core (main source) | 71 / 77 | 3 s | 571 s (≈ full) | 579 s | 3 116 / 3 246 |
 | petstore example (main source) | 1 / 77 | 3 s | 87 s (−85 %) | 579 s | 1 / 3 246 |
