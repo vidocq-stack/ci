@@ -140,6 +140,22 @@ forge pending '{"POST '"$R"'/pulls/7/merge": {"status": 405, "body": {"message":
 check "the forge refuses the schedule: refused, with its answer" "1 " "$(run)"
 contains "and its answer" "HTTP 405" "$(cat "$TMP/out")"
 
+# The forge is still checking the head the bot has just pushed: it answers 405 "Please try again later"
+# (vidocq#373, 2026-10-25). The bot asks again instead of giving up.
+CHECKING='{"status": 405, "body": {"message": "Please try again later"}}'
+forge pending "{\"POST $R/pulls/7/merge\": $CHECKING, \"_on POST $R/pulls/7/merge\": {\"POST $R/pulls/7/merge\": {\"status\": 201, \"body\": {}}}}"
+check "the forge still checks the pushed head (405 Please try again later): asked again, then scheduled" "0 scheduled" "$(run)"
+check "two schedule requests" "2" "$(grep -c '^POST ' "$TMP/calls.log")"
+forge success "{\"POST $R/pulls/7/merge\": $CHECKING, \"_on POST $R/pulls/7/merge\": {\"POST $R/pulls/7/merge\": {\"status\": 200, \"body\": {}}}}"
+check "the same before a direct merge: asked again, then merged" "0 merged" "$(run)"
+forge pending "{\"POST $R/pulls/7/merge\": $CHECKING}"
+: > "$TMP/calls.log"
+python3 "$SCRIPT" --api "http://127.0.0.1:$(cat "$TMP/port")/api/v1" --token t --repo Vidocq/demo --pr 7 \
+  --head "$HEAD" --branch main --retry-pause 0.05 --patience 0.3 > "$TMP/out" 2>&1
+check "still checking once the patience is spent: refused" "1" "$?"
+contains "with the forge's answer" "Please try again later" "$(cat "$TMP/out")"
+contains "and what to do" "re-run /merge" "$(cat "$TMP/out")"
+
 # 81-I1: a repository whose pr.yml does not run the gate in state mode never gets a schedule (nothing would
 # cancel it on a push, WIP, blocked or train member): green merges now, pending is refused.
 forge pending "$(workflow "$OLD_YML")"

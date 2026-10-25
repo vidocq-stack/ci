@@ -2,6 +2,7 @@
 """Hand a pull request's fast-forward merge to the forge instead of waiting for its checks in the job.
 
 Usage: schedule.py --api URL --token T --repo OWNER/NAME --pr N --head SHA --branch BASE [--retry-pause S]
+                   [--patience S]
 
 The merge-bot used to poll the required checks for up to an hour, one runner held per /merge. Seventeen
 /merge comments at once held 14 of the organisation's 20 slots and starved the very checks they waited for
@@ -20,6 +21,9 @@ The merge-bot used to poll the required checks for up to an hour, one runner hel
     and refused (81-I2).
 
 --gate only prints "gate=true" or "gate=false".
+
+Right after the bot's push the forge may still be checking the new head: it answers 405 "Please try again
+later", and the bot asks again for up to --patience seconds (vidocq#373).
 
 Forgejo's scheduled merge does NOT pin the head (head_commit_id only applies to an immediate merge): the
 pr-validate gate cancels a schedule on a push that the merge-bot did not announce, and on a pull request
@@ -104,16 +108,29 @@ def gate_present(forge, branch):
     return False
 
 
-def merge_now(forge, pr, head, pause):
+def post_merge(forge, pr, body, pause, patience):
+    """POST the merge. Right after the bot's push the forge is still checking the new head and answers 405
+    "Please try again later" (vidocq#373, 2026-10-25): ask again, for up to `patience` seconds."""
+    deadline = time.monotonic() + patience
+    while True:
+        status, doc = forge.call("POST", f"/pulls/{pr}/merge", body)
+        checking = status == 405 and "try again later" in json.dumps(doc).lower()
+        if not checking or time.monotonic() >= deadline:
+            return status, doc
+        time.sleep(pause)
+
+
+def merge_now(forge, pr, head, pause, patience):
     body = {"Do": "fast-forward-only", "head_commit_id": head, "delete_branch_after_merge": True}
     for _ in range(3):
-        status, doc = forge.call("POST", f"/pulls/{pr}/merge", body)
+        status, doc = post_merge(forge, pr, body, pause, patience)
         if status in (200, 201, 204):
             return
         if status != 405:
             break
         time.sleep(pause)   # the forge may still be settling the statuses
-    raise Refused(f"the fast-forward of {head[:10]} was refused: HTTP {status} {json.dumps(doc)[:200]}")
+    raise Refused(f"the fast-forward of {head[:10]} was refused: HTTP {status} {json.dumps(doc)[:200]}; "
+                  "re-run /merge")
 
 
 def run(a):
@@ -125,20 +142,21 @@ def run(a):
     if verdict.startswith("failure"):
         raise Refused(f"a required check failed on {a.head[:10]} ({verdict}): fix it, then /merge again")
     if verdict == "success":
-        merge_now(forge, a.pr, a.head, a.retry_pause)
+        merge_now(forge, a.pr, a.head, a.retry_pause, a.patience)
         return "merged"
     if not gate_present(forge, a.branch):
         raise Refused("checks still running; re-run /merge when pr-validate is green")
 
-    status, doc = forge.call("POST", f"/pulls/{a.pr}/merge", {
+    status, doc = post_merge(forge, a.pr, {
         "Do": "fast-forward-only", "head_commit_id": a.head, "delete_branch_after_merge": True,
-        "merge_when_checks_succeed": True})
+        "merge_when_checks_succeed": True}, a.retry_pause, a.patience)
     if status == 409:
         raise Refused("a merge is already scheduled for this pull request and could not be replaced")
     if status == 200:
         return "merged"
     if status != 201:
-        raise Refused(f"the forge refused to schedule the merge: HTTP {status} {json.dumps(doc)[:200]}")
+        raise Refused(f"the forge refused to schedule the merge: HTTP {status} {json.dumps(doc)[:200]}; "
+                      "re-run /merge")
 
     # A push that landed between the bot's push and the schedule ran its pr-state before the schedule existed:
     # nothing would cancel it later.
@@ -152,7 +170,7 @@ def run(a):
         if forge.get(f"/pulls/{a.pr}").get("merged"):
             return "merged"
         forge.call("DELETE", f"/pulls/{a.pr}/merge")
-        merge_now(forge, a.pr, a.head, a.retry_pause)
+        merge_now(forge, a.pr, a.head, a.retry_pause, a.patience)
         return "merged"
     return "scheduled"
 
@@ -162,6 +180,8 @@ def main(argv):
     for name in ("--api", "--token", "--repo", "--pr", "--head", "--branch"):
         p.add_argument(name, required=True)
     p.add_argument("--retry-pause", type=float, default=3.0)
+    p.add_argument("--patience", type=float, default=90.0,
+                   help="seconds to keep asking while the forge checks the pushed head (405 Please try again later)")
     p.add_argument("--gate", action="store_true", help="only print whether the base branch runs the gate")
     a = p.parse_args(argv)
     if a.gate:

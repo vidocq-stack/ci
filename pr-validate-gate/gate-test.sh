@@ -348,7 +348,8 @@ check "outside a pull request: full validation" "ready true" "$(out mode) $(out 
 # -------------------------------------------------------------------------------------------- verdict
 # ------------------------------------------------------------------- scheduled merges (merge-bot)
 # With a token, the state job cancels Forgejo's scheduled merge (which does not pin the head) when the pull
-# request is not ready, and on a push the merge-bot did not announce in a comment of its own.
+# request is not ready, and on a push that the account which scheduled the merge did not announce in a comment of
+# its own.
 R=/repos/Vidocq/demo
 announce() { # announce <login> <head>: a merge-bot comment announcing the head it schedules
   python3 -c '
@@ -362,8 +363,22 @@ r["/repos/Vidocq/demo/issues/7/comments"] = c
 json.dump(r, open(p, "w"))' "$TMP/routes.json" "$1" "$2"
 }
 cancel_routes() {
-  forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+  # Like VIDOCQ_BOT_TOKEN on Codefloe, the token has no read:user scope: GET /user answers 403. The gate
+  # read the bot's login there, so every push the bot made cancelled its own schedule (vauban#222, 2026-10-25).
+  forge raw-route "/user" '{"status": 403, "body": {"message": "token does not have at least one of required scope(s): [read:user]"}}'
   forge raw-route "DELETE $R/pulls/7/merge" '{"status": 204, "body": {}}'
+  forge raw-route "$R/issues/7/comments" '[]'
+  forge raw-route "$R/issues/7/timeline" '[]'
+}
+timeline() { # timeline <type> <login>: an event appended to the pull request's timeline (oldest first)
+  python3 -c '
+import json, sys
+p, kind, login = sys.argv[1:4]
+r = json.load(open(p))
+t = r.get("/repos/Vidocq/demo/issues/7/timeline", [])
+t.append({"id": 900 + len(t), "type": kind, "user": {"login": login}, "created_at": "2026-10-25T19:43:%02dZ" % len(t)})
+r["/repos/Vidocq/demo/issues/7/timeline"] = t
+json.dump(r, open(p, "w"))' "$TMP/routes.json" "$1" "$2"
 }
 state_tok() { # state with the bot token
   : > "$TMP/out"; : > "$TMP/calls.log"
@@ -387,28 +402,49 @@ check "a train member: cancelled" "1" "$(deleted)"
 forge reset; forge pr "faster parser" ""; cancel_routes
 state_tok edited
 check "a ready pull request edited: nothing cancelled" "0" "$(deleted)"
-forge reset; forge pr "faster parser" ""; cancel_routes; announce vidocq-ci-bot "$HEAD"
+# On a push, the gate keeps a schedule only when the account that scheduled it (the timeline's latest
+# pull_scheduled_merge) announced that very head in a comment of its own.
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot; announce vidocq-ci-bot "$HEAD"
 state_tok synchronized
 check "a push the merge-bot announced: nothing cancelled" "0" "$(deleted)"
-forge reset; forge pr "faster parser" ""; cancel_routes; announce vidocq-ci-bot "$HEAD"; announce vidocq-ci-bot 3333333333333333333333333333333333333333
+check "and the token's account is never asked for (no read:user scope)" "0" "$(grep -c '^GET /user' "$TMP/calls.log")"
+check "the state job succeeds" "0" "$(out rc)"
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot; announce vidocq-ci-bot "$HEAD"; announce vidocq-ci-bot 3333333333333333333333333333333333333333
 state_tok synchronized
 check "a push of another head than the last announced one: cancelled" "1" "$(deleted)"
-forge reset; forge pr "faster parser" ""; cancel_routes
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot
 state_tok synchronized
 check "a push nobody announced: cancelled" "1" "$(deleted)"
-forge reset; forge pr "faster parser" ""; cancel_routes; announce someone-else "$HEAD"
+contains "and says so" "did not announce" "$(cat "$TMP/stdout")"
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot; announce someone-else "$HEAD"
 state_tok synchronized
-check "an announcement by anyone but the bot does not count: cancelled" "1" "$(deleted)"
+check "an announcement by another account than the one that scheduled the merge does not count: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; announce vidocq-ci-bot "$HEAD"
+state_tok synchronized
+check "a push with no scheduled merge: nothing to cancel" "0" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot; timeline pull_cancel_scheduled_merge vidocq-ci-bot
+state_tok synchronized
+check "a scheduled merge already cancelled: nothing to cancel" "0" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge vidocq-ci-bot; timeline pull_cancel_scheduled_merge vidocq-ci-bot; timeline pull_scheduled_merge vidocq-ci-bot
+state_tok synchronized
+check "scheduled again after a cancellation, push not announced: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; forge raw-route "$R/issues/7/timeline" '{"status": 403, "body": {"message": "forbidden"}}'
+state_tok synchronized
+check "the timeline cannot be read: cancelled (fail closed)" "1" "$(deleted)"
+contains "and says why" "cannot be read" "$(cat "$TMP/stdout")"
+forge reset; forge pr "faster parser" ""; cancel_routes; timeline pull_scheduled_merge ""; announce vidocq-ci-bot "$HEAD"
+state_tok synchronized
+check "a scheduled merge whose account is unknown: cancelled (fail closed)" "1" "$(deleted)"
 forge reset; forge pr "faster parser" "WIP"; cancel_routes
 : > "$TMP/calls.log"
 state labeled
 check "without a token nothing is written" "0" "$(grep -vc '^GET ' "$TMP/calls.log")"
-forge reset; forge pr "faster parser" "WIP"; forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+forge reset; forge pr "faster parser" "WIP"; cancel_routes
 forge raw-route "DELETE $R/pulls/7/merge" '{"status": 500, "body": {}}'
 state_tok labeled
 check "a needed cancellation that fails FAILS the state job (pr-validate fails, so the forge cannot merge) (81-I2)" "1" "$(out rc)"
 contains "and says so" "could not cancel" "$(cat "$TMP/stdout")"
-forge reset; forge pr "faster parser" "WIP"; forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+forge reset; forge pr "faster parser" "WIP"; cancel_routes
 forge raw-route "DELETE $R/pulls/7/merge" '{"status": 404, "body": {}}'
 state_tok labeled
 check "nothing scheduled (404): the state job succeeds" "0" "$(out rc)"
