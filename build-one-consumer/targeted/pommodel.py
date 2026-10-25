@@ -78,6 +78,7 @@ class Module:
         self.packaging = 'jar'
         self.basedir = ''
         self.parent = None            # GA of the parent, or None
+        self.parent_version = None
         self.properties = {}
         self.refs = []                # [Ref] from the effective model
         self.config_text = []         # text of plugin configurations ("g:a" strings)
@@ -89,6 +90,7 @@ class Module:
         self.doubts = []              # reasons to treat the module as affected (unreadable or
                                       # unresolvable nested coordinates, ...)
         self.imports = []             # GA of BOM imports in the raw pom (dependencyManagement)
+        self.import_versions = {}     # GA -> version of those imports (None: unresolved)
 
     @property
     def ga(self):
@@ -169,6 +171,7 @@ def _parse_project(p):
         raise PomError('a project of the effective POM has no groupId or artifactId')
     if parent is not None:
         m.parent = f"{text(parent, 'groupId')}:{text(parent, 'artifactId')}"
+        m.parent_version = text(parent, 'version') or None
     props = child(p, 'properties')
     for prop in (list(props) if props is not None else []):
         if isinstance(strip(prop.tag), str):
@@ -278,6 +281,7 @@ def scan_raw_imports(m):
             raise PomError(f'{path}: cannot resolve the BOM import '
                            f"{text(d, 'groupId')}:{text(d, 'artifactId')}")
         m.imports.append(f'{g}:{a}')
+        m.import_versions[f'{g}:{a}'] = m.interpolate(text(d, 'version'))
 
 
 def load_reactor(path):
@@ -376,3 +380,101 @@ def read_dependency_list(path):
             if len(parts) >= 4 and parts[0] and parts[1]:
                 out.add(f'{parts[0]}:{parts[1]}')
     return out
+
+
+class ExternalChains:
+    """Parent chains and BOM import chains that leave the reactor. The effective POM merges
+    what they contribute, but not which poms they went through: a producer pom can sit among
+    the ancestors of an external parent, or be imported by an external BOM. Their poms are in
+    the local repository once Maven has built the effective POM. A pom that cannot be read, or an
+    import version that cannot be resolved, is a doubt."""
+
+    def __init__(self, local_repo, changed):
+        self.local_repo = local_repo
+        self.changed = changed
+        self._poms = {}
+        self._props = {}
+
+    def pom(self, g, a, v):
+        """{'parent': (g, a, v) | None, 'props': {...}, 'imports': [(g, a, raw version)]}, or
+        None when the pom is not in the local repository or does not parse."""
+        key = (g, a, v)
+        if key not in self._poms:
+            path = os.path.join(self.local_repo, *g.split('.'), a, v, f'{a}-{v}.pom')
+            try:
+                p = ET.parse(path).getroot()
+            except (ET.ParseError, OSError):
+                self._poms[key] = None
+                return None
+            parent = child(p, 'parent')
+            props_el = child(p, 'properties')
+            dm = child(child(p, 'dependencyManagement'), 'dependencies')
+            self._poms[key] = {
+                'parent': ((text(parent, 'groupId'), text(parent, 'artifactId'), text(parent, 'version'))
+                           if parent is not None else None),
+                'props': {strip(c.tag): (c.text or '').strip()
+                          for c in (list(props_el) if props_el is not None else []) if isinstance(strip(c.tag), str)},
+                'imports': [(text(d, 'groupId'), text(d, 'artifactId'), text(d, 'version'))
+                            for d in children(dm, 'dependency') if text(d, 'scope') == 'import'],
+            }
+        return self._poms[key]
+
+    def props(self, g, a, v):
+        """The properties a pom sees: its parent chain's, then its own, then project.*."""
+        key = (g, a, v)
+        if key not in self._props:
+            self._props[key] = {}             # cycle guard
+            node = self.pom(g, a, v)
+            out = {}
+            if node and node['parent']:
+                out.update(self.props(*node['parent']))
+            if node:
+                out.update(node['props'])
+            out.update({'project.groupId': g, 'project.artifactId': a, 'project.version': v,
+                        'groupId': g, 'version': v})
+            if node and node['parent']:
+                out['project.parent.version'] = node['parent'][2]
+            self._props[key] = out
+        return self._props[key]
+
+    def walk(self, kind, g, a, v):
+        """Reasons the chain that starts at g:a:v makes a module affected (empty: none)."""
+        reasons, seen = [], set()
+
+        def label(path):
+            return f'{kind} chain ' + ' > '.join(':'.join(x) for x in path)
+
+        def visit(node_gav, path):
+            if node_gav in seen:
+                return
+            seen.add(node_gav)
+            path = path + [node_gav]
+            if f'{node_gav[0]}:{node_gav[1]}' in self.changed:
+                reasons.append(f'{label(path)} reaches the producer')
+                return
+            if TOKEN.search(':'.join(node_gav)) or not all(node_gav):
+                reasons.append(f'{label(path)}: {":".join(node_gav)} cannot be resolved (doubt)')
+                return
+            node = self.pom(*node_gav)
+            if node is None:
+                reasons.append(f'{label(path)}: {":".join(node_gav)} cannot be read (doubt)')
+                return
+            if node['parent']:
+                visit(node['parent'], path)
+            props = self.props(*node_gav)
+            for ig, ia, iv in node['imports']:
+                rg, ra, rv = (_interpolate(x, props) for x in (ig, ia, iv))
+                if not rg or not ra or not rv:
+                    reasons.append(f'{label(path)} names import {ig}:{ia}:{iv}, which cannot be resolved (doubt)')
+                    continue
+                visit((rg, ra, rv), path)
+
+        visit((g, a, v or ''), [])
+        return reasons
+
+
+def _interpolate(value, props):
+    if not value:
+        return None
+    out = TOKEN.sub(lambda mt: props.get(mt.group(1) or mt.group(2), mt.group(0)), value)
+    return None if TOKEN.search(out) else out

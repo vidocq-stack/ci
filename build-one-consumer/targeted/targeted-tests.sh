@@ -174,10 +174,22 @@ if [ ! -s "$DIR/effective-pom.xml" ]; then
   fallback "Maven wrote no effective POM of the consumer"
 fi
 
+# The local repository holds the poms of the external parent and BOM import chains that the
+# effective POM went through; without it, an external io.vidocq chain is a doubt.
+chain_args=()
+# shellcheck disable=SC2086
+if local_repo=$(mvn $MVN_ARGS -N -q "$HELP_PLUGIN:evaluate" -Dexpression=settings.localRepository \
+     -DforceStdout </dev/null 2>/dev/null) && [ -n "$local_repo" ] && [ -d "$local_repo" ]; then
+  echo "Local repository: $local_repo"
+  chain_args=(--local-repo "$local_repo")
+else
+  echo "Local repository unknown: external io.vidocq parent and BOM chains count as doubts"
+fi
+
 analyse() {
   python3 "$HERE/affected-modules.py" --effective-pom "$DIR/effective-pom.xml" --repo "$REPO" \
     --producer-artifacts "$PRODUCER_ARTIFACTS" --synthetic "$DIR/synthetic" \
-    --report "$DIR/report.json" ${graph_args[@]+"${graph_args[@]}"} "$@"
+    --report "$DIR/report.json" ${graph_args[@]+"${graph_args[@]}"} ${chain_args[@]+"${chain_args[@]}"} "$@"
 }
 rc=0
 analyse || rc=$?

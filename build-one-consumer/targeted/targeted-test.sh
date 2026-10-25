@@ -36,7 +36,11 @@ dep() { # dep <g:a> <version> [scope] [extra xml]
 module() { # module <dir> <artifactId> <packaging> <parent artifactId|-> <deps xml> <plugins xml> [raw extra] [eff extra]
   local dir="$ROOT/$1" parent=""
   mkdir -p "$dir"
-  [ "$4" != "-" ] && parent="<parent><groupId>$G</groupId><artifactId>$4</artifactId><version>0.4.0-PR1.x</version></parent>"
+  case "$4" in
+    -) ;;
+    *:*:*) parent="<parent><groupId>${4%%:*}</groupId><artifactId>$(echo "$4" | cut -d: -f2)</artifactId><version>${4##*:}</version></parent>" ;;
+    *) parent="<parent><groupId>$G</groupId><artifactId>$4</artifactId><version>0.4.0-PR1.x</version></parent>" ;;
+  esac
   cat > "$dir/pom.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">
@@ -301,6 +305,9 @@ for a in "\$@"; do
     *:effective-pom)
       [ "\${MVN_FAIL:-}" = effective-pom ] && exit 1
       for b in "\$@"; do case "\$b" in -Doutput=*) cp "\$EFF_FIXTURE" "\${b#-Doutput=}" ;; esac; done ;;
+    *:evaluate)
+      [ "\${MVN_FAIL:-}" = evaluate ] && exit 1
+      printf '%s' "\${STUB_LOCAL_REPO:-}"; exit 0 ;;
     *:list)
       [ "\${MVN_FAIL:-}" = list ] && exit 1
       python3 - "\$PWD" "$TMP/closures.txt" <<'PY'
@@ -518,6 +525,78 @@ check "notice: a fallback is annotated with its reason" "1" \
 build_fixture
 run_targeted MVN_ARGS='-B -T 4' > /dev/null
 check "targeted: a -T of the build's Maven args is kept as it is" "1" "$(grep -c '^synthetic -B -T 4 -f ' "$TMP/mvn-calls")"
+
+# --- External parent chains and BOM chains (review M4) ----------------------------------------
+M2="$TMP/m2"
+repo_pom() { # repo_pom <g:a:v> <parent g:a:v|-> [properties xml] [import g:a:v...]: a pom of the local repository
+  local g="${1%%:*}" a v rest d parent="" imports=""
+  a=$(echo "$1" | cut -d: -f2); v="${1##*:}"
+  d="$M2/$(echo "$g" | tr . /)/$a/$v"
+  mkdir -p "$d"
+  if [ "$2" != - ]; then
+    parent="<parent><groupId>${2%%:*}</groupId><artifactId>$(echo "$2" | cut -d: -f2)</artifactId><version>${2##*:}</version></parent>"
+  fi
+  local props="${3:-}"; shift 2; [ $# -gt 0 ] && shift
+  for i in "$@"; do
+    imports+="<dependency><groupId>${i%%:*}</groupId><artifactId>$(echo "$i" | cut -d: -f2)</artifactId><version>$(echo "$i" | cut -d: -f3-)</version><type>pom</type><scope>import</scope></dependency>"
+  done
+  printf '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>%s<groupId>%s</groupId><artifactId>%s</artifactId><version>%s</version><packaging>pom</packaging><properties>%s</properties><dependencyManagement><dependencies>%s</dependencies></dependencyManagement></project>\n' \
+    "$parent" "$g" "$a" "$v" "$props" "$imports" > "$d/$a-$v.pom"
+}
+import_xml() { printf '<dependencyManagement><dependencies><dependency><groupId>%s</groupId><artifactId>%s</artifactId><version>%s</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>' "${1%%:*}" "$(echo "$1" | cut -d: -f2)" "$(echo "$1" | cut -d: -f3-)"; }
+rm -rf "$M2"
+repo_pom org.apache:apache:30 -
+repo_pom io.vidocq.knock:knock-parent:1 org.apache:apache:30
+repo_pom io.vidocq.mid:mid-parent:1 io.vidocq.knock:knock-parent:1
+repo_pom io.vidocq:vidocq-parent:1 org.apache:apache:30
+repo_pom org.junit:junit-bom:5 -
+repo_pom io.vidocq:vidocq-bom:1 - "" org.junit:junit-bom:5
+repo_pom io.vidocq:vidocq-bom:1.0 - "" org.junit:junit-bom:5
+repo_pom io.vidocq.mid:mid-bom:1 - "<knock.v>1</knock.v>" 'io.vidocq.knock:knock-parent:${knock.v}'
+repo_pom io.vidocq.mid:mid-bom2:1 - "" 'io.vidocq.x:x-bom:${nope}'
+repo_pom io.vidocq:vp2:1 - "" io.vidocq.mid:mid-bom:1
+repo_pom io.vidocq:vp3:2 org.apache:apache:30 "<b.v>1</b.v>"
+repo_pom io.vidocq:vp3-child:2 io.vidocq:vp3:2 "" 'io.vidocq:vidocq-bom:${b.v}'
+chain_fixture() {
+  build_fixture
+  add_module chain-producer acme-chain-producer jar io.vidocq.mid:mid-parent:1 "" ""
+  add_module chain-clean acme-chain-clean jar io.vidocq:vidocq-parent:1 "" ""
+  add_module chain-missing acme-chain-missing jar io.vidocq.gone:gone-parent:1 "" ""
+  add_module chain-third acme-chain-third jar org.apache:apache:30 "" ""
+  add_module bom-chain acme-bom-chain jar acme-parent "" "" "$(import_xml io.vidocq.mid:mid-bom:1)"
+  add_module bom-clean acme-bom-clean jar acme-parent "" "" "$(import_xml 'io.vidocq:vidocq-bom:${peano.version}')"
+  add_module bom-unresolved acme-bom-unresolved jar acme-parent "" "" "$(import_xml io.vidocq.mid:mid-bom2:1)"
+  add_module chain-import acme-chain-import jar io.vidocq:vp2:1 "" ""
+  add_module chain-inherited-prop acme-chain-inherited-prop jar io.vidocq:vp3-child:2 "" ""
+}
+chain_fixture
+analyse --local-repo "$M2" > /dev/null; resolve_synth; analyse --local-repo "$M2" --closures > /dev/null
+check "chains: still targeted" "targeted" "$(field decision)"
+check "chains: a producer pom among the ancestors of an external parent" \
+  "parent chain io.vidocq.mid:mid-parent:1 > io.vidocq.knock:knock-parent:1 reaches the producer" "$(reason chain-producer)"
+check "chains: an external io.vidocq parent chain without the producer: not affected" "skip" "$(status chain-clean)"
+check "chains: a third-party parent: not affected" "skip" "$(status chain-third)"
+check "chains: an ancestor pom that cannot be read makes its module affected" "1" "$(reason chain-missing | grep -c 'io.vidocq.gone:gone-parent:1.*cannot be read (doubt)')"
+check "chains: an external BOM importing a producer BOM" \
+  "BOM import chain io.vidocq.mid:mid-bom:1 > io.vidocq.knock:knock-parent:1 reaches the producer" "$(reason bom-chain)"
+check "chains: an external BOM chain without the producer: not affected" "skip" "$(status bom-clean)"
+check "chains: an import version that cannot be resolved makes its module affected" "1" "$(reason bom-unresolved | grep -c 'cannot be resolved (doubt)')"
+check "chains: a BOM imported by an external parent" "1" "$(reason chain-import | grep -c 'io.vidocq:vp2:1 > io.vidocq.mid:mid-bom:1 > io.vidocq.knock:knock-parent:1')"
+check "chains: an import version from a property of the external parent's parent" "skip" "$(status chain-inherited-prop)"
+analyse > /dev/null; resolve_synth; analyse --closures > /dev/null
+check "chains: without the local repository, an external io.vidocq parent is a doubt" "1" "$(reason chain-clean | grep -c 'local repository unknown (doubt)')"
+check "chains: ... a third-party parent is not" "skip" "$(status chain-third)"
+
+chain_fixture
+run_targeted STUB_LOCAL_REPO="$M2" GRAPH_URL= > /dev/null
+check "chains: the local repository comes from Maven, non-recursively" "1" \
+  "$(grep -c '^acme -B -ntp -Dx=1 -N -q org.apache.maven.plugins:maven-help-plugin:[0-9.]*:evaluate -Dexpression=settings.localRepository -DforceStdout' "$TMP/mvn-calls")"
+check "chains: the orchestrator passes it on" "skip|skip" \
+  "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("|".join("skip" if m in r["skip"] else "affected" for m in ("chain-clean", "bom-clean")))' "$TMP/work/report.json")"
+chain_fixture
+run_targeted STUB_LOCAL_REPO="$M2" GRAPH_URL= MVN_FAIL=evaluate > /dev/null
+check "chains: no local repository from Maven: still targeted, the chains are doubts" "affected|1" \
+  "$(python3 -c 'import json,sys; print("affected" if "chain-clean" in json.load(open(sys.argv[1]))["affected"] else "skip")' "$TMP/work/report.json")|$(grep -c '^targeted' "$TMP/mode.txt")"
 
 # --- Graph pruning is off unless asked for (review I2) ----------------------------------------
 build_fixture

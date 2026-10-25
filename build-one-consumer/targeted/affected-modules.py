@@ -29,8 +29,14 @@ repository that depends on the producer). The external io.vidocq artifacts of th
 yet affected are "suspect" (assumption: only io.vidocq artifacts, or artifacts of the producer's
 groups, can carry the producer; a third-party artifact wrapping or shading one is not seen);
 with the dependency graph (inverted.json, opt-in), only those produced by a repository that
-consumes the producer, directly or not, or unknown to the graph. An external parent is matched
-by its own coordinates only: its ancestors are not followed. Their closures
+consumes the producer, directly or not, or unknown to the graph.
+
+The parent chain and the BOM import chains that leave the reactor through an io.vidocq artifact
+are followed through the poms of the local repository (--local-repo; Maven read them to build
+the effective POM): a producer pom anywhere in a chain (an ancestor of an external parent, a BOM
+imported by an external BOM or parent) makes the module affected; a chain pom that cannot be read
+or an import version that cannot be resolved is a doubt (module affected); without the local
+repository, every such chain is a doubt. Their closures
 come from one Maven run on a synthetic project written to --synthetic (one module per
 artifact, resolved as a pom so that no jar is downloaded; a dependency keeps the
 dependencyManagement of the module that declares it):
@@ -135,6 +141,8 @@ class Analysis:
                 self.pruning = f'none (dependency graph unreadable: {e})'
         check_core_extensions(self.repo, self.changed, self.producer_groups)
         self.mods = pommodel.load_reactor(args.effective_pom)
+        self.chains = (pommodel.ExternalChains(args.local_repo, self.changed)
+                       if args.local_repo and os.path.isdir(args.local_repo) else None)
         self.rel = {}
         for ga, m in self.mods.items():
             r = os.path.relpath(os.path.realpath(m.basedir), self.repo)
@@ -159,6 +167,25 @@ class Analysis:
         return m.dm_versions.get(r.ga) or next(
             (d.version for d in m.refs if d.kind == 'dependency' and d.ga == r.ga and d.version), None)
 
+    def chain_reasons(self, m):
+        """Reasons from the external io.vidocq parent chain and BOM import chains of m."""
+        starts = []
+        if m.parent and m.parent not in self.mods and is_vidocq(m.parent, self.producer_groups):
+            starts.append(('parent', m.parent, m.parent_version))
+        for ga in m.imports:
+            if ga not in self.mods and is_vidocq(ga, self.producer_groups):
+                starts.append(('BOM import', ga, m.import_versions.get(ga)))
+        reasons = []
+        for kind, ga, version in starts:
+            if ga in self.changed:
+                continue                      # already a direct reference
+            if self.chains is None:
+                reasons.append(f'{kind} {ga}: local repository unknown (doubt)')
+                continue
+            g, a = ga.split(':', 1)
+            reasons += self.chains.walk(kind, g, a, version)
+        return reasons
+
     def direct_hits(self):
         artifact_ids = {ga.split(':', 1)[1] for ga in self.changed}
         hits = {}
@@ -174,6 +201,7 @@ class Analysis:
                 elif self.suspect(r.ga) and not self.text_version(m, r):
                     reasons.add(f'plugin configuration names {r.ga} without a version, closure unknown (doubt)')
             reasons |= set(m.doubts)
+            reasons |= set(self.chain_reasons(m))
             if m.packaging != 'pom':
                 reasons |= set(pommodel.scan_sources(m, artifact_ids))
             if reasons:
@@ -292,6 +320,8 @@ def main():
     ap.add_argument('--graph')
     ap.add_argument('--producer-slug', default='')
     ap.add_argument('--closures', action='store_true')
+    ap.add_argument('--local-repo', help='the local Maven repository, to follow the external parent '
+                    'and BOM import chains; without it an external io.vidocq chain is a doubt')
     args = ap.parse_args()
     try:
         if not os.path.exists(args.producer_artifacts):

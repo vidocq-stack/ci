@@ -1,3 +1,6 @@
 # Claude Code / tooling local
 .claude/
 .idea/
+
+# Python bytecode (select-tck imports build-one-consumer/targeted/pommodel.py)
+__pycache__/
