@@ -5,6 +5,45 @@ raw results, delta against the previous run.
 
 ---
 
+## 2026-10-25 — shared producer artifacts (producer-artifacts + build-one-consumer `producer-artifacts`) (Vidocq/vidocq#285)
+
+- **Where**: Codefloe runners (vidocq-runner), real runs.
+- **Probe** (a throwaway workflow on Vidocq/ci, deleted afterwards):
+  - `actions/upload-artifact@v3` and `download-artifact@v3` work across jobs on different runners: 100 MB went up
+    in about 33 s (8 MB chunks) and came down in 3 s;
+  - v4 fails: "GHESNotSupportedError … not currently supported on GHES";
+  - `retention-days: 1` is honoured (expires_at = upload + 1 day; the default is 30 days);
+  - `GET /api/v1/repos/<repo>/actions/runs/<run>/artifacts` and `DELETE /actions/artifacts/<id>` both work with the
+    job token, and the zip downloads through `archive_download_url` with the job token.
+- **Payload**: pack.py on the PR-version installs. No sources, javadoc or test jars; no consumer depends on a
+  producer test-jar.
+
+  | Producer | Payload | Files | Modules installed / in the reactor |
+  |---|---:|---:|---|
+  | vauban | 1.46 MB | 49 | 17 / 30 |
+  | chappe | 0.66 MB | 18 | 6 / 10 |
+  | knock | 0.15 MB | 25 | 9 / 9 |
+
+- **vauban trial** (Vidocq/vauban#223, WIP, closed unmerged), run 50025:
+  - the producer job packed and uploaded in about 9 s;
+  - the three downstream jobs with the shared artifacts installed them, with every sha256 checked;
+  - one downstream job rebuilt the producer for comparison;
+  - the verdict job deleted the artifact (HTTP 204).
+
+  | Downstream job | Producer step | Job |
+  |---|---:|---:|
+  | foy, shared | 16 s | 230 s |
+  | knock, shared | 7 s | 101 s |
+  | ravel, shared | 8 s | 92 s |
+  | foy, rebuild (same run) | 54 s | 232 s |
+
+- **Reference**: vauban#222, run 49864, 16 downstream jobs rebuilding the producer took 28–91 s each, 1 098 s in
+  total (18.3 runner-min). With the shared artifacts, about 7–16 s each.
+- **The `impacted` job** took 13 s in run 50025. Making `producer` wait for it (to publish only when consumers
+  exist) delays the producer by at most that much.
+
+---
+
 ## 2026-10-25 — sonar-analysis `targeted-tests` on vidocq (Vidocq/vidocq#285)
 
 - **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
