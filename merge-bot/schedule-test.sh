@@ -36,6 +36,46 @@ R=/api/v1/repos/Vidocq/demo
 GOV="pr-validate / governance-checks (pull_request)"
 VAL="pr-validate / pr-validate (pull_request)"
 
+GATE_YML=$(cat <<'YML'
+name: pr-validate
+on:
+  pull_request:
+jobs:
+  pr-state:
+    runs-on: vidocq-runner
+    steps:
+      - id: state
+        uses: https://codefloe.com/Vidocq/ci/pr-validate-gate@main
+        with:
+          mode: state
+          token: x
+YML
+)
+OLD_YML=$(cat <<'YML'
+name: pr-validate
+on:
+  pull_request:
+jobs:
+  pr-validate:
+    runs-on: vidocq-runner
+    steps:
+      - run: echo verdict
+YML
+)
+VERDICT_ONLY_YML=$(cat <<'YML'
+name: pr-validate
+jobs:
+  pr-validate:
+    steps:
+      - uses: https://codefloe.com/Vidocq/ci/pr-validate-gate@main
+        with:
+          mode: verdict
+YML
+)
+workflow() { # workflow <yaml>: the base branch's pr.yml, as the contents API answers it
+  printf '{"%s/contents/.forgejo/workflows/pr.yml?ref=main": {"encoding": "base64", "content": "%s"}}' \
+    "$R" "$(printf '%s' "$1" | base64 | tr -d '\n')"
+}
 # forge <validate status> [extra route json...]: the base branch requires GOV and VAL; GOV is green.
 forge() {
   python3 - "$TMP/routes.json" "$@" <<EOF
@@ -48,6 +88,8 @@ routes = {
   "$R/pulls/7": {"number": 7, "merged": False, "head": {"sha": "$HEAD"}},
   "POST $R/pulls/7/merge": {"status": 201, "body": {}},
   "DELETE $R/pulls/7/merge": {"status": 204, "body": {}},
+  # The base branch's pr.yml runs the gate in state mode: the job that cancels a stale schedule (81-I1).
+  "$R/contents/.forgejo/workflows/pr.yml?ref=main": {"encoding": "base64", "content": "$(printf '%s' "$GATE_YML" | base64 | tr -d '\n')"},
 }
 for e in extra:
     routes.update(json.loads(e))
@@ -97,6 +139,34 @@ check "no required check on the branch: merged at once" "0 merged" "$(run)"
 forge pending '{"POST '"$R"'/pulls/7/merge": {"status": 405, "body": {"message": "not allowed"}}}'
 check "the forge refuses the schedule: refused, with its answer" "1 " "$(run)"
 contains "and its answer" "HTTP 405" "$(cat "$TMP/out")"
+
+# 81-I1: a repository whose pr.yml does not run the gate in state mode never gets a schedule (nothing would
+# cancel it on a push, WIP, blocked or train member): green merges now, pending is refused.
+forge pending "$(workflow "$OLD_YML")"
+check "no pr-state gate on the base branch, checks pending: refused, nothing scheduled" "1 " "$(run)"
+check "nothing written" "" "$(writes)"
+contains "with what to do" "checks still running; re-run /merge when pr-validate is green" "$(cat "$TMP/out")"
+forge pending "$(workflow "$VERDICT_ONLY_YML")"
+check "the gate in verdict mode only is not enough" "1 " "$(run)"
+forge pending '{"'"$R"'/contents/.forgejo/workflows/pr.yml?ref=main": {"status": 404, "body": {}}}'
+check "no pr.yml at all (ci, GestionProjet): refused" "1 " "$(run)"
+forge success "$(workflow "$OLD_YML")" '{"POST '"$R"'/pulls/7/merge": {"status": 200, "body": {}}}'
+check "no gate but checks green: merged at once" "0 merged" "$(run)"
+: > "$TMP/calls.log"
+forge pending
+check "--gate prints whether the base branch runs the gate" "gate=true" \
+  "$(python3 "$SCRIPT" --api "http://127.0.0.1:$(cat "$TMP/port")/api/v1" --token t --repo Vidocq/demo --pr 7 --head "$HEAD" --branch main --gate)"
+forge pending "$(workflow "$OLD_YML")"
+check "--gate without the gate" "gate=false" \
+  "$(python3 "$SCRIPT" --api "http://127.0.0.1:$(cat "$TMP/port")/api/v1" --token t --repo Vidocq/demo --pr 7 --head "$HEAD" --branch main --gate)"
+
+# 81-I2: the PR head moved between the bot's push and the schedule: the schedule is cancelled, and refused.
+forge pending "{\"_on POST $R/pulls/7/merge\": {\"$R/pulls/7\": {\"number\": 7, \"merged\": false, \"head\": {\"sha\": \"3333333333333333333333333333333333333333\"}}}}"
+check "the head moved right after scheduling: cancelled and refused" "1 " "$(run)"
+check "schedule, then cancel" \
+  "POST /pulls/7/merge {\"Do\": \"fast-forward-only\", \"head_commit_id\": \"$HEAD\", \"delete_branch_after_merge\": true, \"merge_when_checks_succeed\": true};DELETE /pulls/7/merge;" \
+  "$(writes)"
+contains "naming the new head" "3333333333" "$(cat "$TMP/out")"
 
 echo
 if [ "$failures" -gt 0 ]; then

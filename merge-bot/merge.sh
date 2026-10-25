@@ -210,7 +210,14 @@ new_head=$(git rev-parse HEAD)
 
 # Announce the head the forge will merge BEFORE pushing it: the pr-validate run of that push reads this
 # marker and cancels a scheduled merge whose head was not announced (a later push by anyone else).
+# Only where the base branch's pr.yml runs the pr-state gate, which cancels a stale schedule: elsewhere the
+# bot never schedules (schedule.py), so there is nothing to announce.
+gate=gate=false
 if [[ "${MERGE_AFTER_REBASE:-true}" == "true" ]]; then
+  gate=$(python3 "${HERE}/schedule.py" --api "$API" --token "$BOT_TOKEN" --repo "$REPO" --pr "$PR_NUMBER" \
+    --head "$new_head" --branch "$base_ref" --gate)
+fi
+if [[ "$gate" == "gate=true" ]]; then
   comment=$(python3 -c '
 import json, sys
 head, base = sys.argv[1], sys.argv[2]
@@ -245,7 +252,7 @@ refuse_unmergeable "$pr_json"
 # The read-level /branches/{branch} endpoint: /branch_protections/ needs admin rights the bot does not have.
 info "Handing PR #${PR_NUMBER} (${new_head}) to the forge"
 result=$(python3 "${HERE}/schedule.py" --api "$API" --token "$BOT_TOKEN" --repo "$REPO" --pr "$PR_NUMBER" \
-  --head "$new_head" --branch "$base_ref") || die "PR #${PR_NUMBER} is not merged: ${result#refused: }"
+  --head "$new_head" --branch "$base_ref") || die "PR #${PR_NUMBER} is not merged: ${result#refused: }."
 case "$result" in
   *result=merged*) ok "PR #${PR_NUMBER} merged (fast-forward of ${new_head}, signed by ${GIT_SIGNING_KEY_ID})" ;;
   *result=scheduled*) ok "PR #${PR_NUMBER} scheduled: the forge fast-forwards ${new_head} when the required checks pass" ;;

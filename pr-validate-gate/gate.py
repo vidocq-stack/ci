@@ -353,9 +353,9 @@ def announced_head(api, repo, number):
 def cancel_stale_schedule(api, a, mode, head, why_not_ready):
     """Forgejo's scheduled merge ("merge when checks succeed", set by the merge-bot) does not pin the head and
     outlives a label change. With a token, cancel it when the pull request is not ready, and on a push the
-    merge-bot did not announce. Never fails the job."""
+    merge-bot did not announce. False when a needed cancellation failed."""
     if not a.token or not a.pr:
-        return
+        return True
     reason = ""
     if mode != "ready":
         reason = why_not_ready
@@ -366,12 +366,15 @@ def cancel_stale_schedule(api, a, mode, head, why_not_ready):
         except ApiError as err:
             reason = f"a push, and the merge-bot's announcement cannot be read ({err})"
     if not reason:
-        return
+        return True
     status = api.delete(f"/repos/{a.repo}/pulls/{a.pr}/merge")
     if status == 204:
         notice("warning", "pr-validate-gate", f"scheduled merge cancelled: {reason}. Comment /merge again when ready.")
-    elif status not in (404,):
-        notice("warning", "pr-validate-gate", f"could not cancel a scheduled merge ({reason}): HTTP {status}")
+    elif status != 404:
+        # Fail closed (review 81-I2): the state job fails, so pr-validate fails and the forge cannot merge.
+        notice("error", "pr-validate-gate", f"could not cancel a scheduled merge ({reason}): HTTP {status}")
+        return False
+    return True
 
 
 def base_changed(event_path):
@@ -433,8 +436,9 @@ def cmd_state(a):
                    f"({prev['mode']}, {prev['verdict']}): its verdict is reproduced, nothing is built")
     state["why"] = why
 
-    cancel_stale_schedule(api, a, c["mode"], head,
-                          train_message(state) if c["mode"] == "train" else f"{not_ready_message(state)} ({c['wip-reason']})")
+    cancelled = cancel_stale_schedule(
+        api, a, c["mode"], head,
+        train_message(state) if c["mode"] == "train" else f"{not_ready_message(state)} ({c['wip-reason']})")
     run_producer = c["mode"] != "train" and not state["reproduce"]
     run_downstream = c["mode"] == "ready" and not state["reproduce"]
     summary = {"train": train_message(state), "wip": f"{not_ready_message(state)} ({c['wip-reason']})",
@@ -443,7 +447,7 @@ def cmd_state(a):
     emit({"state": state, "mode": c["mode"], "run-producer": str(run_producer).lower(),
           "run-downstream": str(run_downstream).lower(), "reproduce": str(state["reproduce"]).lower(),
           "reason": why}, a.output)
-    return 0
+    return 0 if cancelled else 1
 
 
 # -------------------------------------------------------------------------------------------- verdict

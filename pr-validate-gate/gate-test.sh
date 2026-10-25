@@ -406,7 +406,12 @@ check "without a token nothing is written" "0" "$(grep -vc '^GET ' "$TMP/calls.l
 forge reset; forge pr "faster parser" "WIP"; forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
 forge raw-route "DELETE $R/pulls/7/merge" '{"status": 500, "body": {}}'
 state_tok labeled
-check "a failed cancellation does not fail the state job" "0" "$(out rc)"
+check "a needed cancellation that fails FAILS the state job (pr-validate fails, so the forge cannot merge) (81-I2)" "1" "$(out rc)"
+contains "and says so" "could not cancel" "$(cat "$TMP/stdout")"
+forge reset; forge pr "faster parser" "WIP"; forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+forge raw-route "DELETE $R/pulls/7/merge" '{"status": 404, "body": {}}'
+state_tok labeled
+check "nothing scheduled (404): the state job succeeds" "0" "$(out rc)"
 
 # needs <governance> <state result> <state json> <producer> <impacted> <downstream> [docs-only] [test-only] [count] [reused]
 needs() {

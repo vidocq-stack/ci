@@ -130,6 +130,9 @@ r[R + "/branches/main"] = {"name": "main", "enable_status_check": True, "status_
 r[R + "/commits/" + h + "/status"] = {"state": "pending", "statuses": [{"context": "v", "status": "pending"}]}
 r["POST " + R + "/pulls/7/merge"] = {"status": 201, "body": {}}
 r["DELETE " + R + "/pulls/7/merge"] = {"status": 404, "body": {}}
+import base64
+yml = "jobs:\n  pr-state:\n    steps:\n      - uses: https://codefloe.com/Vidocq/ci/pr-validate-gate@main\n        with:\n          mode: state\n"
+r[R + "/contents/.forgejo/workflows/pr.yml?ref=main"] = {"encoding": "base64", "content": base64.b64encode(yml.encode()).decode()}
 json.dump(r, open(p, "w"))' "$TMP/routes.json" "$H"
 : > "$TMP/calls.log"; : > "$TMP/tools.log"; rm -f "$TMP/reason"
 start=$SECONDS
@@ -145,6 +148,24 @@ check "the announcement carries the head for the gate" "1" "$(grep -c "merge-bot
 check "the merge request names the head and asks the forge to wait for the checks" "1" \
   "$(grep '^POST /api/v1/repos/Vidocq/demo/pulls/7/merge' "$TMP/calls.log" | grep -c "\"head_commit_id\": \"$H\".*\"merge_when_checks_succeed\": true")"
 check "nothing was pushed (already rebased and signed)" "0" "$(grep -c '^git push' "$TMP/tools.log")"
+
+# 81-I1: the same /merge in a repository whose pr.yml has no pr-state gate: refused, nothing announced or
+# scheduled, and the reason is quoted in the failure comment.
+python3 -c '
+import json, sys
+p = sys.argv[1]
+r = json.load(open(p))
+r["/api/v1/repos/Vidocq/demo/contents/.forgejo/workflows/pr.yml?ref=main"] = {"status": 404, "body": {}}
+json.dump(r, open(p, "w"))' "$TMP/routes.json"
+: > "$TMP/calls.log"; : > "$TMP/tools.log"; rm -f "$TMP/reason"
+PATH="$TMP/ok-bin:$PATH" PR_NUMBER=7 REPO=Vidocq/demo BASE_URL="http://127.0.0.1:$(cat "$TMP/port")" BOT_TOKEN=t \
+  GIT_SIGNING_PRIVATE_KEY=k GIT_SIGNING_PASSPHRASE=p GIT_SIGNING_KEY_ID=i MERGE_AFTER_REBASE=true \
+  MERGE_BOT_REASON_FILE="$TMP/reason" bash "$HERE/merge.sh" > "$TMP/merge.out" 2>&1
+check "no gate, checks pending: /merge refused" "1" "$?"
+check "no announcement, no schedule (only the cancel of an old one)" "DELETE /pulls/7/merge;" \
+  "$(grep -vE '^GET ' "$TMP/calls.log" | cut -d' ' -f1-2 | sed 's#/api/v1/repos/Vidocq/demo##' | tr '\n' ';')"
+check "the reason for the comment" "PR #7 is not merged: checks still running; re-run /merge when pr-validate is green." \
+  "$(cat "$TMP/reason")"
 
 echo
 if [ "$failures" -gt 0 ]; then

@@ -11,9 +11,15 @@ The merge-bot used to poll the required checks for up to an hour, one runner hel
     fast-forward now (Do: fast-forward-only, head_commit_id). A schedule would wait for a status change
     that never comes when everything is already green (seen on Codefloe);
   - a required check failed: refuse, nothing scheduled;
-  - otherwise schedule Forgejo's "merge when checks succeed" (merge_when_checks_succeed) and exit. If the
-    checks turn green between the read and the schedule, the schedule is cancelled and replaced by a
-    direct merge.
+  - otherwise, ONLY when the base branch's .forgejo/workflows/pr.yml runs pr-validate-gate in mode state
+    (the job that cancels a stale schedule), schedule Forgejo's "merge when checks succeed"
+    (merge_when_checks_succeed) and exit. Without that job (ci, GestionProjet, a producer before the
+    template rollout), nothing would cancel the schedule on a push or a WIP label: refuse, "checks still
+    running; re-run /merge when pr-validate is green" (review 81-I1). If the checks turn green between the
+    read and the schedule, the schedule is replaced by a direct merge; if the head moved, it is cancelled
+    and refused (81-I2).
+
+--gate only prints "gate=true" or "gate=false".
 
 Forgejo's scheduled merge does NOT pin the head (head_commit_id only applies to an immediate merge): the
 pr-validate gate cancels a schedule on a push that the merge-bot did not announce, and on a pull request
@@ -22,6 +28,7 @@ that becomes WIP, blocked or a train member.
 Prints "result=merged" or "result=scheduled" and exits 0, or explains the refusal and exits 1.
 """
 import argparse
+import base64
 import importlib.util
 import json
 import os
@@ -71,6 +78,32 @@ class Forge:
         return doc
 
 
+def gate_present(forge, branch):
+    """Does the base branch's pr.yml run pr-validate-gate with mode: state? Any doubt answers no."""
+    status, doc = forge.call("GET", f"/contents/.forgejo/workflows/pr.yml?ref={branch}")
+    if status != 200 or not isinstance(doc, dict) or doc.get("encoding") != "base64":
+        return False
+    try:
+        text = base64.b64decode(doc.get("content") or "").decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "pr-validate-gate@" not in line or "uses:" not in line:
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        for nxt in lines[i + 1:]:
+            if not nxt.strip() or nxt.lstrip().startswith("#"):
+                continue
+            nind = len(nxt) - len(nxt.lstrip(" "))
+            if nind < indent or (nind == indent and nxt.lstrip().startswith("- ")):
+                break
+            key, _, value = nxt.strip().partition(":")
+            if key == "mode" and value.strip().strip("'\"") == "state":
+                return True
+    return False
+
+
 def merge_now(forge, pr, head, pause):
     body = {"Do": "fast-forward-only", "head_commit_id": head, "delete_branch_after_merge": True}
     for _ in range(3):
@@ -94,6 +127,8 @@ def run(a):
     if verdict == "success":
         merge_now(forge, a.pr, a.head, a.retry_pause)
         return "merged"
+    if not gate_present(forge, a.branch):
+        raise Refused("checks still running; re-run /merge when pr-validate is green")
 
     status, doc = forge.call("POST", f"/pulls/{a.pr}/merge", {
         "Do": "fast-forward-only", "head_commit_id": a.head, "delete_branch_after_merge": True,
@@ -105,6 +140,13 @@ def run(a):
     if status != 201:
         raise Refused(f"the forge refused to schedule the merge: HTTP {status} {json.dumps(doc)[:200]}")
 
+    # A push that landed between the bot's push and the schedule ran its pr-state before the schedule existed:
+    # nothing would cancel it later.
+    now = (forge.get(f"/pulls/{a.pr}").get("head") or {}).get("sha")
+    if now != a.head:
+        forge.call("DELETE", f"/pulls/{a.pr}/merge")
+        raise Refused(f"the head moved to {str(now)[:10]} right after scheduling the merge of {a.head[:10]}: "
+                      "schedule cancelled; re-run /merge")
     # Green in the meantime: the schedule would wait for a status change that may never come.
     if required_checks.verdict(branch, forge.get(f"/commits/{a.head}/status")) == "success":
         if forge.get(f"/pulls/{a.pr}").get("merged"):
@@ -120,7 +162,15 @@ def main(argv):
     for name in ("--api", "--token", "--repo", "--pr", "--head", "--branch"):
         p.add_argument(name, required=True)
     p.add_argument("--retry-pause", type=float, default=3.0)
+    p.add_argument("--gate", action="store_true", help="only print whether the base branch runs the gate")
     a = p.parse_args(argv)
+    if a.gate:
+        try:
+            present = gate_present(Forge(a.api, a.token, a.repo), a.branch)
+        except Refused:
+            present = False
+        print(f"gate={str(present).lower()}")
+        return 0
     try:
         result = run(a)
     except Refused as err:
