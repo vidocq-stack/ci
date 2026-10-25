@@ -63,6 +63,9 @@ check "the effective POM uses the profiles and properties of the build's own arg
   "$(run TARGETED_TESTS=true MAVEN_ARGS_IN='-B -ntp -Pquality,errorprone -Dfoo=1 -Dmaven.test.failure.ignore=true install' -- true > /dev/null; grep -c 'args=-B -ntp -Pquality,errorprone -Dfoo=1 -Dmaven.test.failure.ignore=true dir=' "$TMP/calls")"
 check "an unknown value fails" "1" "$(run TARGETED_TESTS=maybe -- true)"
 
+check "two-token -P, and -s/-f/--settings/--file with their values, are kept (review 76-M1)" "1" \
+  "$(run TARGETED_TESTS=true MAVEN_ARGS_IN='-B -ntp -P quality -s ci/settings.xml -f sub/pom.xml --settings=x.xml --file y.xml -Dz=1 clean install' -- true > /dev/null; grep -c 'args=-B -ntp -P quality -s ci/settings.xml -f sub/pom.xml --settings=x.xml --file y.xml -Dz=1 dir=' "$TMP/calls")"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"
   exit 1

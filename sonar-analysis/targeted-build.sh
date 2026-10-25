@@ -14,7 +14,8 @@
 #   TARGETED_TESTS   true | false
 #   EVENT_NAME       pull_request: targeted; anything else: full
 #   BASE_REF, PR_NUMBER  the pull request (targeted-producer-tests reads the changed paths from git)
-#   MAVEN_ARGS_IN    the build's Maven args: their -B, -ntp, -P... and -D... flags (no goal or phase) make
+#   MAVEN_ARGS_IN    the build's Maven args: their -B, -ntp, -P, -D, -s, -f flags (with a separate value
+#                    when written so; no goal or phase) make
 #                    the effective POM, so that it sees the same profiles as the build
 #   ANALYSIS_ARGS    fallback when MAVEN_ARGS_IN is empty
 #   PRODUCER_TESTS   targeted-producer-tests/producer-tests.sh
@@ -36,9 +37,15 @@ PRODUCER_TESTS="${PRODUCER_TESTS:-$HERE/../targeted-producer-tests/producer-test
 export TARGETED_DIR="${TARGETED_DIR:-${RUNNER_TEMP:-/tmp}/targeted/sonar}"
 
 # The effective POM sees the build's own profiles and properties, without its goals and phases.
+# Flags with a separate value (-P x, -s file, -f pom, --settings file, --file pom) keep it.
 flags=()
+take_next=false
 for a in ${MAVEN_ARGS_IN:-}; do
-  case "$a" in -B|-ntp|--batch-mode|--no-transfer-progress|-P*|-D*|--activate-profiles=*) flags+=("$a") ;; esac
+  if [ "$take_next" = true ]; then flags+=("$a"); take_next=false; continue; fi
+  case "$a" in
+    -P|-s|-f|-gs|--activate-profiles|--settings|--file|--global-settings) flags+=("$a"); take_next=true ;;
+    -B|-ntp|--batch-mode|--no-transfer-progress|-P*|-D*|-s*|-f*|--activate-profiles=*|--settings=*|--file=*|--global-settings=*) flags+=("$a") ;;
+  esac
 done
 effective_args="${flags[*]:-${ANALYSIS_ARGS:--B -ntp}}"
 if ! MODE=targeted MVN_ARGS="$effective_args" BASE_REF="${BASE_REF:-}" PR_NUMBER="${PR_NUMBER:-}" \
