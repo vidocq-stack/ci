@@ -1,0 +1,88 @@
+name: 'pr-validate gate (WIP, PR trains, verdict)'
+description: >
+  Vidocq/vidocq#285. Owns every decision of a producer's pull-request validation, so that a change of policy
+  reaches the producer repositories from @main, without touching their pr.yml. mode 'state', in the first job of
+  the run, reads the pull request as it is now and says which jobs run: a train member (label train-member,
+  "Train-top: #N" in the description) builds nothing, a WIP pull request (title "WIP:"/"[WIP]", a draft, label
+  WIP) builds and tests the producer but not its consumers, and an edit or a label change that leaves the pull
+  request as it was reproduces the verdict of the latest completed run on the same commit instead of building
+  again. mode 'verdict', in the aggregator (`pr-validate`, required check), decides from toJSON(needs): it FAILS
+  a train member, a WIP pull request, and any expected work that did not succeed; a skipped job never passes
+  unless no work was expected. Reads the Forgejo API (public repositories read anonymously); writes nothing.
+  Needs python3. See gate.py.
+
+inputs:
+  mode:
+    description: "'state' (first job: which jobs run) or 'verdict' (the aggregator)"
+    required: true
+  needs:
+    description: "mode 'verdict': toJSON(needs) of the aggregator, which must need governance-checks, the state job, producer, impacted and downstream"
+    default: ''
+  token:
+    description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN) to lift the API rate limits; empty on a fork pull request, which reads anonymously'
+    default: ''
+  wip-labels:
+    description: 'Comma-separated labels that make a pull request WIP (any case), on top of the WIP:/[WIP] title prefixes and the draft flag'
+    default: 'WIP'
+  train-label:
+    description: 'The label of a train member'
+    default: 'train-member'
+  state-job:
+    description: "The id of the job running mode 'state'"
+    default: 'pr-state'
+  aggregator-job:
+    description: "The name of the aggregator job (its result in an earlier run is the verdict reproduced)"
+    default: 'pr-validate'
+
+outputs:
+  state:
+    description: "mode 'state': the state as JSON, passed to the aggregator through the state job's outputs"
+    value: ${{ steps.gate.outputs.state }}
+  mode:
+    description: "mode 'state': ready, wip or train"
+    value: ${{ steps.gate.outputs.mode }}
+  run-producer:
+    description: "mode 'state': 'true' when the producer job runs"
+    value: ${{ steps.gate.outputs.run-producer }}
+  run-downstream:
+    description: "mode 'state': 'true' when the impacted and downstream jobs run"
+    value: ${{ steps.gate.outputs.run-downstream }}
+  reproduce:
+    description: "mode 'state': 'true' when this run reproduces an earlier verdict instead of building"
+    value: ${{ steps.gate.outputs.reproduce }}
+  verdict:
+    description: "mode 'verdict': success or failure (the step fails on failure)"
+    value: ${{ steps.gate.outputs.verdict }}
+  notify:
+    description: "mode 'verdict': 'true' when a fresh validation succeeded (not a reproduced one): worth a Slack message"
+    value: ${{ steps.gate.outputs.notify }}
+  reason:
+    description: 'Why, in one line'
+    value: ${{ steps.gate.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: pr-validate gate
+      id: gate
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        GATE_NEEDS: ${{ inputs.needs }}
+        GATE_TOKEN: ${{ inputs.token }}
+        GATE_PR: ${{ github.event.pull_request.number }}
+        GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        GATE_ACTIVITY: ${{ github.event.action }}
+        GATE_ATTEMPT: ${{ github.run_attempt }}
+        GATE_RUN_ID: ${{ github.run_id }}
+        GATE_WIP_LABELS: ${{ inputs.wip-labels }}
+        GATE_TRAIN_LABEL: ${{ inputs.train-label }}
+        GATE_STATE_JOB: ${{ inputs.state-job }}
+        GATE_AGGREGATOR: ${{ inputs.aggregator-job }}
+        SCRIPT: ${{ github.action_path }}/gate.py
+      run: |
+        set -euo pipefail
+        case "$MODE" in
+          state|verdict) python3 "$SCRIPT" "$MODE" ;;
+          *) echo "::error title=pr-validate-gate::mode must be 'state' or 'verdict' (got '$MODE')"; exit 1 ;;
+        esac
