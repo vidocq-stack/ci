@@ -340,7 +340,7 @@ def announced_head(api, repo, number, login):
     comments, seen = [], set()
     for page in (1, 2, 3, 4, 5):
         batch = api.get(f"/repos/{repo}/issues/{number}/comments?limit=50&page={page}")
-        if batch is None:   # Forgejo answers null for an empty page
+        if batch is None:   # defensive: some Forgejo endpoints answer null for an empty page (the timeline does)
             batch = []
         if not isinstance(batch, list):
             raise ApiError("the comments are not a list")
