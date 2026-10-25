@@ -368,12 +368,13 @@ def is_test_source(rel):
     return len(parts) > 1 and parts[0] == 'src' and (parts[1] in TEST_SOURCE_DIRS or parts[1].startswith('test'))
 
 
-def scan_sources(m, artifact_ids, cap=1 << 20, where=None):
+def scan_sources(m, artifact_ids, cap=1 << 20, where=None, accept=None):
     """Reasons for a module whose src/ names a producer artifact as text: a test or a tool may
     resolve it at run time (ShrinkWrap, a CLI, the local repository by coordinates). Any text
     file counts (binary files, with a NUL byte, and files over `cap` bytes are skipped); the
     artifactId must stand alone, so "groupId:artifactId[:version]" matches too. `where`:
-    None (every file under src/), 'main' (not under a test source directory) or 'test'."""
+    None (every file under src/), 'main' (not under a test source directory) or 'test'.
+    `accept`, when given, is called with each file's absolute path: False skips the file."""
     if not artifact_ids:
         return []
     rx = re.compile(r'(?<![\w.-])(' + '|'.join(re.escape(a) for a in sorted(artifact_ids, key=len, reverse=True))
@@ -384,6 +385,8 @@ def scan_sources(m, artifact_ids, cap=1 << 20, where=None):
         for name in sorted(files):
             path = os.path.join(d, name)
             if where is not None and is_test_source(os.path.relpath(path, m.basedir)) != (where == 'test'):
+                continue
+            if accept is not None and not accept(path):
                 continue
             try:
                 if os.path.getsize(path) > cap:

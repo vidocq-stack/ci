@@ -45,7 +45,7 @@ module() { # module <dir> <artifactId> <packaging> <parent|-> <deps> [plugins] [
   mkdir -p "$dir/src/main/java"
   [ "$4" != "-" ] && parent="<parent><groupId>$G</groupId><artifactId>$4</artifactId><version>1</version></parent>"
   printf '<project><modelVersion>4.0.0</modelVersion>%s<groupId>%s</groupId><artifactId>%s</artifactId><version>1</version><packaging>%s</packaging>%s</project>\n' \
-    "$parent" "$G" "$2" "$3" "$([ "$1" = . ] && echo '<properties><ci.tck.modules>tck-runner</ci.tck.modules></properties>')" > "$dir/pom.xml"
+    "$parent" "$G" "$2" "$3" "$([ "$1" = . ] && echo "<properties><ci.tck.modules>tck-runner</ci.tck.modules>${MENTION_LOCAL:+<ci.targeted.mention-local>$MENTION_LOCAL</ci.targeted.mention-local>}</properties>")" > "$dir/pom.xml"
   local p='<project><modelVersion>4.0.0</modelVersion>%s<groupId>%s</groupId><artifactId>%s</artifactId><version>1</version><packaging>%s</packaging><dependencies>%s</dependencies><build><directory>%s/target</directory><plugins>%s</plugins></build></project>\n'
   [ "${8:-}" = yes ] || printf "$p" "$parent" "$G" "$2" "$3" "$5${9:-}" "$dir" "${6:-}" >> "$EFF.body"
   [ "${8:-}" = default ] || printf "$p" "$parent" "$G" "$2" "$3" "$5${7:-}" "$dir" "${6:-}" >> "$EFF_TCK.body"
@@ -75,6 +75,12 @@ fixture() {
   module tck-extra      tck-extra     jar root "$(dep core)" "" "" yes
   module abd            abd           jar root "" "" "" "" "$(dep codegen)"
   module abd-only       abd-only      jar root "" "" "" default "$(dep codegen)"
+  module catalog-holder catalog-holder jar root ""
+  mkdir -p "$ROOT/catalog-holder/src/main/resources" && echo 'knock = ext-knock' > "$ROOT/catalog-holder/src/main/resources/catalog.properties"
+  module catalog-user   catalog-user  jar root "$(dep catalog-holder)"
+  module res-holder     res-holder    jar root ""
+  mkdir -p "$ROOT/res-holder/src/main/resources" && echo 'uses ext-knock' > "$ROOT/res-holder/src/main/resources/other.txt"
+  module res-user       res-user      jar root "$(dep res-holder)"
   module exts           exts          pom root ""
   module exts/ext-x     ext-x         jar exts ""
   { echo '<projects>'; cat "$EFF.body"; echo '</projects>'; } > "$EFF"
@@ -85,6 +91,7 @@ PY="$HERE/changed-modules.py"
 analyse() { # analyse <changed paths, one per line> -> exit status; report in $TMP/report.json
   printf '%s\n' "$1" > "$TMP/changed.txt"
   python3 "$PY" --effective-pom "${2:-$EFF_TCK}" --build-effective-pom "$EFF" --repo "$ROOT" --keep-modules tck-runner \
+    ${LOCAL:+--mention-local "$LOCAL"} \
     --changed-files "$TMP/changed.txt" --report "$TMP/report.json" > "$TMP/analysis.out" 2>&1
   echo $?
 }
@@ -94,11 +101,22 @@ skipped() { python3 -c 'import json,sys; print("skip" if sys.argv[2] in json.loa
 fixture
 check "extension change: exits 0" "0" "$(analyse 'ext-knock/src/main/java/A.java')"
 check "extension change: targeted" "targeted" "$(field decision)"
-check "extension change: the module, its dependents, a module naming it in its tests" \
-  "example ext-knock ext-knock-dev tooling" "$(field affected)"
+check "extension change: the module, its dependents, the modules naming it" \
+  "catalog-holder catalog-user example ext-knock ext-knock-dev res-holder res-user tooling" "$(field affected)"
 check "a test-source mention keeps the module's tests, not its plain dependents" "skip" "$(skipped tooling-user)"
 check "the reason names the changed path" "owns ext-knock/src/main/java/A.java" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["affected"]["ext-knock"])' "$TMP/report.json")"
+
+check "main-resource mention: the holder and its users keep their tests" "kept|kept" "$(skipped catalog-holder)|$(skipped catalog-user)"
+LOCAL=catalog-holder/src/main/resources/catalog.properties analyse 'ext-knock/src/main/java/A.java' > /dev/null
+check "mention-local: a mention in a listed file keeps the holder's tests" "kept" "$(skipped catalog-holder)"
+check "mention-local: ... and does not reach its dependents" "skip" "$(skipped catalog-user)"
+check "mention-local: an unlisted resource still propagates" "kept|kept" "$(skipped res-holder)|$(skipped res-user)"
+check "mention-local: the reason says so" "1" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["affected"]["catalog-holder"])' "$TMP/report.json" | grep -c 'mention-local')"
+LOCAL='catalog-holder/**/catalog.*, nothing/else' analyse 'ext-knock/src/main/java/A.java' > /dev/null
+check "mention-local: globs, comma-separated" "kept|skip" "$(skipped catalog-holder)|$(skipped catalog-user)"
+LOCAL=catalog-holder/src/main/resources/catalog.properties analyse 'catalog-holder/src/main/resources/catalog.properties' > /dev/null
+check "mention-local: a changed listed file propagates normally" "kept|kept" "$(skipped catalog-holder)|$(skipped catalog-user)"
 
 analyse 'codegen/src/main/java/G.java' > /dev/null
 check "processor change: the module using it as annotation processor" "kept" "$(skipped ext-other)"
@@ -200,6 +218,12 @@ check "targeted: the summary lists the affected modules" "1" "$(grep -c '| `ext-
 check "targeted: two effective POMs, the second with -Ptck (ci.tck.modules), never -DskipTests" "1|1|0" \
   "$(grep -c '^rt -B -ntp org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom -Doutput=' "$TMP/mvn-calls")|$(grep -c '^rt -B -ntp -Ptck org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom' "$TMP/mvn-calls")|$(grep -c -- '-DskipTests' "$TMP/mvn-calls")"
 check "targeted: later steps are told the poms are edited" "1" "$(grep -c '^TARGETED_PRODUCER_EDITS=' "$TMP/env-vars")"
+
+MENTION_LOCAL=catalog-holder/src/main/resources/catalog.properties fixture; forge 'ext-knock/src/main/java/A.java'
+run > /dev/null
+check "mention-local: read from the root pom property ci.targeted.mention-local" "kept|skip" \
+  "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("|".join("skip" if m in r["skip"] else "kept" for m in ("catalog-holder","catalog-user")))' "$TMP/work/report.json")"
+fixture; forge 'ext-knock/src/main/java/A.java'
 
 # The edits never outlive the install: guard fails while they are in place, restore puts back.
 check "guard: fails while the edits are in place" "1" "$(run MODE=guard)"

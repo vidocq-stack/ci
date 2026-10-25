@@ -119,9 +119,21 @@ for up in ${UPSTREAMS:-}; do
   upstream_groups="${upstream_groups:+$upstream_groups,}io.vidocq.$(printf '%s' "$short" | tr '[:upper:]' '[:lower:]')"
 done
 
+# Files whose mentions keep their module's tests only (the consumer's ci.targeted.mention-local).
+mention_local=$(python3 - <<'PY' 2>/dev/null || true
+import xml.etree.ElementTree as ET
+for el in ET.parse("pom.xml").getroot():
+    if el.tag.split('}')[-1] == 'properties':
+        for p in el:
+            if p.tag.split('}')[-1] == 'ci.targeted.mention-local':
+                print(' '.join((p.text or '').split()))
+PY
+)
+[ -z "$mention_local" ] || echo "Mentions kept local (ci.targeted.mention-local): $mention_local"
+
 analyse() {
   python3 "$HERE/affected-modules.py" --effective-pom "$DIR/effective-pom.xml" --repo "$REPO" \
-    --upstream-groups "$upstream_groups" \
+    --upstream-groups "$upstream_groups" --mention-local "$mention_local" \
     --producer-artifacts "$PRODUCER_ARTIFACTS" --synthetic "$DIR/synthetic" \
     --report "$DIR/report.json" ${graph_args[@]+"${graph_args[@]}"} ${chain_args[@]+"${chain_args[@]}"} "$@"
 }

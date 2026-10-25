@@ -517,6 +517,18 @@ print('ok' if not bad and not gone else f'kept-lost={bad} comments-left={gone}')
 PY
 }
 check "comments: the lexer keeps literals and drops comments" "ok" "$(lexer)"
+analyse --mention-local 'src-bare/src/main/resources/catalog.yml' > /dev/null; resolve_synth
+analyse --mention-local 'src-bare/src/main/resources/catalog.yml' --closures > /dev/null
+check "mention-local: a mention in a listed file keeps the holder's tests" "affected" "$(status src-bare)"
+check "mention-local: ... not its dependents" "skip" "$(status src-bare-user)"
+check "mention-local: the reason says so" "1" "$(reason src-bare | grep -c 'mention-local')"
+check "mention-local: other main mentions still propagate" "affected" "$(status src-string)"
+cp "$ROOT/pom.xml" "$TMP/root-pom.bak"
+sed -i.bak 's|</project>|<properties><ci.targeted.mention-local>src-bare/**/*.yml</ci.targeted.mention-local></properties></project>|' "$ROOT/pom.xml" && rm -f "$ROOT/pom.xml.bak"
+run_targeted GRAPH_URL= > /dev/null
+check "mention-local: read from the consumer's root pom" "affected|skip" \
+  "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print("affected" if "src-bare" in r["affected"] else "skip", "skip" if "src-bare-user" in r["skip"] else "affected", sep="|")' "$TMP/work/report.json")"
+cp "$TMP/root-pom.bak" "$ROOT/pom.xml"
 check "sources: the reason names the file" "1" "$(reason src-coord | grep -c 'src/test/java/T.java')"
 
 # --- A malformed graph turns the pruning off (review M7) -------------------------------------

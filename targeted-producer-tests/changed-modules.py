@@ -20,6 +20,10 @@ the references of both models are combined (what -Ptck uses counts, and so does 
 activeByDefault profile that -Ptck turns off), and only the modules of the build's own reactor
 are ever put in the skip list. --keep-modules (ci.tck.modules) are never skipped.
 
+--mention-local (the root pom's ci.targeted.mention-local): files whose mentions keep the tests of
+the module holding them, without its dependents (a generated catalog of names, for instance). A
+listed file that is itself a changed path makes its module a changed module, as any other.
+
 The report has the same shape as affected-modules.py's: "decision" is "targeted" (with "skip",
 the unaffected non-pom modules), "all" (nothing to skip) or "full" with a "reason": an empty
 change list, documentation only, a changed path in the root module (root pom, .mvn/, .forgejo/,
@@ -27,6 +31,7 @@ scripts) or escaping the repository, a pom that cannot be read, any error. Never
 on such a doubt; a crash makes the caller fall back.
 """
 import argparse
+import fnmatch
 import json
 import os
 import sys
@@ -66,7 +71,18 @@ def combine(mods, build):
     return out
 
 
-def analyse(eff, repo, changed, build_eff=None, keep=()):
+def local_matcher(repo, patterns):
+    """True for a file whose repository-relative path matches one of the ci.targeted.mention-local
+    patterns (fnmatch globs: * matches / too)."""
+    pats = [p.strip().strip('/') for p in patterns if p.strip()]
+
+    def match(path):
+        rel = os.path.relpath(os.path.realpath(path), repo).replace(os.sep, '/')
+        return any(fnmatch.fnmatchcase(rel, p) for p in pats)
+    return match
+
+
+def analyse(eff, repo, changed, build_eff=None, keep=(), mention_local=()):
     if not changed:
         raise Fallback('the changed-file list is empty')
     repo = os.path.realpath(repo)
@@ -106,6 +122,10 @@ def analyse(eff, repo, changed, build_eff=None, keep=()):
     # test classes (pommodel.close_with_test_only). pom modules (aggregators, parents) are no
     # artifact anything resolves: their names do not count.
     test_only = {}
+    is_local = local_matcher(repo, mention_local)
+
+    def not_local(path):
+        return not is_local(path)
     while True:
         affected = pommodel.close_with_test_only(seeds, test_only, mods)
         ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom'}
@@ -113,13 +133,17 @@ def analyse(eff, repo, changed, build_eff=None, keep=()):
         for ga, m in mods.items():
             if ga in affected or m.packaging == 'pom':
                 continue
-            main = pommodel.scan_sources(m, ids, where='main')
+            main = pommodel.scan_sources(m, ids, where='main', accept=not_local)
             if main:
                 seeds[ga] = main[0]
                 grew = True
             elif ga not in test_only:
-                tests = pommodel.scan_sources(m, ids, where='test')
-                if tests:
+                local = pommodel.scan_sources(m, ids, accept=is_local) if mention_local else []
+                tests = pommodel.scan_sources(m, ids, where='test', accept=not_local)
+                if local:
+                    test_only[ga] = local[0] + ' (ci.targeted.mention-local: its dependents are not affected)'
+                    grew = True
+                elif tests:
                     test_only[ga] = tests[0] + ' (tests only)'
                     grew = True
         if not grew:
@@ -144,6 +168,8 @@ def main(argv):
     ap.add_argument('--effective-pom', required=True)
     ap.add_argument('--repo', required=True)
     ap.add_argument('--changed-files', required=True)
+    ap.add_argument('--mention-local', default='', help='comma-separated repository-relative paths or '
+                    'globs (ci.targeted.mention-local) whose mentions keep their module\'s tests only')
     ap.add_argument('--keep-modules', default='', help='comma-separated module paths never skipped (ci.tck.modules)')
     ap.add_argument('--build-effective-pom', help='effective POM of the build itself (default '
                     'profiles), when --effective-pom adds profiles (-Ptck): only its modules are skipped')
@@ -153,7 +179,8 @@ def main(argv):
         with open(a.changed_files, encoding='utf-8') as f:
             changed = [line.strip() for line in f if line.strip()]
         keep = [k.strip() for k in a.keep_modules.split(',') if k.strip()]
-        report = analyse(a.effective_pom, a.repo, changed, a.build_effective_pom, keep)
+        local = [p for p in a.mention_local.split(',') if p.strip()]
+        report = analyse(a.effective_pom, a.repo, changed, a.build_effective_pom, keep, local)
     except Fallback as e:
         report = {'decision': 'full', 'reason': str(e)}
     except pommodel.PomError as e:

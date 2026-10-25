@@ -140,16 +140,21 @@ effective_pom() { # effective_pom <out> [extra Maven args...]
 echo "Effective POM of the build"
 effective_pom "$DIR/effective-pom.xml" || { show_log "$DIR/effective-pom.xml.log"; fallback "Maven error in the effective POM"; }
 analysis="$DIR/effective-pom.xml"
-tck=$(python3 - <<'PY' 2>/dev/null || true
+root_property() { # root_property <name>: a property of the raw root pom, or nothing
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
 import xml.etree.ElementTree as ET
 root = ET.parse("pom.xml").getroot()
 for el in root:
     if el.tag.split('}')[-1] == 'properties':
         for p in el:
-            if p.tag.split('}')[-1] == 'ci.tck.modules':
-                print((p.text or '').strip())
+            if p.tag.split('}')[-1] == sys.argv[1]:
+                print(' '.join((p.text or '').split()))
 PY
-)
+}
+tck=$(root_property ci.tck.modules)
+mention_local=$(root_property ci.targeted.mention-local)
+[ -z "$mention_local" ] || echo "Mentions kept local (ci.targeted.mention-local): $mention_local"
 if [ -n "$tck" ]; then
   echo "Effective POM with -Ptck (ci.tck.modules: $tck): what the TCK uses counts too"
   effective_pom "$DIR/effective-pom-tck.xml" -Ptck || { show_log "$DIR/effective-pom-tck.xml.log"; fallback "Maven error in the -Ptck effective POM"; }
@@ -158,7 +163,7 @@ fi
 
 rc=0
 python3 "$CHANGED_MODULES_PY" --effective-pom "$analysis" --build-effective-pom "$DIR/effective-pom.xml" \
-  --keep-modules "$tck" \
+  --keep-modules "$tck" --mention-local "$mention_local" \
   --repo "$REPO" --changed-files "$DIR/changed-files.txt" --report "$DIR/report.json" || rc=$?
 [ "$rc" -eq 0 ] || fallback "the analysis failed (exit $rc)"
 

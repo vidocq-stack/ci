@@ -23,7 +23,8 @@ closure (its version from the token, the module's dependencyManagement or its de
 one that cannot be resolved makes the module affected (doubt). So do a nested pom that does not
 parse or names a coordinate that cannot be resolved, and a producer artifactId named in any text
 file of the module's src/ (a test or the module's code may resolve it at run time; when only its
-test sources name it, the module's own artifact does not change, so its dependents are not added).
+test sources name it, the module's own artifact does not change, so its dependents are not added;
+nor when only files listed by --mention-local, the consumer's ci.targeted.mention-local, name it).
 
 A producer artifact can also reach a module through an external artifact (a jar of another
 repository that depends on the producer). The external io.vidocq artifacts of the modules not
@@ -55,6 +56,7 @@ or io.vidocq artifact as a core extension, a suspect external whose closure cann
 established in a module not already affected, a closure Maven did not write).
 """
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -129,6 +131,7 @@ class Analysis:
         self.args = args
         self.repo = os.path.realpath(args.repo)
         self.upstream_groups = [g.strip() for g in (args.upstream_groups or '').split(',') if g.strip()]
+        self.mention_local = [p.strip().strip('/') for p in (args.mention_local or '').split(',') if p.strip()]
         self.changed = set(read_lines(args.producer_artifacts))
         if not self.changed:
             raise Fallback('the producer artifact set is empty (the producer artifacts could not '
@@ -159,6 +162,13 @@ class Analysis:
         the artifacts of any other repository cannot contain the producer."""
         g = group_of(ga)
         return g in self.producer_groups or any(g == u or g.startswith(u + '.') for u in self.upstream_groups)
+    def is_local(self, path):
+        """A file listed by the consumer's ci.targeted.mention-local (repository-relative globs)."""
+        rel = os.path.relpath(os.path.realpath(path), self.repo).replace(os.sep, '/')
+        return any(fnmatch.fnmatchcase(rel, p) for p in self.mention_local)
+
+    def not_local(self, path):
+        return not self.is_local(path)
 
     def suspect(self, ga):
         if ga in self.mods or ga in self.changed or not is_vidocq(ga, self.producer_groups):
@@ -221,11 +231,15 @@ class Analysis:
                 for r in m.source_refs:
                     if self.suspect(r.ga) and not self.text_version(m, r):
                         reasons.add(f'source text names {r.ga} without a version, closure unknown (doubt)')
-                main = pommodel.scan_sources(m, artifact_ids, where='main')
+                main = pommodel.scan_sources(m, artifact_ids, where='main', accept=self.not_local)
                 reasons |= set(main)
                 if not main:
-                    tests = pommodel.scan_sources(m, artifact_ids, where='test')
-                    if tests:
+                    local = (pommodel.scan_sources(m, artifact_ids, accept=self.is_local)
+                             if self.mention_local else [])
+                    tests = pommodel.scan_sources(m, artifact_ids, where='test', accept=self.not_local)
+                    if local:
+                        self.test_only[ga] = local[0] + ' (ci.targeted.mention-local: its dependents are not affected)'
+                    elif tests:
                         self.test_only[ga] = tests[0] + ' (tests only: dependents that do not use its test classes are not affected)'
             if reasons:
                 hits[ga] = sorted(reasons)
@@ -354,6 +368,8 @@ def main():
     ap.add_argument('--upstream-groups', default='', help='comma-separated groupIds of the impacted '
                     'intermediate upstreams (io.vidocq.<repository>): coordinates written in sources are '
                     'suspects only for them and the producer')
+    ap.add_argument('--mention-local', default='', help='comma-separated repository-relative paths or '
+                    'globs (ci.targeted.mention-local) whose mentions keep their module\'s tests only')
     ap.add_argument('--local-repo', help='the local Maven repository, to follow the external parent '
                     'and BOM import chains; without it an external io.vidocq chain is a doubt')
     args = ap.parse_args()
