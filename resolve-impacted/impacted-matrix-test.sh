@@ -57,7 +57,9 @@ check "an upstream missing from the impacted list is not listed" \
   '{"Vidocq/foy":"","Vidocq/cyrano":"","Vidocq/vidocq":"Vidocq/foy Vidocq/cyrano"}' "$(line upstreams)"
 
 : > "$TMP/impacted.txt"
-check "no consumer: an empty include and count 0" '{"include":[]}|0' "$(line matrix)|$(line count)"
+# Forgejo creates no job for an empty matrix, so the jobs that need it stay blocked forever:
+# one placeholder entry instead, which the downstream job skips on count 0.
+check "no consumer: one placeholder entry and count 0" '{"include":[{"repo":"none"}]}|0' "$(line matrix)|$(line count)"
 
 printf 'Vidocq/foy\n\nVidocq/foy\nVidocq/vauban\n' > "$TMP/impacted.txt"
 check "blank lines, duplicates and the producer itself are ignored" '{"include":[{"repo":"Vidocq/foy"}]}' "$(line matrix)"

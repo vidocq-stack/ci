@@ -8,6 +8,10 @@ Prints three `name=value` lines, ready for $GITHUB_OUTPUT, each value compact JS
 
   matrix={"include":[{"repo":"Vidocq/foy"},...]}   for strategy.matrix (fromJSON)
   count=N                                           number of consumers
+  With no consumer, the matrix holds one placeholder entry, {"repo":"none"}: Forgejo creates no
+  job for an empty matrix, and the jobs that need that job then stay blocked forever. The
+  downstream job must skip on count 0; were it to run, build-one-consumer fails on the clone of
+  "none", so the placeholder can never pass for a consumer.
   upstreams={"Vidocq/cassini":"Vidocq/foy",...}     for each consumer, the other impacted
                                                     consumers it depends on, directly or not,
                                                     space-separated in topological order
@@ -50,7 +54,7 @@ def matrix(graph, producer, impacted):
             stack.extend(preds.get(r, ()))
         seen.discard(producer)
         upstreams[repo] = " ".join(sorted(seen, key=lambda r: position[r]))
-    return {"include": [{"repo": r} for r in impacted]}, upstreams
+    return {"include": [{"repo": r} for r in impacted] or [{"repo": "none"}]}, upstreams
 
 
 def main(argv):

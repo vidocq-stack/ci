@@ -31,7 +31,7 @@ inputs:
 
 outputs:
   matrix:
-    description: 'JSON for strategy.matrix: {"include":[{"repo":"Vidocq/foy"},...]} (topological order)'
+    description: 'JSON for strategy.matrix: {"include":[{"repo":"Vidocq/foy"},...]} (topological order); one placeholder entry {"repo":"none"} when count is 0 (skip on count)'
     value: ${{ steps.matrix.outputs.matrix }}
   count:
     description: 'Number of consumers in the matrix ("0": nothing to rebuild)'
