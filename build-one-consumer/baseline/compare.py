@@ -194,11 +194,12 @@ def main(argv):
     ap.add_argument('--baseline-log', required=True)
     ap.add_argument('--pr-first', help='the first pull-request build\'s reports, saved before the rerun')
     ap.add_argument('--pr-first-log')
+    ap.add_argument('--pr-first-source', help='the checkout the first build ran in (default --pr): error paths')
     ap.add_argument('--baseline-producer', default='', help='what the baseline resolved for the producer (summary)')
     ap.add_argument('--json')
     ap.add_argument('--summary')
     a = ap.parse_args(argv)
-    first = collect(a.pr_first, a.pr_first_log, a.pr) if a.pr_first else None
+    first = collect(a.pr_first, a.pr_first_log, a.pr_first_source or a.pr) if a.pr_first else None
     out = decide(collect(a.pr, a.pr_log), collect(a.baseline, a.baseline_log), first)
     out['baseline_producer'] = a.baseline_producer
     if a.json:

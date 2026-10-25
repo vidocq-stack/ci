@@ -134,8 +134,12 @@ PY
 fi
 if [ "$rc" -eq 0 ] && ! has_failures "$BASE"; then
   echo "Baseline: green against the producer's current main: the failures are caused by this pull request."
-  python3 "$HERE/compare.py" --pr "$PR_DIR" --pr-log "$PR_LOG" --baseline "$BASE" --baseline-log "$WORKDIR/baseline.log" \
-    --baseline-producer "$producer_info" --summary "$summary_out" || true
+  # The first build stopped at its first failing module: its failures are the PR's, listed; the
+  # modules it skipped are not a rerun's.
+  mkdir -p "$WORKDIR/no-rerun"; : > "$WORKDIR/no-rerun.log"
+  python3 "$HERE/compare.py" --pr "$WORKDIR/no-rerun" --pr-log "$WORKDIR/no-rerun.log" --baseline "$BASE" \
+    --baseline-log "$WORKDIR/baseline.log" --pr-first "$WORKDIR/pr-first" --pr-first-log "$PR_LOG" \
+    --pr-first-source "$PR_DIR" --baseline-producer "$producer_info" --summary "$summary_out" || true
   exit 1
 fi
 

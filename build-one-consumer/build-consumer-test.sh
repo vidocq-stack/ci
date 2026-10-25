@@ -86,6 +86,7 @@ case " \$* " in
       if [ -n "\$fails" ]; then
         echo "[ERROR] Tests run: 3, Failures: \$(echo \$fails | wc -w | tr -d ' '), Errors: 0, Skipped: 0"
         case " \$* " in *" -Dmaven.test.failure.ignore=true "*) exit 0 ;; esac
+        echo "[INFO] Cyrano :: App ................................ SKIPPED"
         echo "[INFO] BUILD FAILURE"
         exit 1
       fi
@@ -228,6 +229,7 @@ check "baseline: ... and names it" "1" "$(grep -c '^- `.:surefire:acme.ATest#b`'
 check "baseline: a new failure fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL='a c' STUB_BASE_FAIL=a)"
 check "baseline: the summary names it" "1" "$(grep -c '^- `.:surefire:acme.ATest#c`' "$TMP/summary")"
 check "baseline: a green baseline fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL=a)"
+check "baseline: green baseline, the summary names the PR's failure" "1" "$(grep -c '^- `.:surefire:acme.ATest#a`' "$TMP/summary")"
 check "baseline: ... without the pull-request rerun" "0" "$(grep -c '^cyrano -B -ntp -fae' "$TMP/mvn-calls")"
 check "baseline: never on a companion-branch run" "1" "$(run CONSUMER=Vidocq/foy BASELINE_ON_FAILURE=true STUB_CONSUMER=foy STUB_PR_FAIL=a STUB_BASE_FAIL=a)"
 check "baseline: ... no baseline build there" "0" "$(grep -c '^foy-baseline' "$TMP/mvn-calls")"
