@@ -5,6 +5,56 @@ raw results, delta against the previous run.
 
 ---
 
+## 2026-10-25 (middle producers) — `tests: targeted` for chappe, champollion, cassini, foy, ravel, mansart (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max (18 cores, 128 GB), Temurin 25, Maven 3.9.16, `CI=true`.
+- **Code**: this branch, with external parent and BOM chains followed, and test-source-only mentions not
+  propagating. Whole-producer changed set, `graph-pruning` off.
+- **Sources**: origin/main of 2026-10-25. Producers: chappe `c6cff89`, champollion `56babcc`, cassini `9232f7d`,
+  foy `9fe2487`, ravel `4bf7006`, mansart `bbc1367`. Consumers: vidocq `425fca1`, foy `9fe2487`, knock `f244c25`,
+  cyrano `41c3af3`.
+- **Setup**: each producer was rebuilt by `rebuild-producer.sh` (`TESTS=targeted`, 0.4.0-PR0.tgi). The consumer was
+  pinned and versioned the CI way. The analysis ran through `targeted-tests.sh`; the install ran through
+  `verify-mvn.sh` (isolated repository, warm) with the default `maven-args`.
+- **Network.** vidocq's three invoker-driven IT modules (Application layer, Brick codegen, Continuous testing)
+  resolve SNAPSHOTs from central-snapshots in nested builds. During this session they took 4–6 min instead of
+  about 50 s. vidocq's full install measured **222 s** at 03:17 and **592 s / 582 s** during these runs.
+  Compare the vidocq rows with the 592 s baseline measured in the same conditions.
+
+| Producer → consumer | Non-pom modules affected | Analysis | Targeted install | Full install (same session) | Tests run (targeted / full) | Fallback |
+|---|---:|---:|---:|---:|---:|---|
+| chappe → vidocq | 33 / 77 | 13 s | 492 s | 592 s | 1 124 / 3 233 | none |
+| champollion → vidocq | 22 / 77 | 13 s | 104 s | 592 s | 269 / 3 233 | none |
+| cassini → vidocq | 65 / 77 | 9 s | 570 s | 592 s | 2 206 / 3 233 | none |
+| foy → vidocq | 12 / 77 | 15 s | 412 s | 592 s | 716 / 3 233 | none |
+| ravel → vidocq | 12 / 77 | 14 s | 103 s | 592 s | 27 / 3 233 | none |
+| mansart → vidocq | 69 / 77 | 9 s | 617 s | 592 s | 2 487 / 3 233 | none |
+| chappe → foy | 8 / 11 | 4 s | 45 s | 46 s | 1 397 / 1 432 | none |
+| cassini → knock | 3 / 7 | 9 s | 14 s | 17 s | 16 / 68 | none |
+| champollion → knock | 5 / 7 | 4 s | 19 s | 17 s | 61 / 68 | none |
+| ravel → cyrano | 5 / 7 | 4 s | 21 s | 21 s | 159 / 172 | none |
+
+Notes:
+- **What sets the time on vidocq.** It is whether the Application layer and Brick codegen ITs are affected (185 s
+  and 101 s in these conditions):
+  - foy reaches them through foy-servlet-extension and ibarra-pages-extension;
+  - chappe, cassini and mansart reach them too;
+  - champollion and ravel do not.
+- **cassini and mansart** select nearly everything. Main sources name their artifacts:
+  - `vidocq-runtime-maven-plugin`'s `VidocqJlinkMojo` names `cassini-maven-plugin`;
+  - `vidocq-runtime-devconsole-spi` names `mansart-pool`.
+
+  Both modules are depended on almost everywhere.
+- **foy → vidocq** selected 73 / 77 before test-source-only mentions stopped propagating:
+  `vidocq-runtime-maven-plugin`'s tests name `foy-core`.
+- **One module in every row.** `vidocq-runtime-knock-health-example` is affected for every producer: its
+  `<includeArtifact>io.vidocq.knock:knock-jaxrs</includeArtifact>` has no version, so its closure is unknown
+  (doubt).
+- **The small consumers (foy, knock, cyrano)** finish in 14–45 s in either mode, so the targeted mode changes
+  little there.
+
+---
+
 ## 2026-10-25 (review fixes) — `tests: targeted` with the default `graph-pruning: false` (Vidocq/vidocq#285)
 
 - **Hardware/JVM, sources, setup and build command**: as in the entry below. One change: the analysis now has
