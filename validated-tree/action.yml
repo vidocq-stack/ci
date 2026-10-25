@@ -22,8 +22,14 @@ inputs:
   tree-id:
     description: "mode 'record': the id the check output (a job output of the checking job). Empty: computed from HEAD."
     default: ''
+  key-suffix:
+    description: >
+      Appended to the key, in both modes: what else the validation is of, known before the check. The SonarQube
+      analysis passes the date of the pull request's last analysis, so a record matches only while the analysis it
+      records is still the pull request's last one.
+    default: ''
   note:
-    description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note (e.g. 'analysis=<date of the SonarQube analysis>')"
+    description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note "
     default: ''
   bot-token:
     description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN), to look for companion branches without rate limits; may be empty'
@@ -81,18 +87,16 @@ runs:
           | tee -a "$GITHUB_OUTPUT"
 
     # The cache's version is derived from `path`, so check and record must name the same relative path.
-    # A record is a few bytes: it is restored, for the commit and note it carries, then removed. Cache keys cannot be
-    # written twice, so each run records under a key of its own and the check takes the newest one of the tree through
-    # the prefix (the exact key is never saved): a later record of the same tree, with another note, replaces the
-    # earlier one.
+    # A record is a few bytes: it is restored, for the commit and note it carries, then removed. Exact keys only: the
+    # runners' cache server did not match a restore-keys prefix (Vidocq/vidocq#362), and a key cannot be written
+    # twice, so whatever must invalidate a record goes into the key (key-suffix).
     - name: Look the validation up
       id: lookup
       if: inputs.mode == 'check' && steps.eligible.outputs.eligible == 'true'
       uses: actions/cache/restore@v4
       with:
         path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-newest
-        restore-keys: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-run
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}${{ inputs.key-suffix != '' && format('-{0}', inputs.key-suffix) || '' }}
 
     - name: Verdict
       id: verdict
@@ -101,7 +105,7 @@ runs:
       env:
         ELIGIBLE: ${{ steps.eligible.outputs.eligible }}
         WHY: ${{ steps.eligible.outputs.reason }}
-        HIT: ${{ steps.lookup.outputs.cache-matched-key != '' }}
+        HIT: ${{ steps.lookup.outputs.cache-hit }}
         SCOPE: ${{ inputs.scope }}
       run: |
         set -euo pipefail
@@ -139,4 +143,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-run${{ github.run_number }}.${{ github.run_attempt }}.${{ github.job }}
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}${{ inputs.key-suffix != '' && format('-{0}', inputs.key-suffix) || '' }}

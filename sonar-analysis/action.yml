@@ -47,20 +47,12 @@ runs:
   steps:
     # Vidocq/ci#57: a pull request whose code tree was already analysed (a docs-only commit, a rebase on a
     # docs-only move of main, the merge-bot's re-signing of an unchanged rebase) gets the quality gate of that
-    # analysis read again, instead of a new build and analysis: when that analysis is still the pull
-    # request's last one, so the gate on the server is the gate of this code.
-    - name: Was this code tree already analysed?
-      id: tree
+    # analysis read again, instead of a new build and analysis, when that analysis is still the pull request's last
+    # one: the record of a code tree is keyed with the date of the analysis it records, and looked up with the date of
+    # the pull request's last analysis.
+    - name: Date of the pull request's last analysis
+      id: last
       if: github.event_name == 'pull_request' && inputs.sonar-token != ''
-      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
-      with:
-        mode: check
-        scope: sonar-pr${{ github.event.pull_request.number }}
-        bot-token: ${{ inputs.bot-token }}
-
-    - name: Is its analysis still the pull request's last one?
-      id: reuse
-      if: steps.tree.outputs.reused == 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -68,33 +60,37 @@ runs:
         PROJECT_KEY: ${{ inputs.project-key }}
         REPOSITORY: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        NOTE: ${{ steps.tree.outputs.recorded-note }}
       run: |
         python3 - <<'PY' >> "$GITHUB_OUTPUT"
         import json, os, sys, urllib.parse, urllib.request
-        q = urllib.parse.quote
         host = os.environ["SONAR_HOST_URL"].rstrip("/")
         key = (os.environ.get("PROJECT_KEY") or "vidocq-" + os.environ["REPOSITORY"].split("/")[-1]).lower()
-        recorded = os.environ.get("NOTE", "").removeprefix("analysis=")
         try:
-            # The date of the pull request's last analysis: project_analyses/search ignores pullRequest and answers
-            # with main's analyses, and ce/activity needs the administer permission.
-            req = urllib.request.Request("%s/api/project_pull_requests/list?project=%s" % (host, q(key)),
+            # project_analyses/search ignores pullRequest (main's analyses), and ce/activity needs the administer
+            # permission: the pull request list gives the date of its last analysis.
+            req = urllib.request.Request("%s/api/project_pull_requests/list?project=%s" % (host, urllib.parse.quote(key)),
                                          headers={"Authorization": "Bearer " + os.environ["SONAR_TOKEN"]})
             with urllib.request.urlopen(req, timeout=30) as r:
                 prs = json.load(r).get("pullRequests") or []
-            last = next((p.get("analysisDate", "") for p in prs if p.get("key") == os.environ["PR_NUMBER"]), "")
-        except Exception as e:  # any doubt analyses again
-            print("::warning::Cannot read the pull request's last analysis (%s): analysing again." % e, file=sys.stderr)
-            last = ""
-        same = bool(recorded) and recorded == last
-        if not same:
-            print("::notice::The pull request was analysed since this code tree (%s, last %s): analysing again." % (recorded or "?", last or "?"), file=sys.stderr)
-        print("reuse=%s" % ("true" if same else "false"))
+            date = next((p.get("analysisDate", "") for p in prs if p.get("key") == os.environ["PR_NUMBER"]), "")
+        except Exception as e:  # no date: nothing can match, the pull request is analysed
+            print("::warning::Cannot read the pull request's last analysis (%s)." % e, file=sys.stderr)
+            date = ""
+        print("date=%s" % (date or "none"))
         PY
 
+    - name: Was this code tree that analysis?
+      id: tree
+      if: github.event_name == 'pull_request' && inputs.sonar-token != ''
+      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
+      with:
+        mode: check
+        scope: sonar-pr${{ github.event.pull_request.number }}
+        key-suffix: ${{ steps.last.outputs.date }}
+        bot-token: ${{ inputs.bot-token }}
+
     - name: SonarQube analysis
-      if: steps.reuse.outputs.reuse != 'true'
+      if: steps.tree.outputs.reused != 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -218,7 +214,7 @@ runs:
 
     - name: SonarQube quality gate
       id: gate
-      if: env.SONAR_ANALYSED == 'true' || env.SONAR_UNREACHABLE == 'true' || steps.reuse.outputs.reuse == 'true'
+      if: env.SONAR_ANALYSED == 'true' || env.SONAR_UNREACHABLE == 'true' || steps.tree.outputs.reused == 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -231,7 +227,7 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REPOSITORY: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
-        REUSED: ${{ steps.reuse.outputs.reuse }}
+        REUSED: ${{ steps.tree.outputs.reused }}
         REUSED_FROM: ${{ steps.tree.outputs.recorded-commit }}
       run: |
         python3 - <<'PY'
@@ -347,7 +343,7 @@ runs:
         mode: record
         scope: sonar-pr${{ github.event.pull_request.number }}
         tree-id: ${{ steps.tree.outputs.tree-id }}
-        note: analysis=${{ steps.gate.outputs.analysis }}
+        key-suffix: ${{ steps.gate.outputs.analysis }}
 
     - name: API compatibility report
       # A module whose build runs japicmp (Vidocq/vidocq#288) leaves target/japicmp/: its summary goes to
