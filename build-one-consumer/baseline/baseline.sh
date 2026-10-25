@@ -9,7 +9,8 @@
 #      built and tested, a test failure stops nothing.
 #   2. A green baseline (Maven succeeds, no failing test): the failures are the pull request's;
 #      fail at once.
-#   3. Otherwise the pull-request build again, in its own checkout (pin, PR version and skip set
+#   3. Otherwise the pull-request build again (its first build's reports saved first: a failure of
+#      the first build that passes in the rerun is still the pull request's, flaky with it), in its own checkout (pin, PR version and skip set
 #      unchanged), with the same flags, for the complete list of its failures (the first build
 #      stopped at the first failing module).
 #   4. compare.py: exit 0 only when every failure of the pull-request build (test case, invoker
@@ -26,6 +27,7 @@
 #   VERSION_SUFFIX      suffix of the PR versions; the baseline gets <base>-BASELINE.<suffix>
 #   TARGETED_REPORT     the targeted analysis report when the pull-request build skipped tests
 #   SHARED              directory of the shared scripts (../../build-impacted)
+#   PRODUCER_SHORT      short name of the producer (its <name>.version property), for the summary
 #   BASELINE_DIR        where to put the baseline checkout (<PR_DIR>-baseline)
 #   GITHUB_STEP_SUMMARY job summary, when set
 set -euo pipefail
@@ -42,6 +44,20 @@ if [ ! -s "$PR_LOG" ] || ! grep -q 'BUILD FAILURE' "$PR_LOG"; then
   echo "Baseline: the failure did not come from the consumer's Maven build (clone, pin, version...): not compared."
   exit 1
 fi
+
+# The first pull-request build's reports, before anything overwrites them.
+python3 - "$PR_DIR" "$WORKDIR/pr-first" <<'PY'
+import os, shutil, sys
+src, dst = sys.argv[1:]
+shutil.rmtree(dst, ignore_errors=True)
+os.makedirs(dst)
+for d, dirs, _ in os.walk(src):
+    dirs[:] = [x for x in dirs if not x.startswith('.')]
+    if os.path.basename(d) in ('surefire-reports', 'failsafe-reports', 'invoker-reports') \
+            and os.path.basename(os.path.dirname(d)) == 'target':
+        shutil.copytree(d, os.path.join(dst, os.path.relpath(d, src)))
+        dirs[:] = []
+PY
 
 echo "::group::Baseline: $CONSUMER at the same commit, against the producer's current main SNAPSHOT"
 rm -rf "$BASE"
@@ -85,10 +101,41 @@ PY
 }
 
 summary_out="${GITHUB_STEP_SUMMARY:-/dev/null}"
+# What "the producer's current main" was: the version the consumer declares, and the SNAPSHOT build
+# the local repository resolved (its metadata), so that a later reader knows.
+producer_info=""
+if [ -n "${PRODUCER_SHORT:-}" ]; then
+  declared=$(python3 - "$BASE/pom.xml" "$PRODUCER_SHORT" <<'PY' 2>/dev/null || true
+import sys, xml.etree.ElementTree as ET
+for el in ET.parse(sys.argv[1]).getroot():
+    if el.tag.split('}')[-1] == 'properties':
+        for p in el:
+            if p.tag.split('}')[-1] == sys.argv[2] + '.version':
+                print((p.text or '').strip())
+PY
+)
+  # shellcheck disable=SC2086
+  repo=$(cd "$BASE" && mvn $MVN_ARGS -N -q org.apache.maven.plugins:maven-help-plugin:3.5.2:evaluate \
+           -Dexpression=settings.localRepository -DforceStdout </dev/null 2>/dev/null || true)
+  resolved=$(python3 - "$repo" "$PRODUCER_SHORT" "$declared" <<'PY' 2>/dev/null || true
+import glob, os, sys, xml.etree.ElementTree as ET
+repo, short, version = sys.argv[1:]
+for meta in sorted(glob.glob(os.path.join(repo, 'io', 'vidocq', short, '*', version, 'maven-metadata-*.xml'))):
+    root = ET.parse(meta).getroot()
+    ts, bn = root.findtext('.//snapshot/timestamp'), root.findtext('.//snapshot/buildNumber')
+    if ts:
+        artifact = os.path.basename(os.path.dirname(os.path.dirname(meta)))
+        print(f"{artifact} {version.replace('-SNAPSHOT', '')}-{ts}-{bn}")
+        break
+PY
+)
+  producer_info="${PRODUCER_SHORT} ${declared:-?} (${resolved:-resolved build unknown})"
+  echo "Baseline producer: $producer_info"
+fi
 if [ "$rc" -eq 0 ] && ! has_failures "$BASE"; then
   echo "Baseline: green against the producer's current main: the failures are caused by this pull request."
   python3 "$HERE/compare.py" --pr "$PR_DIR" --pr-log "$PR_LOG" --baseline "$BASE" --baseline-log "$WORKDIR/baseline.log" \
-    --summary "$summary_out" || true
+    --baseline-producer "$producer_info" --summary "$summary_out" || true
   exit 1
 fi
 
@@ -100,7 +147,8 @@ tail -n 20 "$WORKDIR/pr-rerun.log"
 echo "::endgroup::"
 
 if python3 "$HERE/compare.py" --pr "$PR_DIR" --pr-log "$WORKDIR/pr-rerun.log" --baseline "$BASE" \
-     --baseline-log "$WORKDIR/baseline.log" --json "$WORKDIR/baseline-decision.json" --summary "$summary_out"; then
+     --baseline-log "$WORKDIR/baseline.log" --pr-first "$WORKDIR/pr-first" --pr-first-log "$PR_LOG" \
+     --baseline-producer "$producer_info" --json "$WORKDIR/baseline-decision.json" --summary "$summary_out"; then
   n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["pre_existing"]))' "$WORKDIR/baseline-decision.json")
   echo "::warning title=Pre-existing failures in ${CONSUMER}::${n} failure(s) of ${CONSUMER} also fail against the producer's current main: not caused by this PR (see the job summary). Fix them in ${CONSUMER}."
   exit 0

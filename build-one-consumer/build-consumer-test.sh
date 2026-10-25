@@ -74,6 +74,8 @@ case " \$* " in
     # Test failures of the consumer (STUB_PR_FAIL with the producer pinned, STUB_BASE_FAIL without).
     if [ -n "\${STUB_PR_FAIL:-}\${STUB_BASE_FAIL:-}" ] && [ "\${name%-baseline}" = "\${STUB_CONSUMER:-cyrano}" ]; then
       if grep -q '<vauban.version>0.4.0-PR7' pom.xml; then fails="\${STUB_PR_FAIL:-}"; else fails="\${STUB_BASE_FAIL:-}"; fi
+      # STUB_PR_FIRST_ONLY: failing in the first pull-request build only (flaky with the PR).
+      case " \$* " in *" -Dmaven.test.failure.ignore=true "*) ;; *) grep -q '<vauban.version>0.4.0-PR7' pom.xml && fails="\$fails \${STUB_PR_FIRST_ONLY:-}" ;; esac
       mkdir -p target/surefire-reports
       { echo '<testsuite name="acme.ATest">'
         for t in a b c; do
@@ -218,8 +220,13 @@ check "baseline: the baseline is the same commit without the producer pin, tests
   "$(grep -c '^cyrano-baseline -B -ntp -fae -Dmaven.test.failure.ignore=true install' "$TMP/mvn-calls")"
 check "baseline: the pull-request rerun keeps the pin and goes on past failures" "1" \
   "$(grep -c '^cyrano -B -ntp -fae -Dmaven.test.failure.ignore=true install' "$TMP/mvn-calls")"
+check "baseline: the summary records the producer the baseline resolved" "1" \
+  "$(grep -c '^Baseline producer, as resolved at the time of the build: vauban 0.4.0-SNAPSHOT' "$TMP/summary")"
+check "baseline: a failure of the first PR build that passes in the rerun fails the step" "1" \
+  "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL=a STUB_PR_FIRST_ONLY=b STUB_BASE_FAIL=a)"
+check "baseline: ... and names it" "1" "$(grep -c '^- `.:surefire:acme.ATest#b`' "$TMP/summary")"
 check "baseline: a new failure fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL='a c' STUB_BASE_FAIL=a)"
-check "baseline: the summary names it" "1" "$(grep -c '^- `acme.ATest#c`' "$TMP/summary")"
+check "baseline: the summary names it" "1" "$(grep -c '^- `.:surefire:acme.ATest#c`' "$TMP/summary")"
 check "baseline: a green baseline fails the step" "1" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= BASELINE_ON_FAILURE=true STUB_PR_FAIL=a)"
 check "baseline: ... without the pull-request rerun" "0" "$(grep -c '^cyrano -B -ntp -fae' "$TMP/mvn-calls")"
 check "baseline: never on a companion-branch run" "1" "$(run CONSUMER=Vidocq/foy BASELINE_ON_FAILURE=true STUB_CONSUMER=foy STUB_PR_FAIL=a STUB_BASE_FAIL=a)"

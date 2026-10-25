@@ -23,7 +23,10 @@ check() {
 }
 
 # A run: <dir>/<module>/target/{surefire,failsafe}-reports/TEST-*.xml and <dir>.log
-run_dir() { rm -rf "$TMP/$1" "$TMP/$1.log"; mkdir -p "$TMP/$1"; : > "$TMP/$1.log"; }
+run_dir() { rm -rf "$TMP/$1" "$TMP/$1.log" "$TMP/first" "$TMP/first.log"; mkdir -p "$TMP/$1"; : > "$TMP/$1.log"; }
+first_dir() { rm -rf "$TMP/first" "$TMP/first.log"; mkdir -p "$TMP/first"; : > "$TMP/first.log"; }
+# The surefire summary of a module, as the log prints it (the count check reads it).
+summary_line() { log "$1" "[ERROR] Tests run: $3, Failures: $2, Errors: 0, Skipped: 0"; }
 testcase() { # testcase <run> <module> <plugin: surefire|failsafe> <class> <method> <ok|failure|error|flaky>
   local f="$TMP/$1/$2/target/$3-reports/TEST-$4.xml" body=""
   mkdir -p "$(dirname "$f")"
@@ -51,8 +54,11 @@ builderr() { # builderr <run> <artifactId> <goal>
   log "$1" "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-$3 (default-$3) on project $2: Compilation failure"
 }
 skipped() { log "$1" "[INFO] Vidocq :: $2 ................................ SKIPPED"; }
-compare() { # compare -> exit status; decision in $TMP/out.json
+compare() { # compare -> exit status; decision in $TMP/out.json (the first PR build: $TMP/first, when it exists)
+  local first=()
+  [ -d "$TMP/first" ] && first=(--pr-first "$TMP/first" --pr-first-log "$TMP/first.log")
   python3 "$HERE/compare.py" --pr "$TMP/pr" --pr-log "$TMP/pr.log" --baseline "$TMP/base" --baseline-log "$TMP/base.log" \
+    ${first[@]+"${first[@]}"} \
     --json "$TMP/out.json" --summary "$TMP/summary.md" > "$TMP/compare.out" 2>&1
   echo $?
 }
@@ -64,7 +70,7 @@ testcase pr core surefire acme.ATest a failure; testcase pr core surefire acme.A
 testcase base core surefire acme.ATest a ok; testcase base core surefire acme.ATest b ok
 check "PR-only failure: exit 1" "1" "$(compare)"
 check "PR-only failure: decision" "caused-by-pr" "$(field decision)"
-check "PR-only failure: names it" "acme.ATest#a" "$(field new)"
+check "PR-only failure: names it, with its module and report kind" "core:surefire:acme.ATest#a" "$(field new)"
 
 # 2. The same failures on both sides: pre-existing.
 run_dir pr; run_dir base
@@ -72,7 +78,7 @@ testcase pr core surefire acme.ATest a failure; testcase pr it failsafe acme.BIT
 testcase base core surefire acme.ATest a failure; testcase base it failsafe acme.BIT b failure
 check "same failures: exit 0" "0" "$(compare)"
 check "same failures: decision" "pre-existing" "$(field decision)"
-check "same failures: lists them" "acme.ATest#a acme.BIT#b" "$(field pre_existing)"
+check "same failures: lists them" "core:surefire:acme.ATest#a it:failsafe:acme.BIT#b" "$(field pre_existing)"
 check "same failures: the summary has the section" "1" "$(grep -c '^### Pre-existing failures, not caused by this PR' "$TMP/summary.md")"
 
 # 3. A superset: one new failure besides the pre-existing ones.
@@ -80,7 +86,7 @@ run_dir pr; run_dir base
 testcase pr core surefire acme.ATest a failure; testcase pr core surefire acme.ATest c failure
 testcase base core surefire acme.ATest a failure; testcase base core surefire acme.ATest c ok
 check "superset: exit 1" "1" "$(compare)"
-check "superset: the new one" "acme.ATest#c" "$(field new)"
+check "superset: the new one" "core:surefire:acme.ATest#c" "$(field new)"
 
 # 4. Flaky: a test that passed on rerun is no failure.
 run_dir pr; run_dir base
@@ -96,10 +102,13 @@ check "green baseline: exit 1" "1" "$(compare)"
 
 # 6. Compilation error on both sides, same module, same goal: pre-existing.
 run_dir pr; run_dir base
-builderr pr acme-core compiler-plugin:3.14.0:compile; skipped pr "App"
-builderr base acme-core compiler-plugin:3.14.0:compile; skipped base "App"
+builderr pr acme-core compiler-plugin:3.14.0:compile
+log pr "[ERROR] $TMP/pr/core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (0.4.0-PR7.abc)"
+builderr base acme-core compiler-plugin:3.14.0:compile
+log base "[ERROR] $TMP/base/core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (0.4.0-SNAPSHOT)"
 check "same build error both sides: exit 0" "0" "$(compare)"
-check "same build error both sides: listed" "build error acme-core compiler-plugin:3.14.0:compile" "$(field pre_existing)"
+check "same build error both sides: listed by goal and by error line" \
+  "build error acme-core compiler-plugin:3.14.0:compile error core/src/main/java/acme/Old.java:[9,1] cannot find symbol OldApi (V)" "$(field pre_existing)"
 
 # 7. Build error at another module or goal on the baseline: caused by the PR.
 run_dir pr; run_dir base
@@ -137,6 +146,61 @@ check "invoker IT failing on both sides: exit 0" "0" "$(compare)"
 run_dir pr; run_dir base
 invoker pr plugin it-one failure-build; invoker base plugin it-one success
 check "invoker IT failing on the PR side only: exit 1" "1" "$(compare)"
+
+# 12. Review 69-C1: a failure of the FIRST PR build that passes in the rerun is the PR's (flaky with
+#     the PR), unless the baseline has it too.
+run_dir pr; run_dir base; first_dir
+testcase first core surefire acme.ATest t failure; testcase first core surefire acme.ATest p failure
+summary_line first 2 3
+log first "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project acme-core: There are test failures."
+testcase pr core surefire acme.ATest t ok; testcase pr core surefire acme.ATest p failure
+testcase base core surefire acme.ATest t ok; testcase base core surefire acme.ATest p failure
+check "first build failure gone in the rerun: exit 1" "1" "$(compare)"
+check "first build failure gone in the rerun: named" "core:surefire:acme.ATest#t" "$(field new)"
+run_dir pr; run_dir base; first_dir
+testcase first core surefire acme.ATest p failure; summary_line first 1 3
+log first "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.5.5:test (default-test) on project acme-core: There are test failures."
+testcase pr core surefire acme.ATest p failure
+testcase base core surefire acme.ATest p failure
+check "first build: its test-failure goal is no build error, the pre-existing failure passes" "0" "$(compare)"
+
+# 13. Review 69-I1: the same class#method failing in another module is another test.
+run_dir pr; run_dir base
+testcase pr mod-a failsafe acme.SmokeIT boots failure
+testcase base mod-b failsafe acme.SmokeIT boots failure
+check "same test name in another module: exit 1" "1" "$(compare)"
+run_dir pr; run_dir base
+testcase pr mod-a surefire acme.SmokeIT boots failure
+testcase base mod-a failsafe acme.SmokeIT boots failure
+check "same test under another report kind: exit 1" "1" "$(compare)"
+
+# 14. Review 69-I2: the log counts more failures than the reports name (killed fork, other reports dir).
+run_dir pr; run_dir base
+testcase pr core surefire acme.ATest p failure; summary_line pr 3 5
+testcase base core surefire acme.ATest p failure; summary_line base 1 5
+check "log counts more failures than the reports: exit 1" "1" "$(compare)"
+check "log counts more failures than the reports: doubt" "doubt" "$(field decision)"
+run_dir pr; run_dir base
+testcase pr core surefire acme.ATest p failure; summary_line pr 1 5
+log pr "[WARNING] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Flakes: 1"
+testcase base core surefire acme.ATest p failure; summary_line base 1 5
+check "counts that match (a Flakes summary included): exit 0" "0" "$(compare)"
+
+# 15. Review 69-I3: another compile error in the same module and goal is the PR's.
+run_dir pr; run_dir base
+builderr pr acme-core compiler-plugin:3.14.0:compile
+log pr "[ERROR] $TMP/pr/core/src/main/java/acme/Foo.java:[3,1] cannot find symbol NewApi"
+builderr base acme-core compiler-plugin:3.14.0:compile
+log base "[ERROR] $TMP/base/core/src/main/java/acme/Bar.java:[9,1] old error"
+check "another compile error, same module and goal: exit 1" "1" "$(compare)"
+check "another compile error: the new line is named" "1" "$(field new | grep -c 'Foo.java:\[3,1\] cannot find symbol NewApi')"
+
+# 16. Review 69-I4: modules the PR rerun skipped were never tested with the PR: fail, whatever the baseline.
+run_dir pr; run_dir base
+builderr pr acme-core compiler-plugin:3.14.0:compile; skipped pr "App"
+builderr base acme-core compiler-plugin:3.14.0:compile; skipped base "App"
+check "modules skipped in the PR rerun (on both sides): exit 1" "1" "$(compare)"
+check "modules skipped in the PR rerun: named" "1" "$(field reason | grep -c 'App')"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"

@@ -204,6 +204,7 @@ if [ "$build_rc" -ne 0 ]; then
   if [ "$BASELINE_ON_FAILURE" = true ] && [ -z "$consumer_branch" ] && [ "${#chain[@]}" -eq 0 ]; then
     if CONSUMER="$CONSUMER" PR_DIR="$WORK/$s" PR_LOG="$LOGS/$s.log" VERSION_SUFFIX="$VERSION_SUFFIX" \
          TARGETED_REPORT="${RUNNER_TEMP:-/tmp}/targeted/consumer/report.json" SHARED="$SHARED" \
+         PRODUCER_SHORT="$(short_name "$PRODUCER_SLUG")" \
          bash "$HERE/baseline/baseline.sh" </dev/null; then
       baseline_note="pre-existing failures only"
     else
