@@ -70,3 +70,6 @@ jobs:
           bash bench-window/bench-window-test.sh
           bash merge-bot/required-checks-test.sh
           bash merge-bot/checks-timeout-test.sh
+          bash merge-bot/refusal-test.sh
+          bash pr-validate-gate/gate-test.sh
+          bash scripts/train-merge-test.sh
