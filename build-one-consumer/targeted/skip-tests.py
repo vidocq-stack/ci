@@ -58,10 +58,12 @@ def edited(text, path, props):
     scan = text
     for rx in BLANK:
         scan = rx.sub(lambda m: ' ' * len(m.group(0)), scan)
-    depth, project_close, props_open_end = 0, None, None
+    depth, project_close, props_open_end, props_empty = 0, None, None, None
     for m in TAG.finditer(scan):
         closing, name, _attrs, selfclose = m.groups()
         if selfclose:
+            if depth == 1 and name == 'properties' and props_open_end is None and props_empty is None:
+                props_empty = m
             continue
         if closing:
             depth -= 1
@@ -71,6 +73,8 @@ def edited(text, path, props):
             depth += 1
             if depth == 2 and name == 'properties' and props_open_end is None:
                 props_open_end = m.end()
+    if props_empty is not None and (props_open_end is None or props_empty.start() < props_open_end):
+        return text[:props_empty.start()] + '<properties>' + props + '</properties>' + text[props_empty.end():]
     if props_open_end is not None:
         return text[:props_open_end] + props + text[props_open_end:]
     if project_close is not None:
@@ -100,25 +104,28 @@ def main():
         props = ''.join(f'<{n}>true</{n}>' for n in NAMES if n not in mine)
         if not props:
             continue
-        with open(path, encoding='utf-8') as f:
+        with open(path, 'rb') as f:
             original = f.read()
-        new = edited(original, path, props)
-        ET.fromstring(new.encode('utf-8'))          # still well-formed
+        new = edited(original.decode('utf-8'), path, props).encode('utf-8')
+        tree = ET.fromstring(new)                    # still well-formed, one <properties>
+        if sum(1 for c in tree if c.tag.split('}')[-1] == 'properties') != 1:
+            raise SystemExit(f'skip-tests.py: {rel}: the edit would not leave exactly one <properties>')
         plan.append((rel, path, original, new))
-    done = []
-    try:
-        for rel, path, original, new in plan:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(new)
-            done.append((path, original))
-    except OSError:
-        for path, original in done:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(original)
-        raise
+    # The result first: once a pom is written, nothing but the pom writes may fail.
     result = {'skipped': [rel for rel, *_ in plan], 'own': own}
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=1, sort_keys=True)
+    try:
+        for _rel, path, original, new in plan:
+            with open(path, 'wb') as f:
+                f.write(new)
+    except BaseException:
+        # Restore every planned pom, the one whose write failed halfway included.
+        for _rel, path, original, _new in plan:
+            with open(path, 'wb') as f:
+                f.write(original)
+        os.remove(args.out)
+        raise
     print(f"tests skipped in {len(plan)} module(s); own values kept in {len(own)}")
 
 

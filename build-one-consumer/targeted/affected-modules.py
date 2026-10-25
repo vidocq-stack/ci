@@ -17,10 +17,20 @@ under src/ (maven-invoker-plugin ITs, test projects); or when it depends on an a
 module by any of these references (Maven -amd, plus processor paths and nested builds: a module
 whose annotationProcessorPaths name a reactor codegen module is affected with it).
 
+Coordinates written as text in a plugin configuration (`g:a[:...][:version]` tokens) count as
+references too: a reactor module named that way is a reactor edge, an external one gets its
+closure (its version from the token, the module's dependencyManagement or its dependencies), and
+one that cannot be resolved makes the module affected (doubt). So do a nested pom that does not
+parse or names a coordinate that cannot be resolved, and a producer artifactId named in any text
+file of the module's src/ (a test that resolves it at run time).
+
 A producer artifact can also reach a module through an external artifact (a jar of another
 repository that depends on the producer). The external io.vidocq artifacts of the modules not
-yet affected are "suspect"; with the dependency graph (inverted.json), only those produced by a
-repository that consumes the producer, directly or not, or unknown to the graph. Their closures
+yet affected are "suspect" (assumption: only io.vidocq artifacts, or artifacts of the producer's
+groups, can carry the producer; a third-party artifact wrapping or shading one is not seen);
+with the dependency graph (inverted.json, opt-in), only those produced by a repository that
+consumes the producer, directly or not, or unknown to the graph. An external parent is matched
+by its own coordinates only: its ancestors are not followed. Their closures
 come from one Maven run on a synthetic project written to --synthetic (one module per
 artifact, resolved as a pom so that no jar is downloaded; a dependency keeps the
 dependencyManagement of the module that declares it):
@@ -52,7 +62,8 @@ from pommodel import PomError, child, children, text  # noqa: E402
 
 VIDOCQ_GROUP = 'io.vidocq'
 CLOSURE_KINDS = ('dependency', 'plugin', 'plugin dependency', 'extension', 'plugin configuration',
-                 'nested build')
+                 'plugin configuration text', 'nested build')
+TEXT = 'plugin configuration text'
 
 
 class Fallback(Exception):
@@ -120,7 +131,7 @@ class Analysis:
                 self.produced_by, self.reached = load_graph(args.graph, args.producer_slug, self.changed)
                 self.pruning = ('dependency graph: only the externals of '
                                 + ', '.join(sorted(self.reached)) + ' or unknown to the graph')
-            except (OSError, ValueError, KeyError, TypeError) as e:
+            except Exception as e:  # noqa: BLE001 - any malformed graph: no pruning
                 self.pruning = f'none (dependency graph unreadable: {e})'
         check_core_extensions(self.repo, self.changed, self.producer_groups)
         self.mods = pommodel.load_reactor(args.effective_pom)
@@ -139,13 +150,32 @@ class Analysis:
         owner = self.produced_by.get(ga)
         return owner is None or owner in self.reached
 
+    @staticmethod
+    def text_version(m, r):
+        """Version of a coordinate written as text: its own, else the one the module manages
+        or declares for that artifact."""
+        if r.version and not pommodel.TOKEN.search(r.version):
+            return r.version
+        return m.dm_versions.get(r.ga) or next(
+            (d.version for d in m.refs if d.kind == 'dependency' and d.ga == r.ga and d.version), None)
+
     def direct_hits(self):
+        artifact_ids = {ga.split(':', 1)[1] for ga in self.changed}
         hits = {}
         for ga, m in self.mods.items():
             reasons = {f'{r.label()} {r.ga}' for r in m.all_refs() if r.ga in self.changed}
             for t in m.config_text:
                 reasons |= {f'named in a plugin configuration: {c}' for c in self.changed if c in t}
-            reasons |= {f'nested pom {p} does not parse (doubt)' for p in m.nested_unreadable}
+            for r in m.refs:
+                if r.kind != TEXT or r.ga in self.changed:
+                    continue
+                if pommodel.TOKEN.search(r.ga):
+                    reasons.add(f'plugin configuration names {r.ga}, which cannot be resolved (doubt)')
+                elif self.suspect(r.ga) and not self.text_version(m, r):
+                    reasons.add(f'plugin configuration names {r.ga} without a version, closure unknown (doubt)')
+            reasons |= set(m.doubts)
+            if m.packaging != 'pom':
+                reasons |= set(pommodel.scan_sources(m, artifact_ids))
             if reasons:
                 hits[ga] = sorted(reasons)
         return hits
@@ -161,7 +191,9 @@ class Analysis:
                 if r.kind not in CLOSURE_KINDS or r.ga in m.nested_local or not self.suspect(r.ga):
                     continue
                 version = r.version
-                if not version and r.kind == 'plugin configuration':
+                if r.kind == TEXT:
+                    version = self.text_version(m, r)
+                elif not version and r.kind == 'plugin configuration':
                     version = m.dm_versions.get(r.ga) or None
                 if not version or '${' in version or '@' in version:
                     raise Fallback(f'cannot establish the transitive closure of {r.ga} '

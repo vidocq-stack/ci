@@ -12,9 +12,11 @@
 #
 # Fallback on any doubt: whatever goes wrong (missing or empty producer artifact list, Maven
 # error in the effective POM or in the synthetic resolution, a pom that does not parse, an
-# analysis error, a closure that cannot be established...), no pom is edited and the build
-# runs every test, with the reason in the log and the job summary. This script never fails
-# the build itself.
+# analysis error, a closure that cannot be established, any error of this script...), the build
+# runs every test, with the reason in the log, a notice and the job summary. Every pom this
+# script may edit is copied first; on a fallback after the edits started, each one is put back
+# and compared byte for byte with its copy. When that cannot be done, the script fails the
+# step: a run with tests skipped is never reported as a full one.
 #
 # Env:
 #   PRODUCER_ARTIFACTS  producer artifacts, one groupId:artifactId per line, written by
@@ -22,31 +24,80 @@
 #   PRODUCER_SLUG       forge slug of the producer (for the dependency graph)
 #   CONSUMER            forge slug of the consumer (for the summary)
 #   MVN_ARGS            Maven args of the consumer build, word-split as given
-#   GRAPH_URL           optional URL of the dependency graph (graph/inverted.json): it prunes
-#                       the synthetic resolution; unreadable: no pruning, same result, slower
+#   GRAPH_URL           optional (graph-pruning: true only): URL of the dependency graph
+#                       (graph/inverted.json), which prunes the synthetic resolution; empty or
+#                       unreadable: every suspect external gets its closure resolved
 #   BOT_TOKEN           optional token for GRAPH_URL (rate limits)
 #   TARGETED_DIR        work directory ($RUNNER_TEMP/targeted/consumer)
 #   TESTS_MODE_OUT      file receiving the one-line test mode (TARGETED_DIR/mode.txt)
+#   SKIP_TESTS_PY       the pom editor (skip-tests.py next to this script; tests replace it)
 #   GITHUB_STEP_SUMMARY job summary, when set
 set -euo pipefail
+set -E
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MVN_ARGS="${MVN_ARGS--B -ntp}"
 DIR="${TARGETED_DIR:-${RUNNER_TEMP:-/tmp}/targeted/consumer}"
 PRODUCER_ARTIFACTS="${PRODUCER_ARTIFACTS:-${RUNNER_TEMP:-/tmp}/targeted/producer-artifacts.txt}"
 MODE_OUT="${TESTS_MODE_OUT:-$DIR/mode.txt}"
+SKIP_TESTS_PY="${SKIP_TESTS_PY:-$HERE/skip-tests.py}"
 HELP_PLUGIN=org.apache.maven.plugins:maven-help-plugin:3.5.2
 DEPENDENCY_PLUGIN=org.apache.maven.plugins:maven-dependency-plugin:3.8.1
 REPO="$PWD"
-rm -rf "$DIR"
-mkdir -p "$DIR"
+BACKUP="$DIR/backup"
+edits_started=false
 
-finish() { # finish <mode line> [with details]
+summary_section() { # summary_section <mode line> [details]
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "#### Tests of ${CONSUMER:-the consumer}"
+      echo
+      echo "Tests: $1"
+      echo
+      if [ -n "${2:-}" ]; then printf '%s\n\n' "$2"; fi
+    } >> "$GITHUB_STEP_SUMMARY" || true
+  fi
+}
+
+# Put back every pom copied before the edits and check each one byte for byte.
+restore_poms() {
+  [ -f "$BACKUP/list" ] || return 1
+  local rel ok=0
+  while IFS= read -r rel; do
+    cp "$BACKUP/$rel/pom.xml" "$REPO/$rel/pom.xml" 2>/dev/null || ok=1
+    cmp -s "$BACKUP/$rel/pom.xml" "$REPO/$rel/pom.xml" || ok=1
+  done < "$BACKUP/list"
+  return "$ok"
+}
+
+fallback() { # fallback <reason>: every test runs; never with a pom left edited
+  # In a subshell (command substitution), only report the failure to the main shell.
+  if [ "${BASHPID:-$$}" != "$$" ]; then exit 1; fi
+  trap - ERR
+  set +e
+  local mode="full (fallback: $1)"
+  if [ "$edits_started" = true ] && ! restore_poms; then
+    mode="failed: the poms edited for the targeted tests could not be restored ($1)"
+    printf '%s\n' "$mode" > "$MODE_OUT"
+    echo "::error title=Targeted tests::${CONSUMER:-the consumer}: $mode"
+    summary_section "$mode"
+    exit 1
+  fi
+  printf '%s\n' "$mode" > "$MODE_OUT"
+  echo "Tests: $mode"
+  echo "::notice title=Targeted tests::${CONSUMER:-the consumer}: $mode"
+  summary_section "$mode"
+  exit 0
+}
+trap 'fallback "internal error at line $LINENO of targeted-tests.sh"' ERR
+
+finish() { # finish <mode line>: the mode line first, then the details (never fatal)
   printf '%s\n' "$1" > "$MODE_OUT"
   echo "Tests: $1"
-  local details=""
-  if [ "${2:-}" = details ]; then
-    details=$(python3 - "$DIR/report.json" "$DIR/skipped.json" <<'PY'
+  echo "::notice title=Targeted tests::${CONSUMER:-the consumer}: $1"
+  trap - ERR
+  local details
+  details=$(python3 - "$DIR/report.json" "$DIR/skipped.json" 2>/dev/null <<'PY'
 import json, os, sys
 r = json.load(open(sys.argv[1]))
 s = json.load(open(sys.argv[2])) if os.path.exists(sys.argv[2]) else {'skipped': [], 'own': {}}
@@ -67,32 +118,24 @@ for m, why in s['own'].items():
     print(f'`{m}` {why}')
 PY
 ) || details=""
-    printf '%s\n' "$details"
-  fi
-  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-    {
-      echo "#### Tests of ${CONSUMER:-the consumer}"
-      echo
-      echo "Tests: $1"
-      echo
-      if [ -n "$details" ]; then printf '%s\n\n' "$details"; fi
-    } >> "$GITHUB_STEP_SUMMARY"
-  fi
-}
-fallback() { # fallback <reason>: no pom edited, every test runs
-  finish "full (fallback: $1)"
+  printf '%s\n' "$details"
+  summary_section "$1" "$details"
   exit 0
 }
 show_log() { echo "--- last lines of $1"; tail -n 30 "$1" 2>/dev/null || true; }
 field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$DIR/report.json" "$1"; }
+
+rm -rf "$DIR"
+mkdir -p "$DIR"
 
 if [ ! -s "$PRODUCER_ARTIFACTS" ]; then
   fallback "the producer artifact list is missing or empty (see the producer rebuild step)"
 fi
 
 graph_args=()
-if [ -n "${GRAPH_URL:-}" ]; then
-  if python3 - "$GRAPH_URL" "$DIR/inverted.json" <<'PY'
+if [ -z "${GRAPH_URL:-}" ]; then
+  echo "Dependency-graph pruning: off (every suspect external artifact gets its closure resolved)"
+elif python3 - "$GRAPH_URL" "$DIR/inverted.json" <<'PY'
 import os, sys, time, urllib.request
 url, out = sys.argv[1:]
 headers = {}
@@ -112,9 +155,11 @@ for attempt in range(3 if url.startswith('http') else 1):
 print(f'dependency graph not read from {url}: {err}', file=sys.stderr)
 sys.exit(1)
 PY
-  then
-    graph_args=(--graph "$DIR/inverted.json" --producer-slug "${PRODUCER_SLUG:-}")
-  fi
+then
+  echo "Dependency-graph pruning: on (graph from $GRAPH_URL)"
+  graph_args=(--graph "$DIR/inverted.json" --producer-slug "${PRODUCER_SLUG:-}")
+else
+  echo "Dependency-graph pruning: off (graph not read from $GRAPH_URL)"
 fi
 
 echo "Effective POM of the consumer"
@@ -141,8 +186,12 @@ analyse || rc=$?
 if [ "$(field decision)" = resolve ]; then
   n=$(field synthetic)
   echo "Resolving the closures of $n external artifact(s) (synthetic project)"
+  # The synthetic modules are independent and the run is mostly remote metadata checks: one
+  # thread per core (64 s -> 9 s for vidocq), unless the build's own args choose a -T.
+  parallel="-T 1C"
+  case " $MVN_ARGS " in *" -T "*|*" -T"[0-9]*|*" --threads"*) parallel="" ;; esac
   # shellcheck disable=SC2086
-  if ! (cd "$DIR/synthetic" && mvn $MVN_ARGS -f "$DIR/synthetic/pom.xml" "$DEPENDENCY_PLUGIN:list" \
+  if ! (cd "$DIR/synthetic" && mvn $MVN_ARGS $parallel -f "$DIR/synthetic/pom.xml" "$DEPENDENCY_PLUGIN:list" \
           -DoutputFile=deps.txt </dev/null > "$DIR/synthetic.log" 2>&1); then
     show_log "$DIR/synthetic.log"
     fallback "Maven error in the synthetic resolution of $n external artifact(s)"
@@ -153,12 +202,20 @@ fi
 
 case "$(field decision)" in
   full) fallback "$(field reason | tr '\n' ' ')" ;;
-  all) finish "full: every module is affected" details ;;
+  all) finish "full: every module is affected" ;;
   targeted)
-    python3 "$HERE/skip-tests.py" --repo "$REPO" --report "$DIR/report.json" --out "$DIR/skipped.json" \
+    # A copy of every pom that may be edited, before the first edit.
+    mkdir -p "$BACKUP"
+    python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["skip"]))' "$DIR/report.json" > "$BACKUP/list"
+    while IFS= read -r rel; do
+      mkdir -p "$BACKUP/$rel"
+      cp "$REPO/$rel/pom.xml" "$BACKUP/$rel/pom.xml"
+    done < "$BACKUP/list"
+    edits_started=true
+    python3 "$SKIP_TESTS_PY" --repo "$REPO" --report "$DIR/report.json" --out "$DIR/skipped.json" \
       || fallback "the pom edits failed"
     n=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["skipped"]))' "$DIR/skipped.json")
-    finish "targeted: tests skipped in $n module(s) (still compiled)" details
+    finish "targeted: tests skipped in $n module(s) (still compiled)"
     ;;
   *) fallback "unexpected analysis decision '$(field decision)'" ;;
 esac

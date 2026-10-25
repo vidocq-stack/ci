@@ -86,7 +86,8 @@ class Module:
         self.repositories_xml = ''    # <repositories> + <pluginRepositories>, plain XML
         self.nested_refs = []         # [Ref] named by nested builds under src/
         self.nested_local = set()     # GA declared by those nested poms themselves
-        self.nested_unreadable = []   # nested poms that do not parse
+        self.doubts = []              # reasons to treat the module as affected (unreadable or
+                                      # unresolvable nested coordinates, ...)
         self.imports = []             # GA of BOM imports in the raw pom (dependencyManagement)
 
     @property
@@ -101,18 +102,22 @@ class Module:
         out += self.nested_refs
         return out
 
-    def interpolate(self, value):
+    def interpolate(self, value, own=None):
         """Resolve @prop@ and ${prop} from the module's effective properties; None if a token
-        is left (filtering tokens a nested build would resolve some other way)."""
+        is left (filtering tokens a nested build would resolve some other way). @x@ is a
+        filtering token of the outer build; in ${x}, the project.* values come from `own` (the
+        nested project's own groupId and version) when given."""
         if not value:
             return None
-        builtins = {'project.version': self.version, 'project.groupId': self.group_id,
-                    'project.artifactId': self.artifact_id, 'version': self.version,
-                    'groupId': self.group_id, 'artifactId': self.artifact_id}
+        outer = {'project.version': self.version, 'project.groupId': self.group_id,
+                 'project.artifactId': self.artifact_id, 'version': self.version,
+                 'groupId': self.group_id, 'artifactId': self.artifact_id}
 
-        def sub(m):
-            key = m.group(1) or m.group(2)
-            return self.properties.get(key, builtins.get(key, m.group(0)))
+        def sub(mt):
+            key = mt.group(1) or mt.group(2)
+            if mt.group(2) and own and key in own:
+                return own[key]
+            return self.properties.get(key, outer.get(key, mt.group(0)))
         out = TOKEN.sub(sub, value)
         return None if TOKEN.search(out) else out
 
@@ -129,6 +134,28 @@ def _scan_config(cfg, m, kind):
             m.refs.append(Ref(f'{g}:{a}', text(el, 'version'), kind))
         if el.text and el.text.strip():
             m.config_text.append(el.text.strip())
+            for g, a, v in text_coordinates(el.text):
+                m.refs.append(Ref(f'{g}:{a}', v, 'plugin configuration text'))
+
+
+COORDINATE = re.compile(r'^([^:/\\\s]+):([^:/\\\s]+)((?::[^:/\\\s]*)*)$')
+
+
+def text_coordinates(value):
+    """(groupId, artifactId, version or None) of every token of a configuration text that has
+    the shape of a Maven coordinate g:a[:extension[:classifier]][:version], groupId with a dot
+    (or an unresolved token). Tokens are separated by whitespace, commas and semicolons."""
+    out = []
+    for tok in re.split(r'[\s,;]+', value):
+        mt = COORDINATE.match(tok)
+        if not mt:
+            continue
+        g, a, rest = mt.groups()
+        if '.' not in g and not TOKEN.search(g):
+            continue
+        segs = [x for x in rest.split(':') if x]
+        out.append((g, a, segs[-1] if segs else None))
+    return out
 
 
 def _parse_project(p):
@@ -178,42 +205,57 @@ def _parse_project(p):
 NESTED_ELEMENTS = ('dependency', 'plugin', 'path', 'artifactItem', 'extension')
 
 
-def scan_nested(m):
-    """Nested builds (maven-invoker-plugin ITs, test projects run by a test) resolve artifacts
-    their module never declares. Every pom.xml under the module's src/ is read as plain XML and
-    its references are recorded, with versions resolved from the module's properties where they
-    are filtering tokens (@x.version@, ${project.version}). Any module is scanned, with or
-    without the invoker plugin."""
-    src = os.path.join(m.basedir, 'src')
-    if not os.path.isdir(src):
+def scan_nested(m, reactor_dirs=()):
+    """Nested builds (maven-invoker-plugin ITs, test projects run by a test, fixtures) resolve
+    artifacts their module never declares. Every pom.xml under the module's directory (not its
+    own, not under target/ or a hidden directory, not in another reactor module) is read as
+    plain XML and its references are recorded, with coordinates resolved from the module's
+    properties where they are filtering tokens (@x.version@) and from the nested project itself
+    for ${project.version}. Any module is scanned, with or without the invoker plugin. A nested
+    pom that does not parse, or names a groupId or artifactId that cannot be resolved, is a
+    doubt: the module counts as affected."""
+    skip = {os.path.realpath(x) for x in reactor_dirs} - {os.path.realpath(m.basedir)}
+    if not os.path.isdir(m.basedir):
         return
-    for d, dirs, files in os.walk(src):
-        dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.'))
-        if 'pom.xml' not in files:
-            continue
+    own_pom = os.path.realpath(os.path.join(m.basedir, 'pom.xml'))
+    for d, dirs, files in os.walk(m.basedir):
+        dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.')
+                         and os.path.realpath(os.path.join(d, x)) not in skip)
         path = os.path.join(d, 'pom.xml')
+        if 'pom.xml' not in files or os.path.realpath(path) == own_pom:
+            continue
+        rel = os.path.relpath(path, m.basedir)
         try:
             p = ET.parse(path).getroot()
         except (ET.ParseError, OSError):
-            m.nested_unreadable.append(os.path.relpath(path, m.basedir))
+            m.doubts.append(f'nested pom {rel} does not parse (doubt)')
             continue
         parent = child(p, 'parent')
-        own_group = text(p, 'groupId') or text(parent, 'groupId')
+        own = {'project.groupId': text(p, 'groupId') or text(parent, 'groupId'),
+               'project.version': text(p, 'version') or text(parent, 'version'),
+               'project.parent.groupId': text(parent, 'groupId'),
+               'project.parent.version': text(parent, 'version')}
+        own['groupId'], own['version'] = own['project.groupId'], own['project.version']
+        props = child(p, 'properties')
+        for prop in (list(props) if props is not None else []):
+            if isinstance(strip(prop.tag), str):
+                own.setdefault(strip(prop.tag), (prop.text or '').strip())
+        own = {k: v for k, v in own.items() if v and not TOKEN.search(v)}
         if text(p, 'artifactId'):
-            m.nested_local.add(f"{own_group}:{text(p, 'artifactId')}")
-        if parent is not None:
-            m.nested_refs.append(Ref(f"{text(parent, 'groupId')}:{text(parent, 'artifactId')}",
-                                     m.interpolate(text(parent, 'version')), 'nested build'))
-        for el in p.iter():
+            m.nested_local.add(f"{own.get('project.groupId', '')}:{text(p, 'artifactId')}")
+        elements = [parent] if parent is not None else []
+        elements += [el for el in p.iter() if strip(el.tag) in NESTED_ELEMENTS]
+        for el in elements:
             tag = strip(el.tag)
-            if tag not in NESTED_ELEMENTS:
+            raw_g = text(el, 'groupId') or (DEFAULT_PLUGIN_GROUP if tag == 'plugin' else '')
+            raw_a = text(el, 'artifactId')
+            if not raw_g or not raw_a:
                 continue
-            a = text(el, 'artifactId')
-            g = text(el, 'groupId') or (DEFAULT_PLUGIN_GROUP if tag == 'plugin' else '')
-            g = g.replace('${project.groupId}', own_group).replace('${project.parent.groupId}',
-                                                                  text(parent, 'groupId'))
-            if a and g:
-                m.nested_refs.append(Ref(f'{g}:{a}', m.interpolate(text(el, 'version')), 'nested build'))
+            g, a = m.interpolate(raw_g, own), m.interpolate(raw_a, own)
+            if not g or not a:
+                m.doubts.append(f'nested pom {rel} names {raw_g}:{raw_a}, which cannot be resolved (doubt)')
+                continue
+            m.nested_refs.append(Ref(f'{g}:{a}', m.interpolate(text(el, 'version'), own), 'nested build'))
 
 
 def scan_raw_imports(m):
@@ -255,9 +297,44 @@ def load_reactor(path):
     for p in projects:
         m = _parse_project(p)
         scan_raw_imports(m)
-        scan_nested(m)
         mods[m.ga] = m
+    # pom-packaged modules run no tests of their own that this mode could skip, and their
+    # children inherit their model, not their nested builds: scanning them would only turn the
+    # profile-only modules under an aggregator (TCK runners...) into reasons to affect every child.
+    dirs = [m.basedir for m in mods.values()]
+    for m in mods.values():
+        if m.packaging != 'pom':
+            scan_nested(m, dirs)
     return mods
+
+
+def scan_sources(m, artifact_ids, cap=1 << 20):
+    """Reasons for a module whose src/ names a producer artifact as text: a test or a tool may
+    resolve it at run time (ShrinkWrap, a CLI, the local repository by coordinates). Any text
+    file counts (binary files, with a NUL byte, and files over `cap` bytes are skipped); the
+    artifactId must stand alone, so "groupId:artifactId[:version]" matches too."""
+    if not artifact_ids:
+        return []
+    rx = re.compile(r'(?<![\w.-])(' + '|'.join(re.escape(a) for a in sorted(artifact_ids, key=len, reverse=True))
+                    + r')(?![\w-])')
+    src = os.path.join(m.basedir, 'src')
+    for d, dirs, files in os.walk(src):
+        dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.'))
+        for name in sorted(files):
+            path = os.path.join(d, name)
+            try:
+                if os.path.getsize(path) > cap:
+                    continue
+                with open(path, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if b'\0' in data[:8192]:
+                continue
+            hit = rx.search(data.decode('utf-8', errors='ignore'))
+            if hit:
+                return [f'producer artifact {hit.group(1)} named in {os.path.relpath(path, m.basedir)}']
+    return []
 
 
 def reactor_dependents(mods):

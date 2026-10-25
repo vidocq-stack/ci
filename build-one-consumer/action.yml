@@ -54,11 +54,18 @@ inputs:
       to 'full' on any doubt (intermediate upstreams, companion branch, analysis or Maven
       error...), with the reason in the job summary.
     default: 'full'
+  graph-pruning:
+    description: >
+      tests=targeted only. 'true': trust the dependency graph to skip the closure resolution of
+      the external artifacts of repositories that do not consume the producer (about 60 s faster
+      on vidocq, but the graph is not checked for freshness or version skew). 'false' (default):
+      every suspect external io.vidocq artifact gets its closure resolved.
+    default: 'false'
   graph-repo:
-    description: 'owner/name of the PUBLIC dependency-graph repo; tests=targeted only, to prune the analysis'
+    description: 'owner/name of the PUBLIC dependency-graph repo (graph-pruning: true only)'
     default: 'Vidocq/dep-graph'
   graph-ref:
-    description: 'Branch of the dependency-graph repo (tests=targeted only)'
+    description: 'Branch of the dependency-graph repo (graph-pruning: true only)'
     default: 'main'
   bot-token:
     description: 'Optional Codefloe token (VIDOCQ_BOT_TOKEN), only for clone rate limits; empty on fork PRs'
@@ -96,6 +103,7 @@ runs:
         BOT_TOKEN: ${{ inputs.bot-token }}
         COMPANION_BRANCHES: ${{ inputs.companion-branches }}
         TESTS: ${{ inputs.tests }}
+        GRAPH_PRUNING: ${{ inputs.graph-pruning }}
         GRAPH_REPO: ${{ inputs.graph-repo }}
         GRAPH_REF: ${{ inputs.graph-ref }}
         HEAD_REF: ${{ github.head_ref }}

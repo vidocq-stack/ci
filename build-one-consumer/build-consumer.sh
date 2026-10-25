@@ -31,7 +31,11 @@
 #                       the producer (targeted/targeted-tests.sh); full instead, with the
 #                       reason, when the consumer has intermediate upstreams or a companion
 #                       branch, or on any doubt of the analysis
-#   GRAPH_REPO, GRAPH_REF  dependency graph read by the targeted analysis (Vidocq/dep-graph, main)
+#   GRAPH_PRUNING       true: the targeted analysis trusts the dependency graph to skip the
+#                       closure of the externals of repositories that do not consume the
+#                       producer (faster, but the graph is not checked); false (default): every
+#                       suspect external gets its closure resolved
+#   GRAPH_REPO, GRAPH_REF  dependency graph read when GRAPH_PRUNING is true (Vidocq/dep-graph, main)
 #
 # Writes the consumer's build log and lists it in $RUNNER_TEMP/downstream-logs/consumers.tsv for
 # the flaky-test report, and one summary table to $GITHUB_STEP_SUMMARY when set.
@@ -156,7 +160,13 @@ if [ "$TESTS" = targeted ]; then
     echo "Tests: full (fallback: $why)"
   else
     prepare=(--prepare "$HERE/targeted/targeted-tests.sh")
-    export GRAPH_URL="${GRAPH_URL:-${GITHUB_SERVER_URL%/}/${GRAPH_REPO:-Vidocq/dep-graph}/raw/branch/${GRAPH_REF:-main}/graph/inverted.json}"
+    # Replaced by the analysis' own line; stays if it stops before writing one.
+    echo "full (the targeted analysis did not complete)" > "$TESTS_MODE_OUT"
+    if [ "${GRAPH_PRUNING:-false}" = true ]; then
+      export GRAPH_URL="${GITHUB_SERVER_URL%/}/${GRAPH_REPO:-Vidocq/dep-graph}/raw/branch/${GRAPH_REF:-main}/graph/inverted.json"
+    else
+      export GRAPH_URL=""
+    fi
   fi
 fi
 echo "::group::Build $CONSUMER (pinned: ${!PRV[*]})"

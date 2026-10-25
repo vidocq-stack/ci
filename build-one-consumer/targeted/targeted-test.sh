@@ -171,7 +171,7 @@ check "annotationProcessorPaths through a reactor codegen module: affected" "aff
 check "annotationProcessorPaths: the reason names the codegen module" "depends on reactor module acme-codegen" "$(reason apt-user)"
 check "pom-packaged module, unaffected: never in the skip list" "none" "$(status bom)"
 check "pom-packaged root: never in the skip list" "none" "$(status .)"
-check "nested invoker build naming the producer: affected" "nested build io.vidocq.knock:knock-core" "$(reason invoker)"
+check "nested invoker build naming the producer: affected" "1" "$(reason invoker | grep -c 'nested build io.vidocq.knock:knock-core')"
 check "nested build naming only its own projects and pruned externals: not affected" "skip" "$(status invoker-clean)"
 check "transitive through an external jar: affected" \
   "io.vidocq.knock:knock-core via dependency io.vidocq.cyrano:cyrano-core" "$(reason via-cyrano)"
@@ -360,8 +360,8 @@ check "targeted: the mode line counts the modules whose tests are skipped" \
 check "targeted: the unaffected non-pom modules are edited" "core invoker-clean own-skip via-peano" "$(edited)"
 check "targeted: the effective POM runs with the build's Maven args" "1" \
   "$(grep -c '^acme -B -ntp -Dx=1 org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom -Doutput=' "$TMP/mvn-calls")"
-check "targeted: one synthetic resolution, with the build's Maven args" "1" \
-  "$(grep -c '^synthetic -B -ntp -Dx=1 -f .*/synthetic/pom.xml org.apache.maven.plugins:maven-dependency-plugin:[0-9.]*:list -DoutputFile=deps.txt' "$TMP/mvn-calls")"
+check "targeted: one synthetic resolution, with the build's Maven args, its modules in parallel" "1" \
+  "$(grep -c '^synthetic -B -ntp -Dx=1 -T 1C -f .*/synthetic/pom.xml org.apache.maven.plugins:maven-dependency-plugin:[0-9.]*:list -DoutputFile=deps.txt' "$TMP/mvn-calls")"
 check "targeted: never -DskipTests on a command line" "0" "$(grep -c -- '-DskipTests' "$TMP/mvn-calls")"
 check "summary: the mode" "1" "$(grep -c 'Tests: targeted: tests skipped in 4 module(s) (still compiled)' "$TMP/summary")"
 check "summary: each affected module with its reason" "1" \
@@ -399,6 +399,132 @@ printf 'io.vidocq.knock:knock-core\norg.junit.jupiter:junit-jupiter\nio.vidocq.p
 run_targeted PRODUCER_ARTIFACTS="$TMP/all.txt" > /dev/null
 check "all affected: the mode line says so" "full: every module is affected" "$(cat "$TMP/mode.txt")"
 check "all affected: no pom edited" "" "$(edited)"
+
+# --- Coordinates written as text, nested coordinates, source mentions (review I3, M5, M6) ------
+add_module() { # add_module <module args...>: one more module in the built fixture
+  module "$@"
+  sed -i.bak 's|</projects>||' "$EFF" && cat "$EFF.body" >> "$EFF" && echo '</projects>' >> "$EFF" && rm -f "$EFF.body" "$EFF.bak"
+}
+exec_args() { printf '<plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version><configuration><arguments><argument>%s</argument></arguments></configuration></plugin>' "$1"; }
+build_fixture
+add_module txt-reactor acme-txt-reactor jar acme-parent "" "$(exec_args "-p $G:acme-knock-user")"
+add_module txt-ext acme-txt-ext jar acme-parent "" "$(exec_args 'io.vidocq.cyrano:cyrano-core:0.4.0-SNAPSHOT')"
+add_module txt-ext-nover acme-txt-ext-nover jar acme-parent "" "$(exec_args 'io.vidocq.cyrano:cyrano-extra')"
+add_module txt-token acme-txt-token jar acme-parent "" "$(exec_args '${unknown.group}:knock-core')"
+add_module nested-token acme-nested-token jar acme-parent "" ""
+mkdir -p "$ROOT/nested-token/src/it/p"
+printf '<project><groupId>t</groupId><artifactId>p</artifactId><version>1</version><dependencies><dependency><groupId>${knock.group}</groupId><artifactId>knock-core</artifactId><version>1</version></dependency></dependencies></project>\n' \
+  > "$ROOT/nested-token/src/it/p/pom.xml"
+add_module nested-own acme-nested-own jar acme-parent "" ""
+nested_pom "$ROOT/nested-own/src/it/q/pom.xml" com.example q '<dependency><groupId>io.vidocq.cyrano</groupId><artifactId>cyrano-core</artifactId><version>${project.version}</version></dependency>'
+sed -i.bak 's|<version>1.0</version>|<version>7.7</version>|' "$ROOT/nested-own/src/it/q/pom.xml" && rm -f "$ROOT/nested-own/src/it/q/pom.xml.bak"
+add_module outside-src acme-outside-src jar acme-parent "" ""
+nested_pom "$ROOT/outside-src/fixtures/p/pom.xml" com.example p "$(dep io.vidocq.knock:knock-core 1)"
+add_module src-coord acme-src-coord jar acme-parent "" ""
+mkdir -p "$ROOT/src-coord/src/test/java" && echo 'var a = resolve("io.vidocq.knock:knock-api:1.0");' > "$ROOT/src-coord/src/test/java/T.java"
+add_module src-bare acme-src-bare jar acme-parent "" ""
+mkdir -p "$ROOT/src-bare/src/main/resources" && echo 'extension: knock-core' > "$ROOT/src-bare/src/main/resources/catalog.yml"
+add_module src-quiet acme-src-quiet jar acme-parent "" ""
+mkdir -p "$ROOT/src-quiet/src/main/resources" && echo 'see knock-core-extras and myknock-api' > "$ROOT/src-quiet/src/main/resources/notes.txt"
+printf 'knock-core\0binary' > "$ROOT/src-quiet/src/main/resources/blob.bin"
+add_module agg2 acme-agg2 pom acme-parent "" ""
+add_module agg2/kid acme-agg2-kid jar acme-agg2 "" ""
+nested_pom "$ROOT/agg2/tck-runner/pom.xml" io.vidocq.acme acme-tck-runner "$(dep io.vidocq.knock:knock-core 1)"
+analyse > /dev/null
+check "text: phase 1 resolves the external written as a coordinate, with its version" "1" \
+  "$(python3 -c 'import json,sys; print(sum(1 for e in json.load(open(sys.argv[1])).values() if e["ga"]=="io.vidocq.cyrano:cyrano-core" and "txt-ext" in e["modules"]))' "$TMP/synth/index.json")"
+check "nested: \${project.version} is the nested project's own version" "1" \
+  "$(python3 -c 'import json,sys; print(sum(1 for e in json.load(open(sys.argv[1])).values() if e["version"]=="7.7" and "nested-own" in e["modules"]))' "$TMP/synth/index.json")"
+resolve_synth
+analyse --closures > /dev/null
+check "text: still targeted" "targeted" "$(field decision)"
+check "text: a reactor module named as a coordinate is a reactor edge" "depends on reactor module acme-knock-user" "$(reason txt-reactor)"
+check "text: an external coordinate gets its closure" "io.vidocq.knock:knock-core via plugin configuration text io.vidocq.cyrano:cyrano-core" "$(reason txt-ext)"
+check "text: an external coordinate without a version makes its module affected" "affected" "$(status txt-ext-nover)"
+check "text: a coordinate with an unresolved token makes its module affected" "affected" "$(status txt-token)"
+check "nested: an unresolved groupId makes its module affected" "affected" "$(status nested-token)"
+check "nested: a pom outside src/ is a nested build too" "nested build io.vidocq.knock:knock-core" "$(reason outside-src)"
+check "nested: reactor modules under a module are not its nested builds" "none" "$(status .)"
+check "nested: a profile-only module under a pom module does not reach its children" "skip" "$(status agg2/kid)"
+check "sources: a producer coordinate in a test source" "affected" "$(status src-coord)"
+check "sources: a producer artifactId in a resource" "affected" "$(status src-bare)"
+check "sources: longer names and binary files do not count" "skip" "$(status src-quiet)"
+check "sources: the reason names the file" "1" "$(reason src-coord | grep -c 'src/test/java/T.java')"
+
+# --- A malformed graph turns the pruning off (review M7) -------------------------------------
+build_fixture
+echo '{"generated_at": "x", "artifacts": []}' > "$TMP/bad-graph.json"
+analyse --graph "$TMP/bad-graph.json" --producer-slug Vidocq/knock > /dev/null
+check "malformed graph: no crash, the synthetic resolution is not pruned" "resolve|none (dependency graph unreadable" \
+  "$(field decision)|$(field pruning | cut -c1-33)"
+
+# --- skip-tests.py failures never leave a pom edited (review I1, M2) --------------------------
+build_fixture
+analyse > /dev/null; resolve_synth; analyse --closures > /dev/null
+rm -rf "$TMP/acme-before"; cp -R "$ROOT" "$TMP/acme-before"
+mkdir -p "$TMP/out-is-a-dir"
+python3 "$HERE/skip-tests.py" --repo "$ROOT" --report "$TMP/report.json" --out "$TMP/out-is-a-dir" > /dev/null 2>&1
+check "skip: a result that cannot be written fails the script" "1" "$?"
+check "skip: ... and leaves every pom byte for byte" "" "$(diff -r "$TMP/acme-before" "$ROOT")"
+printf '<project><modelVersion>4.0.0</modelVersion><artifactId>acme-core</artifactId><properties/></project>' > "$ROOT/core/pom.xml"
+python3 "$HERE/skip-tests.py" --repo "$ROOT" --report "$TMP/report.json" --out "$TMP/skipped.json" > /dev/null 2>&1
+check "skip: a self-closing <properties/> becomes the one properties element" \
+  "<properties><skipTests>true</skipTests><skipITs>true</skipITs><invoker.skip>true</invoker.skip></properties>|1" \
+  "$(grep -o '<properties.*</properties>' "$ROOT/core/pom.xml")|$(grep -o '<properties' "$ROOT/core/pom.xml" | wc -l | tr -d ' ')"
+
+# --- targeted-tests.sh restores the poms on any failure after the edits (review I1, M1, M8) ---
+# A stand-in for skip-tests.py that edits poms, truncates one, then fails (or succeeds with a
+# result that cannot be read, or also removes the backups).
+cat > "$TMP/bad-skip.py" <<'EOF'
+import json, os, sys
+a = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+rep = json.load(open(a['--report']))
+for i, rel in enumerate(rep['skip']):
+    p = os.path.join(a['--repo'], rel, 'pom.xml')
+    t = open(p).read()
+    open(p, 'w').write(t[:20] if i == 0 else t.replace('</project>', '<properties><skipITs>true</skipITs></properties></project>'))
+mode = os.environ['BAD_SKIP']
+if mode == 'drop-backup':
+    import shutil; shutil.rmtree(os.path.join(os.environ['TARGETED_DIR'], 'backup'))
+    sys.exit(1)
+if mode == 'garbage-result':
+    open(a['--out'], 'w').write('not json')
+    sys.exit(0)
+sys.exit(1)
+EOF
+snapshot() { rm -rf "$TMP/acme-before"; cp -R "$ROOT" "$TMP/acme-before"; }
+build_fixture; snapshot
+check "restore: a failing pom edit still exits 0" "0" "$(run_targeted SKIP_TESTS_PY="$TMP/bad-skip.py" BAD_SKIP=fail)"
+check "restore: every pom is back byte for byte" "" "$(diff -r "$TMP/acme-before" "$ROOT")"
+check "restore: full mode with the reason" "1" "$(grep -c '^full (fallback: the pom edits failed' "$TMP/mode.txt")"
+build_fixture; snapshot
+check "restore: an internal error after the edits still exits 0" "0" "$(run_targeted SKIP_TESTS_PY="$TMP/bad-skip.py" BAD_SKIP=garbage-result)"
+check "restore: ... every pom back byte for byte" "" "$(diff -r "$TMP/acme-before" "$ROOT")"
+check "restore: ... an honest summary" "1" "$(grep -c 'Tests: full (fallback: internal error at line [0-9]*' "$TMP/summary")"
+build_fixture
+check "restore impossible: the step fails" "1" "$(run_targeted SKIP_TESTS_PY="$TMP/bad-skip.py" BAD_SKIP=drop-backup)"
+check "restore impossible: the mode line says so" "1" "$(grep -c '^failed: ' "$TMP/mode.txt")"
+check "restore impossible: an error annotation" "1" "$(grep -c '^::error title=Targeted tests::' "$TMP/targeted.out")"
+
+build_fixture
+run_targeted > /dev/null
+check "notice: a targeted run is annotated" "1" \
+  "$(grep -c '^::notice title=Targeted tests::Vidocq/acme: targeted: tests skipped in 4 module(s) (still compiled)' "$TMP/targeted.out")"
+build_fixture
+run_targeted MVN_FAIL=effective-pom > /dev/null
+check "notice: a fallback is annotated with its reason" "1" \
+  "$(grep -c '^::notice title=Targeted tests::Vidocq/acme: full (fallback: Maven error in the effective POM' "$TMP/targeted.out")"
+
+build_fixture
+run_targeted MVN_ARGS='-B -T 4' > /dev/null
+check "targeted: a -T of the build's Maven args is kept as it is" "1" "$(grep -c '^synthetic -B -T 4 -f ' "$TMP/mvn-calls")"
+
+# --- Graph pruning is off unless asked for (review I2) ----------------------------------------
+build_fixture
+run_targeted GRAPH_URL= > /dev/null
+check "no GRAPH_URL: pruning off, said in the log" "1" "$(grep -c '^Dependency-graph pruning: off' "$TMP/targeted.out")"
+check "no GRAPH_URL: every suspect external resolved" "targeted: tests skipped in 4 module(s) (still compiled)" "$(cat "$TMP/mode.txt")"
+check "no GRAPH_URL: the summary says not pruned" "1" "$(grep -c 'not pruned' "$TMP/summary")"
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"

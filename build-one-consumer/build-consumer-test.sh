@@ -162,6 +162,11 @@ check "targeted: never -DskipTests on the command line" "0" "$(grep -c -- '-Dski
 check "targeted: a failed analysis falls back to full, and the summary says why" "1" \
   "$(grep -c '| full (fallback: Maven wrote no effective POM of the consumer) |$' "$TMP/summary")"
 
+check "targeted: graph pruning is off by default" "1" "$(grep -c '^Dependency-graph pruning: off (every suspect external' "$TMP/out")"
+run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=targeted GRAPH_PRUNING=true PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
+check "targeted, graph-pruning true: the graph of graph-repo/graph-ref is read" "1" \
+  "$(grep -c "^Dependency-graph pruning: off (graph not read from file://$TMP/forge/Vidocq/dep-graph/raw/branch/main/graph/inverted.json" "$TMP/out")"
+
 check "targeted, no producer artifact list: the build succeeds" "0" "$(run CONSUMER=Vidocq/cyrano HEAD_REF= TESTS=targeted)"
 check "targeted, no producer artifact list: falls back to full" "1" \
   "$(grep -c '| full (fallback: the producer artifact list is missing or empty (see the producer rebuild step)) |$' "$TMP/summary")"
