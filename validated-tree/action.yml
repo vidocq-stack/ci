@@ -81,14 +81,18 @@ runs:
           | tee -a "$GITHUB_OUTPUT"
 
     # The cache's version is derived from `path`, so check and record must name the same relative path.
-    # A record is a few bytes: it is restored, for the commit and note it carries, then removed.
+    # A record is a few bytes: it is restored, for the commit and note it carries, then removed. Cache keys cannot be
+    # written twice, so each run records under a key of its own and the check takes the newest one of the tree through
+    # the prefix (the exact key is never saved): a later record of the same tree, with another note, replaces the
+    # earlier one.
     - name: Look the validation up
       id: lookup
       if: inputs.mode == 'check' && steps.eligible.outputs.eligible == 'true'
       uses: actions/cache/restore@v4
       with:
         path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-newest
+        restore-keys: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-run
 
     - name: Verdict
       id: verdict
@@ -97,7 +101,7 @@ runs:
       env:
         ELIGIBLE: ${{ steps.eligible.outputs.eligible }}
         WHY: ${{ steps.eligible.outputs.reason }}
-        HIT: ${{ steps.lookup.outputs.cache-hit }}
+        HIT: ${{ steps.lookup.outputs.cache-matched-key != '' }}
         SCOPE: ${{ inputs.scope }}
       run: |
         set -euo pipefail
@@ -135,4 +139,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}-run${{ github.run_number }}.${{ github.run_attempt }}.${{ github.job }}
