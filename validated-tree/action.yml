@@ -23,7 +23,7 @@ inputs:
     description: "mode 'record': the id the check output (a job output of the checking job). Empty: computed from HEAD."
     default: ''
   note:
-    description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note (e.g. 'analysis=<SonarQube analysis id>')"
+    description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note (e.g. 'analysis=<date of the SonarQube analysis>')"
     default: ''
   bot-token:
     description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN), to look for companion branches without rate limits; may be empty'

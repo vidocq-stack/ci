@@ -77,11 +77,13 @@ runs:
         key = (os.environ.get("PROJECT_KEY") or "vidocq-" + os.environ["REPOSITORY"].split("/")[-1]).lower()
         recorded = os.environ.get("NOTE", "").removeprefix("analysis=")
         try:
-            req = urllib.request.Request(
-                "%s/api/project_analyses/search?project=%s&pullRequest=%s&ps=1" % (host, q(key), q(os.environ["PR_NUMBER"])),
-                headers={"Authorization": "Bearer " + os.environ["SONAR_TOKEN"]})
+            # The date of the pull request's last analysis: project_analyses/search ignores pullRequest and answers
+            # with main's analyses, and ce/activity needs the administer permission.
+            req = urllib.request.Request("%s/api/project_pull_requests/list?project=%s" % (host, q(key)),
+                                         headers={"Authorization": "Bearer " + os.environ["SONAR_TOKEN"]})
             with urllib.request.urlopen(req, timeout=30) as r:
-                last = (json.load(r).get("analyses") or [{}])[0].get("key", "")
+                prs = json.load(r).get("pullRequests") or []
+            last = next((p.get("analysisDate", "") for p in prs if p.get("key") == os.environ["PR_NUMBER"]), "")
         except Exception as e:  # any doubt analyses again
             print("::warning::Cannot read the pull request's last analysis (%s): analysing again." % e, file=sys.stderr)
             last = ""
@@ -303,10 +305,14 @@ runs:
             if not ce or ce["status"] != "SUCCESS":
                 print("::warning::SonarQube did not process the analysis (%s)." % (ce or {}).get("status", "timeout"))
                 sys.exit(1 if blocking else 0)
-            with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-                out.write("analysis-id=%s\n" % ce["analysisId"])
             gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
             key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
+            if is_pr:
+                # Recorded with the code tree: a later run reuses this analysis only while it is the pull request's last.
+                prs = sonar("/api/project_pull_requests/list?project=" + q(key)).get("pullRequests") or []
+                date = next((p.get("analysisDate", "") for p in prs if p.get("key") == pr), "")
+                with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                    out.write("analysis=%s\n" % date)
 
         status = gate.get("status", "NONE")
         failed = [c for c in gate.get("conditions", []) if c.get("status") == "ERROR"]
@@ -335,13 +341,13 @@ runs:
 
     - name: Record the analysed code tree
       # The next push of the same code (Vidocq/ci#57) reads this analysis's gate instead of analysing again.
-      if: steps.gate.outputs.analysis-id != '' && github.event_name == 'pull_request'
+      if: steps.gate.outputs.analysis != '' && github.event_name == 'pull_request'
       uses: https://codefloe.com/Vidocq/ci/validated-tree@main
       with:
         mode: record
         scope: sonar-pr${{ github.event.pull_request.number }}
         tree-id: ${{ steps.tree.outputs.tree-id }}
-        note: analysis=${{ steps.gate.outputs.analysis-id }}
+        note: analysis=${{ steps.gate.outputs.analysis }}
 
     - name: API compatibility report
       # A module whose build runs japicmp (Vidocq/vidocq#288) leaves target/japicmp/: its summary goes to
