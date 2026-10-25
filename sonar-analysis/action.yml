@@ -38,6 +38,15 @@ inputs:
   security-scans:
     description: "'true' also runs OSV-Scanner (dependency vulnerabilities), OpenGrep (security patterns) and Trivy (secrets, Dockerfile misconfigurations) and imports their SARIF reports into SonarQube as external issues (Vidocq/vidocq#269); they never stop the analysis"
     default: 'true'
+  targeted-tests:
+    description: >
+      'true' (pull requests only; a push to main always runs every test): the build runs only the tests of the
+      modules the pull request changes, of every reactor module depending on them and of the modules naming them
+      in src/ (targeted-producer-tests, changed paths from git: needs fetch-depth 0 or the base branch), the
+      others still compile and package; the poms are restored right after the build, before the scans and the
+      analysis. The coverage of new code is unchanged: only modules that can execute the changed classes run
+      tests that cover them. Any doubt runs every test. 'false' (default): every test.
+    default: 'false'
   infer:
     description: "'true' also runs Infer's RacerD (data races) over the main sources of the build's modules and imports its findings as reliability issues (Vidocq/vidocq#269); opt-in: it downloads Infer (276 MB) on every run. Never stops the analysis"
     default: 'false'
@@ -120,6 +129,7 @@ runs:
         CYCLONEDX_VERSION: ${{ inputs.cyclonedx-version }}
         SECURITY_SCANS: ${{ inputs.security-scans }}
         INFER: ${{ inputs.infer }}
+        TARGETED_TESTS: ${{ inputs.targeted-tests }}
         ACTION_PATH: ${{ github.action_path }}
         SCANNER_VERSION: ${{ inputs.scanner-version }}
         BLOCKING: ${{ inputs.blocking }}
@@ -172,7 +182,9 @@ runs:
         #    Error Prone findings (step 3).
         build_log="${RUNNER_TEMP:-/tmp}/vidocq-build.log"
         # shellcheck disable=SC2086
-        if ! mvn ${MAVEN_ARGS_IN} "org.cyclonedx:cyclonedx-maven-plugin:${CYCLONEDX_VERSION}:makeAggregateBom" \
+        #    targeted-build.sh runs the command as is, or (targeted-tests on a pull request) with the tests of the
+        #    modules the change does not reach turned off, the poms restored right after the build.
+        if ! bash "${ACTION_PATH}/targeted-build.sh" mvn ${MAVEN_ARGS_IN} "org.cyclonedx:cyclonedx-maven-plugin:${CYCLONEDX_VERSION}:makeAggregateBom" \
             -DoutputFormat=json -DoutputName=bom \
             -DincludeTestScope=false -DincludeProvidedScope=false -DincludeSystemScope=false 2>&1 \
             | tee "${build_log}"; then

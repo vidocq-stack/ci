@@ -5,6 +5,27 @@ raw results, delta against the previous run.
 
 ---
 
+## 2026-10-25 — sonar-analysis `targeted-tests` on vidocq (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
+- **Source**: vidocq `48ebab7b` (origin/main; its root pom declares `ci.targeted.mention-local`).
+- **Build**: the Sonar build of `sonar-analysis`, `mvn -B -ntp -Pquality -Dmaven.test.failure.ignore=true install`
+  (JaCoCo per module, plus the `vidocq-runtime-coverage` aggregate), through `verify-mvn.sh` on an isolated, warm
+  repository. Network was slow during the session (central-snapshots).
+- **Targeted**: each case is one pull-request commit touching one file. `targeted-producer-tests` ran with
+  `MVN_ARGS=-B -ntp -Pquality`, then the build, then the restore.
+- **Coverage**: the per-line coverage SonarQube imports (aggregate report plus module report) for every main source
+  file of the changed module, full vs targeted.
+
+| Change | Modules with tests skipped | Build | Coverage of the changed module (covered / executable lines) |
+|---|---:|---:|---|
+| full (every test) | 0 | 918 s | knock-health-extension 88 / 95, cli 1 020 / 1 527, devservice-postgres 112 / 142 |
+| knock-health-extension `HealthStartupSection.java` | 74 | 6 + 126 s | 88 / 95, identical line by line |
+| cli `CommandRunner.java` | 78 | 6 + 94 s | 1 020 / 1 527, identical line by line |
+| devservice-postgres `PostgresDevService.java` | 78 | 6 + 95 s | 112 / 142, identical line by line |
+
+---
+
 ## 2026-10-25 — targeted consumer tests with intermediate upstreams from central-snapshots (Vidocq/vidocq#285)
 
 - **Hardware/JVM**: Apple M5 Max (18 cores, 128 GB), Temurin 25, Maven 3.9.16, `CI=true`.
