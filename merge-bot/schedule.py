@@ -23,7 +23,8 @@ The merge-bot used to poll the required checks for up to an hour, one runner hel
 --gate only prints "gate=true" or "gate=false".
 
 Right after the bot's push the forge may still be checking the new head: it answers 405 "Please try again
-later", and the bot asks again for up to --patience seconds (vidocq#373).
+later" (vidocq#373). The bot asks again, for --patience seconds in all (90): a head the forge cannot merge
+automatically (a conflict) answers the same, and is refused once the patience is spent.
 
 Forgejo's scheduled merge does NOT pin the head (head_commit_id only applies to an immediate merge): the
 pr-validate gate cancels a schedule on a push that the merge-bot did not announce, and on a pull request
@@ -108,32 +109,37 @@ def gate_present(forge, branch):
     return False
 
 
-def post_merge(forge, pr, body, pause, patience):
+def checking(status, doc):
+    """Forgejo's 405 "Please try again later": it is still checking the head just pushed, or cannot merge it
+    automatically yet (a conflict answers the same)."""
+    return status == 405 and "try again later" in json.dumps(doc).lower()
+
+
+def post_merge(forge, pr, body, pause, deadline):
     """POST the merge. Right after the bot's push the forge is still checking the new head and answers 405
-    "Please try again later" (vidocq#373, 2026-10-25): ask again, for up to `patience` seconds."""
-    deadline = time.monotonic() + patience
+    "Please try again later" (vidocq#373, 2026-10-25): ask again until the run's deadline."""
     while True:
         status, doc = forge.call("POST", f"/pulls/{pr}/merge", body)
-        checking = status == 405 and "try again later" in json.dumps(doc).lower()
-        if not checking or time.monotonic() >= deadline:
+        if not checking(status, doc) or time.monotonic() >= deadline:
             return status, doc
         time.sleep(pause)
 
 
-def merge_now(forge, pr, head, pause, patience):
+def merge_now(forge, pr, head, pause, deadline):
     body = {"Do": "fast-forward-only", "head_commit_id": head, "delete_branch_after_merge": True}
     for _ in range(3):
-        status, doc = post_merge(forge, pr, body, pause, patience)
+        status, doc = post_merge(forge, pr, body, pause, deadline)
         if status in (200, 201, 204):
             return
-        if status != 405:
-            break
+        if status != 405 or checking(status, doc):
+            break   # a "try again later" here means the deadline is spent
         time.sleep(pause)   # the forge may still be settling the statuses
     raise Refused(f"the fast-forward of {head[:10]} was refused: HTTP {status} {json.dumps(doc)[:200]}; "
                   "re-run /merge")
 
 
 def run(a):
+    deadline = time.monotonic() + a.patience   # one patience for the whole run
     forge = Forge(a.api, a.token, a.repo)
     branch = forge.get(f"/branches/{a.branch}")
     verdict = "success"
@@ -142,14 +148,14 @@ def run(a):
     if verdict.startswith("failure"):
         raise Refused(f"a required check failed on {a.head[:10]} ({verdict}): fix it, then /merge again")
     if verdict == "success":
-        merge_now(forge, a.pr, a.head, a.retry_pause, a.patience)
+        merge_now(forge, a.pr, a.head, a.retry_pause, deadline)
         return "merged"
     if not gate_present(forge, a.branch):
         raise Refused("checks still running; re-run /merge when pr-validate is green")
 
     status, doc = post_merge(forge, a.pr, {
         "Do": "fast-forward-only", "head_commit_id": a.head, "delete_branch_after_merge": True,
-        "merge_when_checks_succeed": True}, a.retry_pause, a.patience)
+        "merge_when_checks_succeed": True}, a.retry_pause, deadline)
     if status == 409:
         raise Refused("a merge is already scheduled for this pull request and could not be replaced")
     if status == 200:
@@ -170,7 +176,7 @@ def run(a):
         if forge.get(f"/pulls/{a.pr}").get("merged"):
             return "merged"
         forge.call("DELETE", f"/pulls/{a.pr}/merge")
-        merge_now(forge, a.pr, a.head, a.retry_pause, a.patience)
+        merge_now(forge, a.pr, a.head, a.retry_pause, deadline)
         return "merged"
     return "scheduled"
 

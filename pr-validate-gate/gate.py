@@ -56,6 +56,7 @@ TRAIN_TOP = re.compile(r"^[ \t>*_-]*train[ -]?top[ \t*_]*:[ \t*_]*#(\d+)\b", re.
 # Activities that bring code to validate: a new or reopened pull request, a new head.
 FULL_ACTIVITIES = {"", "opened", "reopened", "synchronize", "synchronized"}
 TERMINAL_JOB = {"success", "failure"}
+DEFAULT_BOT_LOGIN = "vidocq-ci-bot"   # as TRIGGER_BOT_LOGIN in merge-bot/merge.sh
 EPOCH = "1970-01-01"
 
 
@@ -329,41 +330,18 @@ def read_pr(api, repo, number, event_path, fallback=True):
 ANNOUNCE = re.compile(r"<!-- merge-bot-scheduled-head: ([0-9a-f]{40}) -->")
 
 
-def active_scheduler(api, repo, number):
-    """The account whose scheduled merge is still pending (the timeline's latest pull_scheduled_merge, with no
-    pull_cancel_scheduled_merge after it), or "" when none is. Read from the timeline, not from GET /user: the
-    bot's token has no read:user scope, and that 403 cancelled every schedule after the bot's own push
-    (vauban#222, 2026-10-25)."""
-    events, seen = [], set()
-    for page in range(1, 21):
-        batch = api.get(f"/repos/{repo}/issues/{number}/timeline?limit=50&page={page}")
-        if not isinstance(batch, list):
-            raise ApiError("the timeline is not a list")
-        for e in batch:
-            if isinstance(e, dict) and e.get("id") not in seen:
-                seen.add(e.get("id"))
-                events.append(e)
-        if len(batch) != 50:
-            break
-    else:
-        raise ApiError("the timeline has more than 1000 events")
-    scheduler = ""
-    for e in sorted(events, key=lambda e: e.get("id") or 0):
-        if e.get("type") == "pull_scheduled_merge":
-            scheduler = (e.get("user") or {}).get("login")
-            if not scheduler:
-                raise ApiError("the account that scheduled the merge is unknown")
-        elif e.get("type") == "pull_cancel_scheduled_merge":
-            scheduler = ""
-    return scheduler
-
-
 def announced_head(api, repo, number, login):
-    """The head `login` last announced it would merge (the merge-bot's comment, written before it pushes), or
-    ""."""
+    """The head the merge-bot's account `login` last announced it would merge (its comment, written before it
+    pushes), or "". The account comes from the bot-login input, not from GET /user: the bot's token has no
+    read:user scope, and that 403 cancelled every schedule after the bot's own push (vauban#222, 2026-10-25).
+    A comment someone edited does not count: any writer can edit the bot's comment."""
+    if not login:
+        raise ApiError("the merge-bot's account (bot-login) is not set")
     comments, seen = [], set()
     for page in (1, 2, 3, 4, 5):
         batch = api.get(f"/repos/{repo}/issues/{number}/comments?limit=50&page={page}")
+        if batch is None:   # Forgejo answers null for an empty page
+            batch = []
         if not isinstance(batch, list):
             raise ApiError("the comments are not a list")
         for c in batch:
@@ -372,15 +350,16 @@ def announced_head(api, repo, number, login):
                 comments.append(c)
         if len(batch) != 50:
             break
-    heads = [m.group(1) for c in comments if (c.get("user") or {}).get("login") == login
+    heads = [m.group(1) for c in comments
+             if (c.get("user") or {}).get("login") == login and c.get("updated_at") == c.get("created_at")
              for m in [ANNOUNCE.search(c.get("body") or "")] if m]
     return heads[-1] if heads else ""
 
 
 def cancel_stale_schedule(api, a, mode, head, why_not_ready):
     """Forgejo's scheduled merge ("merge when checks succeed", set by the merge-bot) does not pin the head and
-    outlives a label change. With a token, cancel it when the pull request is not ready, and on a push that the
-    account which scheduled it did not announce. False when a needed cancellation failed."""
+    outlives a label change. With a token, cancel it when the pull request is not ready, and on a push the
+    merge-bot did not announce. False when a needed cancellation failed."""
     if not a.token or not a.pr:
         return True
     reason = ""
@@ -388,13 +367,10 @@ def cancel_stale_schedule(api, a, mode, head, why_not_ready):
         reason = why_not_ready
     elif a.activity in ("synchronize", "synchronized"):
         try:
-            scheduler = active_scheduler(api, a.repo, a.pr)
-            if not scheduler:
-                return True
-            if announced_head(api, a.repo, a.pr, scheduler) != head:
-                reason = f"a push that {scheduler}, who scheduled the merge, did not announce"
+            if announced_head(api, a.repo, a.pr, a.bot_login) != head:
+                reason = f"a push the merge-bot ({a.bot_login}) did not announce"
         except ApiError as err:
-            reason = f"a push, and the scheduled merge or its announcement cannot be read ({err})"
+            reason = f"a push, and the merge-bot's announcement cannot be read ({err})"
     if not reason:
         return True
     status = api.delete(f"/repos/{a.repo}/pulls/{a.pr}/merge")
@@ -678,6 +654,8 @@ def main(argv):
     p.add_argument("--pr-json", default="")
     p.add_argument("--api", default=env("FORGE_API") or (env("GITHUB_SERVER_URL", "https://codefloe.com").rstrip("/") + "/api/v1"))
     p.add_argument("--token", default=env("GATE_TOKEN", ""))
+    p.add_argument("--bot-login", default=env("GATE_BOT_LOGIN", "") or DEFAULT_BOT_LOGIN,
+                   help="the merge-bot's account, whose announcements keep a schedule on a push")
     p.add_argument("--repo", default=env("GITHUB_REPOSITORY", ""))
     p.add_argument("--pr", default=env("GATE_PR", ""))
     p.add_argument("--head", default=env("GATE_HEAD", ""))

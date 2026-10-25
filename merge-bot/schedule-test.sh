@@ -146,15 +146,35 @@ CHECKING='{"status": 405, "body": {"message": "Please try again later"}}'
 forge pending "{\"POST $R/pulls/7/merge\": $CHECKING, \"_on POST $R/pulls/7/merge\": {\"POST $R/pulls/7/merge\": {\"status\": 201, \"body\": {}}}}"
 check "the forge still checks the pushed head (405 Please try again later): asked again, then scheduled" "0 scheduled" "$(run)"
 check "two schedule requests" "2" "$(grep -c '^POST ' "$TMP/calls.log")"
-forge success "{\"POST $R/pulls/7/merge\": $CHECKING, \"_on POST $R/pulls/7/merge\": {\"POST $R/pulls/7/merge\": {\"status\": 200, \"body\": {}}}}"
-check "the same before a direct merge: asked again, then merged" "0 merged" "$(run)"
+# Before a direct merge too, for longer than the three tries merge_now makes for any other 405.
+chain() { # chain <n> <final route json>: the POST answers CHECKING n times, then the final route
+  python3 -c '
+import json, sys
+n, final, checking, key = int(sys.argv[1]), json.loads(sys.argv[2]), json.loads(sys.argv[3]), sys.argv[4]
+routes = {key: final}
+for _ in range(n):
+    routes = {key: checking, "_on " + key: routes}
+print(json.dumps(routes))' "$1" "$2" "$CHECKING" "POST $R/pulls/7/merge"
+}
+forge success "$(chain 5 '{"status": 200, "body": {}}')"
+check "the forge still checks the head before a direct merge, five times: asked again, then merged" "0 merged" "$(run)"
+forge pending '{"POST '"$R"'/pulls/7/merge": {"status": 405, "body": {"message": "not allowed"}}}'
+run > /dev/null
+check "any other 405 on the schedule is not asked again" "1" "$(grep -c '^POST ' "$TMP/calls.log")"
+patient() { # patient: run with a short patience -> exit status ; output in $TMP/out
+  : > "$TMP/calls.log"
+  python3 "$SCRIPT" --api "http://127.0.0.1:$(cat "$TMP/port")/api/v1" --token t --repo Vidocq/demo --pr 7 \
+    --head "$HEAD" --branch main --retry-pause 0.05 --patience 0.3 > "$TMP/out" 2>&1
+  echo $?
+}
 forge pending "{\"POST $R/pulls/7/merge\": $CHECKING}"
-: > "$TMP/calls.log"
-python3 "$SCRIPT" --api "http://127.0.0.1:$(cat "$TMP/port")/api/v1" --token t --repo Vidocq/demo --pr 7 \
-  --head "$HEAD" --branch main --retry-pause 0.05 --patience 0.3 > "$TMP/out" 2>&1
-check "still checking once the patience is spent: refused" "1" "$?"
+check "still checking once the patience is spent: refused" "1" "$(patient)"
 contains "with the forge's answer" "Please try again later" "$(cat "$TMP/out")"
 contains "and what to do" "re-run /merge" "$(cat "$TMP/out")"
+forge success "{\"POST $R/pulls/7/merge\": $CHECKING}"
+check "a direct merge still checking once the patience is spent: refused" "1" "$(patient)"
+posts=$(grep -c '^POST ' "$TMP/calls.log")
+check "one patience for the whole run, not one per merge_now try (0.3 s at 0.05 s: at most 8 requests)" "yes" "$([ "$posts" -le 8 ] && echo yes || echo "no ($posts)")"
 
 # 81-I1: a repository whose pr.yml does not run the gate in state mode never gets a schedule (nothing would
 # cancel it on a push, WIP, blocked or train member): green merges now, pending is refused.

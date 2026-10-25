@@ -9,7 +9,7 @@ description: >
   request as it was reproduces the verdict of the latest completed run on the same commit instead of building
   again. mode 'verdict', in the aggregator (`pr-validate`, required check), decides from toJSON(needs): it FAILS
   a train member, a WIP pull request, and any expected work that did not succeed; a skipped job never passes
-  unless no work was expected. Reads the Forgejo API (public repositories read anonymously). Its only write, with a token: cancelling a merge the merge-bot scheduled, when the pull request is not ready or gets a push that the account which scheduled the merge did not announce.
+  unless no work was expected. Reads the Forgejo API (public repositories read anonymously). Its only write, with a token: cancelling a merge the merge-bot scheduled, when the pull request is not ready or gets a push the merge-bot did not announce.
   Needs python3. See gate.py.
 
 inputs:
@@ -22,6 +22,9 @@ inputs:
   token:
     description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN) to lift the API rate limits; empty on a fork pull request, which reads anonymously'
     default: ''
+  bot-login:
+    description: "mode 'state': the merge-bot's account. On a push, a scheduled merge is kept only when this account announced the pushed head in a comment nobody edited. Not read from GET /user: the bot's token has no read:user scope"
+    default: 'vidocq-ci-bot'
   wip-labels:
     description: 'Comma-separated substrings: a label whose name contains one (any case) makes the pull request WIP, on top of the title and draft rules'
     default: 'wip'
@@ -74,6 +77,7 @@ runs:
         MODE: ${{ inputs.mode }}
         GATE_NEEDS: ${{ inputs.needs }}
         GATE_TOKEN: ${{ inputs.token }}
+        GATE_BOT_LOGIN: ${{ inputs.bot-login }}
         GATE_PR: ${{ github.event.pull_request.number }}
         GATE_HEAD: ${{ github.event.pull_request.head.sha }}
         GATE_ACTIVITY: ${{ github.event.action }}
