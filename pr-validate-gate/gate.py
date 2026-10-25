@@ -191,25 +191,26 @@ def judged(api, repo, run, aggregator):
     """(verdict, mode, why) of a completed run, from the record its aggregator printed at the end of its log:
     the mode it actually judged and its verdict. The event payload is not enough: a run triggered with one
     state may be judged after the pull request changed (seen on Forgejo 16)."""
+    name = run.get("index_in_repo") or run["id"]
     doc = api.get(f"/repos/{repo}/actions/runs/{run['id']}/jobs")
     jobs = doc if isinstance(doc, list) else (doc.get("jobs") if isinstance(doc, dict) else None)
     if not isinstance(jobs, list):
         raise ApiError("the jobs listing is not a list")
     job = next((j for j in jobs if j.get("name") == aggregator), None)
     if job is None:
-        return None, None, f"run {run['id']} has no {aggregator} job"
+        return None, None, f"run {name} has no {aggregator} job"
     status = str(job.get("status") or "")
     if status not in TERMINAL_JOB:
-        return None, None, f"the {aggregator} job of run {run['id']} is {status or 'unknown'}"
+        return None, None, f"the {aggregator} job of run {name} is {status or 'unknown'}"
     records = RECORD_LINE.findall(api.get_text(f"/repos/{repo}/actions/jobs/{job.get('id')}/logs"))
     try:
         record = json.loads(records[-1]) if records else None
     except ValueError:
         record = None
     if not isinstance(record, dict):
-        return None, None, f"run {run['id']} recorded no verdict"
+        return None, None, f"run {name} recorded no verdict"
     if record.get("mode") not in ("ready", "wip", "train") or record.get("verdict") != status:
-        return None, None, (f"run {run['id']} judged nothing reusable (mode {record.get('mode')}, "
+        return None, None, (f"run {name} judged nothing reusable (mode {record.get('mode')}, "
                             f"verdict {record.get('verdict')}, job {status})")
     return status, record["mode"], ""
 
