@@ -125,8 +125,11 @@ runs:
         api="${SONAR_HOST_URL%/}/api"
         auth=(-H "Authorization: Bearer ${SONAR_TOKEN}")
         # A server that does not answer is said on the pull request (quality-gate step), not hidden behind a green job.
-        if ! curl -fsS -m 20 "${api}/system/status" 2>/dev/null | grep -q '"status":"UP"'; then
-          echo "::warning::SonarQube (${SONAR_HOST_URL}) does not answer: no analysis."
+        # Only no answer at all (000) or a server error counts: the server answers an unauthenticated or redirected
+        # request with a 3xx/4xx, and is up.
+        status=$(curl -sS -o /dev/null -w '%{http_code}' -m 20 "${auth[@]}" "${api}/system/status" 2>/dev/null || true)
+        if [ -z "${status}" ] || [ "${status}" = "000" ] || [ "${status:0:1}" = "5" ]; then
+          echo "::warning::SonarQube (${SONAR_HOST_URL}) does not answer (HTTP ${status:-none}): no analysis."
           echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
           echo "SONAR_UNREACHABLE=true" >> "$GITHUB_ENV"
           exit 0
