@@ -75,6 +75,16 @@ git -C "$REPO" config core.fileMode true
 commit "mode"
 check "a file mode change changes the id" "different" "$([ "$(id)" != "$before_mode" ] && echo different || echo same)"
 
+# The id of another revision: a docs-only pull request has the code tree of its merge base.
+docs_base=$(git -C "$REPO" rev-parse HEAD)
+put docs/en/new.adoc '= New page'
+commit "docs on top"
+check "id of a revision" "$(id)" "$(cd "$REPO" && python3 "$SCRIPT" id --rev "$docs_base")"
+put core/src/main/java/B.java 'class B {}'
+commit "code on top"
+check "a code commit differs from the revision before it" "different" \
+  "$([ "$(id)" != "$(cd "$REPO" && python3 "$SCRIPT" id --rev "$docs_base")" ] && echo different || echo same)"
+
 # Companion branches: a branch named like the pull request's head branch in another repository of the
 # organisation. The forge is a dict of path -> (status, JSON) pairs.
 companions() {

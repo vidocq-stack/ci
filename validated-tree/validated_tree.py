@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Whether a pull request's code was already validated, so its build can be reused (Vidocq/ci#57).
 
-  validated_tree.py id
-      Prints the code-tree id of HEAD, run from the repository root.
+  validated_tree.py id [--rev REV]
+      Prints the code-tree id of HEAD (or of REV), run from the repository root.
   validated_tree.py check --event EVENT --attempt N --owner OWNER --repo REPO --branch HEAD_REF
                           [--api URL] [--token TOKEN]
       Prints `eligible=true|false` and `reason=...` lines (GITHUB_OUTPUT format): whether the run
@@ -151,7 +151,8 @@ def forge_get(api, token):
 
 def main(argv):
     if argv[:1] == ["id"]:
-        out = subprocess.run(["git", "ls-tree", "-r", "--full-tree", "HEAD"],
+        rev = dict(zip(argv[1::2], argv[2::2])).get("--rev", "HEAD")
+        out = subprocess.run(["git", "ls-tree", "-r", "--full-tree", rev],
                              check=True, capture_output=True, text=True).stdout
         print(tree_id(out))
         return 0

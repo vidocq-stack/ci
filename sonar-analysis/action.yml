@@ -50,9 +50,28 @@ runs:
     # analysis read again, instead of a new build and analysis, when that analysis is still the pull request's last
     # one: the record of a code tree is keyed with the date of the analysis it records, and looked up with the date of
     # the pull request's last analysis.
+    # A pull request that changes documentation only has the code tree of its merge base with the base branch: no new
+    # code, so no build and no analysis; the comment says so (Vidocq/ci#57).
+    - name: Does the pull request change documentation only?
+      id: docs
+      if: github.event_name == 'pull_request' && inputs.sonar-token != ''
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        SCRIPT: ${{ github.action_path }}/../validated-tree/validated_tree.py
+      run: |
+        set -uo pipefail
+        no() { echo "docs-only=false" >> "$GITHUB_OUTPUT"; exit 0; }
+        base=$(git merge-base HEAD "origin/${BASE_REF}" 2>/dev/null) || no
+        head_id=$(python3 "$SCRIPT" id) || no
+        base_id=$(python3 "$SCRIPT" id --rev "$base") || no
+        [ "$head_id" = "$base_id" ] || no
+        echo "Documentation only: the code tree of ${base:0:8}, where the pull request leaves ${BASE_REF}."
+        { echo "docs-only=true"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
+
     - name: Date of the pull request's last analysis
       id: last
-      if: github.event_name == 'pull_request' && inputs.sonar-token != ''
+      if: github.event_name == 'pull_request' && inputs.sonar-token != '' && steps.docs.outputs.docs-only != 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -81,7 +100,7 @@ runs:
 
     - name: Was this code tree that analysis?
       id: tree
-      if: github.event_name == 'pull_request' && inputs.sonar-token != ''
+      if: github.event_name == 'pull_request' && inputs.sonar-token != '' && steps.docs.outputs.docs-only != 'true'
       uses: https://codefloe.com/Vidocq/ci/validated-tree@main
       with:
         mode: check
@@ -90,7 +109,7 @@ runs:
         bot-token: ${{ inputs.bot-token }}
 
     - name: SonarQube analysis
-      if: steps.tree.outputs.reused != 'true'
+      if: steps.tree.outputs.reused != 'true' && steps.docs.outputs.docs-only != 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -214,7 +233,7 @@ runs:
 
     - name: SonarQube quality gate
       id: gate
-      if: env.SONAR_ANALYSED == 'true' || env.SONAR_UNREACHABLE == 'true' || steps.tree.outputs.reused == 'true'
+      if: env.SONAR_ANALYSED == 'true' || env.SONAR_UNREACHABLE == 'true' || steps.tree.outputs.reused == 'true' || steps.docs.outputs.docs-only == 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -229,6 +248,9 @@ runs:
         SERVER_URL: ${{ github.server_url }}
         REUSED: ${{ steps.tree.outputs.reused }}
         REUSED_FROM: ${{ steps.tree.outputs.recorded-commit }}
+        DOCS_ONLY: ${{ steps.docs.outputs.docs-only }}
+        DOCS_BASE: ${{ steps.docs.outputs.base }}
+        BASE_REF: ${{ github.base_ref }}
       run: |
         python3 - <<'PY'
         import json, os, sys, time, urllib.error, urllib.parse, urllib.request
@@ -275,6 +297,12 @@ runs:
                     forge("POST", "/repos/%s/issues/%s/comments" % (repo, pr), {"body": body})
             except urllib.error.URLError as e:
                 print("::warning::Could not post the SonarQube comment: %s" % e)
+
+        if os.environ.get("DOCS_ONLY") == "true":
+            comment(["### SonarQube quality gate: ➖ no code to analyse", "",
+                     "Commit `%s` changes documentation only: its code is that of `%s`, where it leaves `%s`. No new code, "
+                     "so no build and no analysis." % (head, os.environ.get("DOCS_BASE", "")[:8], os.environ.get("BASE_REF", ""))])
+            sys.exit(0)
 
         if unreachable:
             # Said on the pull request: a silent green job read as "nothing to report" (Vidocq/ci#57).
