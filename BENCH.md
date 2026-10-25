@@ -5,6 +5,34 @@ raw results, delta against the previous run.
 
 ---
 
+## 2026-10-25 — targeted consumer tests with intermediate upstreams from central-snapshots (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max (18 cores, 128 GB), Temurin 25, Maven 3.9.16, `CI=true`.
+- **Setup**: the real `build-one-consumer/build-consumer.sh` of this branch, with:
+  - `CONSUMER=Vidocq/vidocq` (cloned from Codefloe main) and `PRODUCER_SLUG=Vidocq/champollion`;
+  - champollion `56babcc` already installed at `0.4.0-PR0.tgi` by `rebuild-producer.sh`;
+  - `UPSTREAMS="Vidocq/cassini Vidocq/cervantes Vidocq/cyrano Vidocq/dirac"` and no companion branch
+    (`HEAD_REF` empty);
+  - `GRAPH_PRUNING=false` and the default `maven-args`;
+  - an isolated, warm Maven repository.
+
+  The same script ran with `TESTS=targeted`, then with `TESTS=full`.
+- **Network**: central-snapshots resolution was slow during the session (see the entries below).
+
+| Mode | Job (clone + pin + versions:set + analysis + install) | Install | Tests run | Non-pom modules keeping their tests |
+|---|---:|---:|---:|---:|
+| full | 644 s | 10:37 min | 3 320 | 77 / 77 |
+| targeted | 148 s (−77 %) | 2:08 min | 272 | 21 / 77 |
+
+- **The analysis**: 48 external artifacts resolved on the synthetic project, with the intermediates' artifacts
+  among them.
+- **Through an intermediate.** `vidocq-runtime-cervantes-jwt-extension` is affected only through intermediates:
+  "io.vidocq.champollion:champollion-api via dependency io.vidocq.cervantes:cervantes-cdi-vauban". The match is by
+  groupId:artifactId; the intermediate's pom declares the SNAPSHOT version.
+- **Before this change**, the job fell back to full ("the consumer has impacted intermediate upstreams").
+
+---
+
 ## 2026-10-25 (middle producers) — `tests: targeted` for chappe, champollion, cassini, foy, ravel, mansart (Vidocq/vidocq#285)
 
 - **Hardware/JVM**: Apple M5 Max (18 cores, 128 GB), Temurin 25, Maven 3.9.16, `CI=true`.
