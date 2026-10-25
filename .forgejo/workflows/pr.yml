@@ -61,6 +61,7 @@ jobs:
           bash build-impacted/chain-step-test.sh
           bash resolve-impacted/impacted-matrix-test.sh
           bash build-one-consumer/build-consumer-test.sh
+          bash producer-artifacts/producer-artifacts-test.sh
           bash build-one-consumer/baseline/baseline-test.sh
           bash build-one-consumer/targeted/targeted-test.sh
           bash targeted-producer-tests/producer-tests-test.sh

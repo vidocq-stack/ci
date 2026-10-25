@@ -9,6 +9,10 @@
 #   PRODUCER_DIR        the producer checkout (.)
 #   PRODUCER_MVN_ARGS   Maven args (-B -ntp), word-split as given
 #   SHARED              directory of the shared scripts (../build-impacted)
+#   PRODUCER_ARTIFACTS_NAME  optional: the run's artifact the producer job shared
+#                       (producer-artifacts/action.yml, mode publish); when it downloads, verifies
+#                       and installs (producer-artifacts/fetch-install.sh: ARTIFACTS_API,
+#                       ARTIFACTS_RUN, ARTIFACTS_TOKEN), no rebuild; any problem: the rebuild below
 #   TESTS               full (default) | targeted: targeted also writes the producer artifacts to
 #                       PRODUCER_ARTIFACTS ($RUNNER_TEMP/targeted/producer-artifacts.txt)
 set -euo pipefail
@@ -23,6 +27,9 @@ case "$PRODUCER_VERSION" in
   *-SNAPSHOT) echo "::error::producer-version must be release-style (no -SNAPSHOT): $PRODUCER_VERSION" >&2; exit 1 ;;
 esac
 echo "Producer version: $PRODUCER_VERSION"
+if [ -n "${PRODUCER_ARTIFACTS_NAME:-}" ] && bash "$HERE/../producer-artifacts/fetch-install.sh"; then
+  exit 0
+fi
 # shellcheck disable=SC2086
 mvn $PRODUCER_MVN_ARGS versions:set \
   -DnewVersion="$PRODUCER_VERSION" -DprocessAllModules=true -DgenerateBackupPoms=false </dev/null

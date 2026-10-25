@@ -1,0 +1,88 @@
+name: 'Shared producer artifacts'
+description: >
+  PR-only. mode 'publish', in the producer job right after its install: packs the producer reactor's
+  artifacts at the pull-request version from the job's local repository (poms, jars, wars, plugin
+  jars; no sources, javadoc or test jars), with a manifest (modules, sha256 of every file), and
+  uploads them as the run's artifact (actions/upload-artifact@v3, one-day retention), so that the
+  downstream jobs install them instead of rebuilding the producer (build-one-consumer input
+  producer-artifacts). mode 'delete', in the verdict job (if: always(), after downstream): deletes
+  the run's artifact through the Forgejo API with the job token; never fails (the retention removes
+  it anyway). A failure to pack is a warning: the downstream jobs then rebuild the producer as before.
+
+inputs:
+  mode:
+    description: "'publish' (producer job, after the install) or 'delete' (verdict job, if: always())"
+    default: 'publish'
+  producer-version:
+    description: 'publish: the release-style PR version the install used'
+    default: ''
+  maven-args:
+    description: "publish: Maven args of the effective-POM run (the install's profiles)"
+    default: '-B -ntp'
+  name:
+    description: 'Artifact name; default producer-artifacts-<run id> (pass the same to build-one-consumer)'
+    default: ''
+  retention-days:
+    description: 'publish: days the forge keeps the artifact (it is only needed during the run)'
+    default: '1'
+  token:
+    description: 'delete: token allowed to delete the run artifacts (the job token works on Forgejo 16)'
+    default: ${{ github.token }}
+
+outputs:
+  name:
+    description: 'The artifact name'
+    value: ${{ steps.name.outputs.name }}
+  packed:
+    description: "'true' when the artifacts were packed (and uploaded)"
+    value: ${{ steps.pack.outputs.packed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Artifact name
+      id: name
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        RUN: ${{ github.run_id }}
+      run: echo "name=${NAME:-producer-artifacts-$RUN}" >> "$GITHUB_OUTPUT"
+
+    - name: Pack the producer artifacts at the PR version
+      id: pack
+      if: inputs.mode == 'publish'
+      shell: bash
+      env:
+        PRODUCER_VERSION: ${{ inputs.producer-version }}
+        MVN_ARGS: ${{ inputs.maven-args }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+        out="${RUNNER_TEMP:-/tmp}/producer-artifacts"
+        if OUT="$out" bash "$ACTION_PATH/pack.sh"; then
+          echo "packed=true" >> "$GITHUB_OUTPUT"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning title=Producer artifacts::not packed: the downstream jobs rebuild the producer."
+          echo "packed=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload the producer artifacts
+      if: inputs.mode == 'publish' && steps.pack.outputs.packed == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ steps.name.outputs.name }}
+        path: ${{ steps.pack.outputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Delete the run's producer artifacts
+      if: inputs.mode == 'delete'
+      shell: bash
+      env:
+        API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+        RUN: ${{ github.run_id }}
+        NAME: ${{ steps.name.outputs.name }}
+        TOKEN: ${{ inputs.token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/delete.py" --api "$API" --run "$RUN" --name "$NAME" --token "$TOKEN"

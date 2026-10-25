@@ -45,6 +45,14 @@ inputs:
       PR's head branch when they have one. PR from a branch of the producer repo only, never
       from a fork. 'false' turns it off.
     default: 'true'
+  producer-artifacts:
+    description: >
+      Name of the run artifact the producer job shared (producer-artifacts, mode publish; e.g.
+      producer-artifacts-${{ github.run_id }}). When set, the producer artifacts are downloaded with
+      the job token, checked against their manifest (version, the producer's modules, sha256 of
+      every file) and installed, instead of rebuilding the producer; any problem falls back to the
+      rebuild, with a notice. Empty (default): the producer is rebuilt in this job, as before.
+    default: ''
   tests:
     description: >
       'full' (default): every test of the consumer runs, as always. 'targeted': the consumer
@@ -92,6 +100,10 @@ runs:
         PRODUCER_DIR: ${{ inputs.producer-dir }}
         PRODUCER_MVN_ARGS: ${{ inputs.producer-maven-args }}
         TESTS: ${{ inputs.tests }}
+        PRODUCER_ARTIFACTS_NAME: ${{ inputs.producer-artifacts }}
+        ARTIFACTS_API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+        ARTIFACTS_RUN: ${{ github.run_id }}
+        ARTIFACTS_TOKEN: ${{ github.token }}
         SHARED: ${{ github.action_path }}/../build-impacted
         ACTION_PATH: ${{ github.action_path }}
       run: |
