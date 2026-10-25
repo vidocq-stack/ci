@@ -159,6 +159,50 @@ echo '<projects><project>' > "$TMP/bad.xml"
 analyse 'example/src/main/java/E.java' "$TMP/bad.xml" > /dev/null
 check "fallback: an effective POM that does not parse" "full" "$(field decision)"
 
+# Ordering (review 59-I4): t enters "test-only" first (its tests name x-art), then becomes a real
+# dependent of p (whose main code names x-art); q's main code names t-lib: q must be affected.
+mini() { # mini <dir>: a separate small reactor in $TMP/<dir>, effective POMs $TMP/<dir>.xml
+  ROOT_SAVE="$ROOT"; EFF_SAVE="$EFF"; EFFT_SAVE="$EFF_TCK"
+  ROOT="$TMP/$1"; EFF="$TMP/$1.xml"; EFF_TCK="$TMP/$1-tck.xml"
+  rm -rf "$ROOT"; : > "$EFF.body"; : > "$EFF_TCK.body"
+}
+mini_end() {
+  { echo '<projects>'; cat "$EFF.body"; echo '</projects>'; } > "$EFF"
+  { echo '<projects>'; cat "$EFF_TCK.body"; echo '</projects>'; } > "$EFF_TCK"
+  MINI_ROOT="$ROOT"; MINI_EFF="$EFF"
+  ROOT="$ROOT_SAVE"; EFF="$EFF_SAVE"; EFF_TCK="$EFFT_SAVE"
+}
+mini order
+module . root pom - ""
+module x x-art jar root ""
+module p p-tool jar root ""
+echo 'class P { String X = "x-art"; }' > "$ROOT/p/src/main/java/P.java"
+module t t-lib jar root "$(dep p-tool)"
+mkdir -p "$ROOT/t/src/test/java" && echo 'class T { String X = "x-art"; }' > "$ROOT/t/src/test/java/T.java"
+module q q-cli jar root ""
+echo 'class Q { String T = "io.vidocq.rt:t-lib"; }' > "$ROOT/q/src/main/java/Q.java"
+module o other jar root ""
+mini_end
+printf 'x/src/main/java/X.java\n' > "$TMP/changed.txt"
+python3 "$PY" --effective-pom "$MINI_EFF" --repo "$MINI_ROOT" --changed-files "$TMP/changed.txt" --report "$TMP/report.json" > /dev/null 2>&1
+check "ordering: a module first seen test-only, then a dependent of a seed, counts as changed" "kept|kept" "$(skipped t)|$(skipped q)"
+check "ordering: an unrelated module is still skipped" "o" "$(field skip)"
+
+# Test classes named as a coordinate string (review 59-M8): "<g>:<a>:jar:tests:<v>".
+mini tests-coord
+module . root pom - ""
+module x x-art jar root ""
+module h helper jar root ""
+mkdir -p "$ROOT/h/src/test/java" && echo 'class H { String X = "io.vidocq.rt:x-art"; }' > "$ROOT/h/src/test/java/H.java"
+module u user jar root ""
+mkdir -p "$ROOT/u/src/test/java" && echo 'class U { String H = "io.vidocq.rt:helper:jar:tests:1"; }' > "$ROOT/u/src/test/java/U.java"
+module w plain jar root ""
+mkdir -p "$ROOT/w/src/test/java" && echo 'class W { String H = "io.vidocq.rt:helper:1"; }' > "$ROOT/w/src/test/java/W.java"
+mini_end
+python3 "$PY" --effective-pom "$MINI_EFF" --repo "$MINI_ROOT" --changed-files "$TMP/changed.txt" --report "$TMP/report.json" > /dev/null 2>&1
+check "test classes named as a coordinate string (…:tests:…) count" "kept" "$(skipped u)"
+check "the plain artifact of a test-only module named as a string does not" "skip" "$(skipped w)"
+
 # --- producer-tests.sh -----------------------------------------------------------------------
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/mvn" <<EOF

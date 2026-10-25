@@ -372,17 +372,19 @@ def is_test_source(rel):
     return len(parts) > 1 and parts[0] == 'src' and (parts[1] in TEST_SOURCE_DIRS or parts[1].startswith('test'))
 
 
-def scan_sources(m, artifact_ids, cap=1 << 20, where=None, accept=None):
+def scan_sources(m, artifact_ids, cap=1 << 20, where=None, accept=None, test_classes=False):
     """Reasons for a module whose src/ names a producer artifact as text: a test or a tool may
     resolve it at run time (ShrinkWrap, a CLI, the local repository by coordinates). Any text
     file counts (binary files, with a NUL byte, and files over `cap` bytes are skipped); the
     artifactId must stand alone, so "groupId:artifactId[:version]" matches too. `where`:
     None (every file under src/), 'main' (not under a test source directory) or 'test'.
-    `accept`, when given, is called with each file's absolute path: False skips the file."""
+    `accept`, when given, is called with each file's absolute path: False skips the file.
+    `test_classes`: only coordinates naming the artifact's test classes count
+    ("g:a:jar:tests:v", "g:a:test-jar:v")."""
     if not artifact_ids:
         return []
     rx = re.compile(r'(?<![\w.-])(' + '|'.join(re.escape(a) for a in sorted(artifact_ids, key=len, reverse=True))
-                    + r')(?![\w-])')
+                    + (r')(?::[\w.-]+)*:(?:tests|test-jar)(?![\w-])' if test_classes else r')(?![\w-])'))
     src = os.path.join(m.basedir, 'src')
     for d, dirs, files in os.walk(src):
         dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.'))

@@ -128,14 +128,21 @@ def analyse(eff, repo, changed, build_eff=None, keep=(), mention_local=()):
         return not is_local(path)
     while True:
         affected = pommodel.close_with_test_only(seeds, test_only, mods)
-        # Only artifacts that change count: a module affected through its tests only (or a
-        # mention-local file) keeps the same artifact.
-        ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom' and ga not in test_only}
+        # Only artifacts that change count: those of the seeds and their dependents. A module
+        # affected through its tests only (or a mention-local file) keeps the same artifact,
+        # unless it is also a dependent of a seed. Its test classes, though, can be named as a
+        # coordinate string ("g:a:jar:tests:v"): that is a use of them, like a test-jar.
+        changed_closure = pommodel.close_dependents(seeds, mods)
+        ids = {mods[ga].artifact_id for ga in changed_closure if mods[ga].packaging != 'pom'}
+        test_ids = {mods[ga].artifact_id for ga in test_only if ga not in changed_closure}
         grew = False
         for ga, m in mods.items():
             if ga in affected or m.packaging == 'pom':
                 continue
             main = pommodel.scan_sources(m, ids, where='main', accept=not_local)
+            if not main and test_ids:
+                main = [f'{w} (uses those test classes)'
+                        for w in pommodel.scan_sources(m, test_ids, test_classes=True)]
             if main:
                 seeds[ga] = main[0]
                 grew = True
