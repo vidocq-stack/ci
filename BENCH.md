@@ -42,6 +42,13 @@ raw results, delta against the previous run.
 | a test that always fails (pre-existing) | true | 143 s (+105 s: baseline + PR rerun) | **success (pre-existing failures only)**, warning, summary lists `BaselineProbeTest#alwaysRed` |
 | a test that fails only with chappe's PR version (it asserts chappe-api is a SNAPSHOT) | true | 86 s (+48 s: the baseline only, which is green) | **failure**, summary: caused by the PR |
 
+Re-run after the review fixes (both pull-request builds compared, finer identities):
+
+| Scenario | Job | Result |
+|---|---:|---|
+| pre-existing failure | 139 s | success (pre-existing failures only); the test is listed as `foy-core:surefire:…BaselineProbeTest#alwaysRed`; the baseline producer is `chappe 0.4.0-SNAPSHOT (chappe-api 0.4.0-20261025.092916-40)` |
+| failure caused by the PR | 85 s | failure; the summary lists `foy-core:surefire:…BaselineProbeTest#chappeIsTheMainSnapshot` |
+
 ---
 
 ## 2026-10-25 — targeted consumer tests with intermediate upstreams from central-snapshots (Vidocq/vidocq#285)
