@@ -1,0 +1,73 @@
+name: 'Select the TCK runners a pull request replays'
+description: >
+  PR-only, for a repository that declares several TCK runner modules in `ci.tck.modules`: keep
+  the runners that a changed module reaches (the module itself or any reactor module depending on
+  it, -Ptck reactor, select-tck/select-tck.py), and replay all of them on any doubt (a change in
+  the root module or outside every module, an unknown runner, any error). Never fails: a failure
+  outputs mode=all. The nightly TCK job still replays every runner. Needs the repository checked
+  out and built (the effective POM resolves its dependencies) and Java + Maven on the PATH.
+
+inputs:
+  changed-files:
+    description: 'File listing the pull request changed paths, one per line, relative to the repository root'
+    required: true
+  maven-args:
+    description: 'Maven args of the effective-POM run'
+    default: '-B -ntp -q'
+  working-directory:
+    description: 'Repository root'
+    default: '.'
+
+outputs:
+  mode:
+    description: '"selected": only `modules` replay; "all": every declared runner (no selection, or a doubt)'
+    value: ${{ steps.select.outputs.mode }}
+  modules:
+    description: 'Runner module paths to replay, comma-separated (may be empty in mode "selected")'
+    value: ${{ steps.select.outputs.modules }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select the TCK runners
+      id: select
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CHANGED_FILES: ${{ inputs.changed-files }}
+        MVN_ARGS: ${{ inputs.maven-args }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+        all() {
+          echo "mode=all" >> "$GITHUB_OUTPUT"
+          echo "modules=" >> "$GITHUB_OUTPUT"
+          echo "::notice title=TCK runners::every declared runner replays ($1)"
+          exit 0
+        }
+        modules=$(python3 - <<'PY' 2>/dev/null
+        import xml.etree.ElementTree as ET
+        root = ET.parse("pom.xml").getroot()
+        ns = root.tag[1:].split("}", 1)[0] if root.tag.startswith("{") else ""
+        q = (lambda t: "{%s}%s" % (ns, t)) if ns else (lambda t: t)
+        node = root.find(q("properties") + "/" + q("ci.tck.modules"))
+        print((node.text or "").strip() if node is not None else "")
+        PY
+        ) || all "ci.tck.modules could not be read"
+        count=$(printf '%s' "$modules" | tr ',' '\n' | grep -c '[^[:space:]]' || true)
+        [ "$count" -ge 2 ] || all "fewer than two runners declared: nothing to select"
+        [ -s "$CHANGED_FILES" ] || all "no changed-file list"
+        eff="${RUNNER_TEMP:-/tmp}/select-tck-effective-pom.xml"
+        mvn $MVN_ARGS -Ptck help:effective-pom -Doutput="$eff" > "${RUNNER_TEMP:-/tmp}/select-tck-mvn.log" 2>&1 \
+          || all "the -Ptck effective POM failed"
+        out=$(python3 "$ACTION_PATH/select-tck.py" --effective-pom "$eff" --repo "$PWD" \
+          --changed-files "$CHANGED_FILES" --modules "$modules" --summary "${GITHUB_STEP_SUMMARY:-/dev/null}") \
+          || all "the selection script failed"
+        printf '%s\n' "$out"
+        mode=$(printf '%s\n' "$out" | sed -n 's/^mode=//p')
+        sel=$(printf '%s\n' "$out" | sed -n 's/^modules=//p')
+        reason=$(printf '%s\n' "$out" | sed -n 's/^reason=//p')
+        [ "$mode" = selected ] || all "$reason"
+        echo "mode=selected" >> "$GITHUB_OUTPUT"
+        echo "modules=$sel" >> "$GITHUB_OUTPUT"
+        echo "::notice title=TCK runners::replayed: ${sel:-none} ($reason)"
