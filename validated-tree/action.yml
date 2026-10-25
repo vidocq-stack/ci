@@ -5,9 +5,9 @@ description: >
   the merge-bot's re-signing of an unchanged rebase. This action keys a validation on the code-tree
   id of HEAD (its tree without the documentation files, validated_tree.py) instead of the commit.
   mode 'check' says whether a run with the same scope already validated that id; mode 'record',
-  at the end of a green run, records it. The record is an actions/cache entry, the cache the
-  runners already serve to setup-maven: an evicted entry only costs a rebuild. Needs the repository
-  checked out (mode 'check' and the id), git and python3.
+  at the end of a green run, records it, as a ref of the repository (refs/validated/<scope>/<id>),
+  which every runner sees: the actions cache is per runner. Needs git and python3, and the repository
+  checked out to compute the id (mode 'check', or 'record' without tree-id).
 
 inputs:
   mode:
@@ -32,7 +32,7 @@ inputs:
     description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note "
     default: ''
   bot-token:
-    description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN), to look for companion branches without rate limits; may be empty'
+    description: "Codefloe token (org secret VIDOCQ_BOT_TOKEN): mode 'record' pushes the record ref with it (nothing is recorded without it); mode 'check' looks for companion branches with it, without rate limits, and may run without it"
     default: ''
 
 outputs:
@@ -86,17 +86,28 @@ runs:
           --owner "$OWNER" --repo "${REPOSITORY#*/}" --branch "$HEAD_REF" --api "$API" --token "$TOKEN" \
           | tee -a "$GITHUB_OUTPUT"
 
-    # The cache's version is derived from `path`, so check and record must name the same relative path.
-    # A record is a few bytes: it is restored, for the commit and note it carries, then removed. Exact keys only: the
-    # runners' cache server did not match a restore-keys prefix (Vidocq/vidocq#362), and a key cannot be written
-    # twice, so whatever must invalidate a record goes into the key (key-suffix).
+    # A record is a ref of the repository itself, refs/validated/<scope>/<id>[-<suffix>] (validated_tree.py): every
+    # runner sees it, where the actions cache is per runner (Vidocq/ci#57, Vidocq/vidocq#362). Whatever must invalidate
+    # a record goes into the ref name (key-suffix); a later record of the same ref replaces it.
     - name: Look the validation up
       id: lookup
       if: inputs.mode == 'check' && steps.eligible.outputs.eligible == 'true'
-      uses: actions/cache/restore@v4
-      with:
-        path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}${{ inputs.key-suffix != '' && format('-{0}', inputs.key-suffix) || '' }}
+      shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        TREE: ${{ steps.id.outputs.tree-id }}
+        SUFFIX: ${{ inputs.key-suffix }}
+        TOKEN: ${{ inputs.bot-token }}
+        SERVER: ${{ github.server_url }}
+        REPOSITORY: ${{ github.repository }}
+        SCRIPT: ${{ github.action_path }}/validated_tree.py
+      run: |
+        set -euo pipefail
+        if [ -n "$TOKEN" ]; then remote="${SERVER/https:\/\//https://oauth2:${TOKEN}@}/${REPOSITORY}.git"
+        else remote="${SERVER%/}/${REPOSITORY}.git"; fi
+        ref=$(python3 "$SCRIPT" ref --scope "$SCOPE" --tree-id "$TREE" --suffix "$SUFFIX")
+        echo "Record: $ref"
+        python3 "$SCRIPT" lookup --remote "$remote" --ref "$ref" | tee -a "$GITHUB_OUTPUT"
 
     - name: Verdict
       id: verdict
@@ -105,20 +116,18 @@ runs:
       env:
         ELIGIBLE: ${{ steps.eligible.outputs.eligible }}
         WHY: ${{ steps.eligible.outputs.reason }}
-        HIT: ${{ steps.lookup.outputs.cache-hit }}
+        FOUND: ${{ steps.lookup.outputs.found }}
+        COMMIT: ${{ steps.lookup.outputs.recorded-commit }}
+        NOTE: ${{ steps.lookup.outputs.recorded-note }}
         SCOPE: ${{ inputs.scope }}
       run: |
         set -euo pipefail
         if [ "$ELIGIBLE" != true ]; then
           reused=false; reason="builds: $WHY"
-        elif [ "$HIT" = true ]; then
-          record=.vidocq-validated-tree/validated
-          commit=$(sed -n 's/^commit=//p' "$record" 2>/dev/null | head -1)
-          note=$(sed -n 's/^note=//p' "$record" 2>/dev/null | head -1)
-          rm -rf .vidocq-validated-tree
-          echo "recorded-commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "recorded-note=$note" >> "$GITHUB_OUTPUT"
-          reused=true; reason="this code tree was already validated ($SCOPE, commit ${commit:0:8}): nothing to build again"
+        elif [ "$FOUND" = true ]; then
+          echo "recorded-commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "recorded-note=$NOTE" >> "$GITHUB_OUTPUT"
+          reused=true; reason="this code tree was already validated ($SCOPE, commit ${COMMIT:0:8}): nothing to build again"
         else
           reused=false; reason="builds: this code tree was never validated ($SCOPE)"
         fi
@@ -127,20 +136,23 @@ runs:
         echo "::notice title=Validated tree::$reason"
 
     - name: Record what was validated
-      if: inputs.mode == 'record'
+      # Needs the bot token (push); a run without it (a pull request from a fork) records nothing.
+      if: inputs.mode == 'record' && inputs.bot-token != ''
       shell: bash
       env:
+        SCOPE: ${{ inputs.scope }}
+        TREE: ${{ steps.id.outputs.tree-id }}
+        SUFFIX: ${{ inputs.key-suffix }}
+        TOKEN: ${{ inputs.bot-token }}
+        SERVER: ${{ github.server_url }}
+        REPOSITORY: ${{ github.repository }}
         SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}
         NOTE: ${{ inputs.note }}
+        SCRIPT: ${{ github.action_path }}/validated_tree.py
       run: |
         set -euo pipefail
-        mkdir -p .vidocq-validated-tree
-        printf 'commit=%s\nrun=%s\nnote=%s\n' "$SHA" "$RUN" "$NOTE" > .vidocq-validated-tree/validated
-
-    - name: Save the record
-      if: inputs.mode == 'record'
-      uses: actions/cache/save@v4
-      with:
-        path: .vidocq-validated-tree
-        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}${{ inputs.key-suffix != '' && format('-{0}', inputs.key-suffix) || '' }}
+        remote="${SERVER/https:\/\//https://oauth2:${TOKEN}@}/${REPOSITORY}.git"
+        ref=$(python3 "$SCRIPT" ref --scope "$SCOPE" --tree-id "$TREE" --suffix "$SUFFIX")
+        python3 "$SCRIPT" record --remote "$remote" --ref "$ref" --commit "$SHA" --run "$RUN" --note "$NOTE"
+        echo "Recorded $ref (commit ${SHA:0:8})"

@@ -344,6 +344,7 @@ runs:
         scope: sonar-pr${{ github.event.pull_request.number }}
         tree-id: ${{ steps.tree.outputs.tree-id }}
         key-suffix: ${{ steps.gate.outputs.analysis }}
+        bot-token: ${{ inputs.bot-token }}
 
     - name: API compatibility report
       # A module whose build runs japicmp (Vidocq/vidocq#288) leaves target/japicmp/: its summary goes to

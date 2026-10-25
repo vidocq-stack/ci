@@ -118,6 +118,27 @@ check "a re-run builds" "no: re-run (attempt 2): a re-run always builds" "$(elig
 check "a push builds" "no: event push: only pull requests reuse a validation" "$(eligible push 1 '')"
 check "a companion branch builds" "no: companion branch in Vidocq/vauban" "$(eligible pull_request 1 'Vidocq/vauban')"
 
+# Records are refs of the repository itself (refs/validated/<scope>/<id>[-<suffix>]), shared by every runner. A bare
+# repository stands for the forge.
+FORGE="$TMP/forge.git"
+git init -q --bare "$FORGE"
+vt() { (cd "$TMP" && python3 "$SCRIPT" "$@"); }
+check "a ref name per scope and id" "refs/validated/pr-validate/abc" "$(vt ref --scope pr-validate --tree-id abc)"
+check "a suffix is made safe for a ref name" "refs/validated/sonar-pr7/abc-2026-10-25T14-57-29-0000" \
+  "$(vt ref --scope sonar-pr7 --tree-id abc --suffix '2026-10-25T14:57:29+0000')"
+check "nothing recorded, nothing found" "found=false" "$(vt lookup --remote "$FORGE" --ref refs/validated/pr-validate/abc | head -1)"
+vt record --remote "$FORGE" --ref refs/validated/pr-validate/abc --commit 1111111 --run run-1 --note 'analysis=x' >/dev/null
+found=$(vt lookup --remote "$FORGE" --ref refs/validated/pr-validate/abc)
+check "a record is found" "found=true" "$(printf '%s\n' "$found" | head -1)"
+check "the record gives the commit" "recorded-commit=1111111" "$(printf '%s\n' "$found" | grep '^recorded-commit=')"
+check "the record gives the note" "recorded-note=analysis=x" "$(printf '%s\n' "$found" | grep '^recorded-note=')"
+vt record --remote "$FORGE" --ref refs/validated/pr-validate/abc --commit 2222222 --run run-2 --note '' >/dev/null
+check "a later record of the same ref replaces it" "recorded-commit=2222222" \
+  "$(vt lookup --remote "$FORGE" --ref refs/validated/pr-validate/abc | grep '^recorded-commit=')"
+check "another scope is not found" "found=false" "$(vt lookup --remote "$FORGE" --ref refs/validated/sonar-pr7/abc | head -1)"
+check "an unreachable forge is not a record" "found=false" "$(vt lookup --remote "$TMP/nowhere.git" --ref refs/validated/pr-validate/abc 2>/dev/null | head -1)"
+check "the record holds no file" "0" "$(git --git-dir="$FORGE" ls-tree -r refs/validated/pr-validate/abc | wc -l | tr -d ' ')"
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures test(s) failed"
   exit 1

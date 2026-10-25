@@ -7,6 +7,16 @@
                           [--api URL] [--token TOKEN]
       Prints `eligible=true|false` and `reason=...` lines (GITHUB_OUTPUT format): whether the run
       may reuse an earlier validation of the same code-tree id.
+  validated_tree.py ref --scope SCOPE --tree-id ID [--suffix SUFFIX]
+      Prints the ref that records a validation: refs/validated/<scope>/<id>[-<suffix>].
+  validated_tree.py lookup --remote URL --ref REF
+      Prints `found=true|false`, and when found `recorded-commit=` and `recorded-note=` lines.
+  validated_tree.py record --remote URL --ref REF --commit SHA --run RUN_URL [--note NOTE]
+      Points REF of the remote at a new record (forced: a later record replaces an earlier one).
+
+A record is a ref of the repository itself, so every runner sees it (the actions cache is per
+runner: Vidocq/ci#57). It points at a parentless commit of the empty tree whose message holds the
+validated commit, the run and the note: a few hundred bytes, and no file of the repository.
 
 The code-tree id is a SHA-256 of HEAD's tree (mode, object id and path of every file) without
 the documentation files, the same ones the docs-only change set of pr-validate accepts: *.md,
@@ -25,7 +35,10 @@ A run may reuse a validation only when nothing outside the tree can change the r
 import fnmatch
 import hashlib
 import json
+import os
+import re
 import subprocess
+import tempfile
 import sys
 import urllib.error
 import urllib.parse
@@ -87,6 +100,43 @@ def eligible(event, attempt, companions):
     return True, "no companion branch, first attempt"
 
 
+def ref_name(scope, tree, suffix=""):
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", suffix)
+    return "refs/validated/%s/%s%s" % (scope, tree, "-" + safe if safe else "")
+
+
+def git(*args, cwd=None):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    return subprocess.run(["git", *args], cwd=cwd, env=env, input="", check=True, capture_output=True,
+                          text=True).stdout
+
+
+def lookup(remote, ref):
+    """{'commit': ..., 'note': ...} of the record at `ref`, or None (also when the remote cannot be read)."""
+    try:
+        if not git("ls-remote", remote, ref).strip():
+            return None
+        with tempfile.TemporaryDirectory() as tmp:
+            git("init", "-q", tmp)
+            git("fetch", "-q", "--depth=1", remote, ref, cwd=tmp)
+            message = git("log", "-1", "--format=%B", "FETCH_HEAD", cwd=tmp)
+    except subprocess.CalledProcessError:
+        return None
+    fields = dict(line.split("=", 1) for line in message.splitlines() if "=" in line)
+    return {"commit": fields.get("commit", ""), "note": fields.get("note", "")}
+
+
+def record(remote, ref, commit, run, note):
+    with tempfile.TemporaryDirectory() as tmp:
+        git("init", "-q", tmp)
+        tree = git("mktree", cwd=tmp).strip()  # the empty tree, from no input
+        message = "validated-tree record\n\ncommit=%s\nrun=%s\nnote=%s\n" % (commit, run, note)
+        sha = git("-c", "user.name=Vidocq CI", "-c", "user.email=ci@vidocq.io", "-c", "commit.gpgsign=false",
+                  "commit-tree", tree, "-m", message, cwd=tmp).strip()
+        git("push", "-q", "--force", remote, "%s:%s" % (sha, ref), cwd=tmp)
+    return sha
+
+
 def forge_get(api, token):
     def get(path):
         headers = {"Authorization": "token " + token} if token else {}
@@ -118,6 +168,20 @@ def main(argv):
         ok, why = eligible(args.get("--event", ""), args.get("--attempt", ""), companions)
         print("eligible=%s" % ("true" if ok else "false"))
         print("reason=%s" % why)
+        return 0
+    args = dict(zip(argv[1::2], argv[2::2]))
+    if argv[:1] == ["ref"]:
+        print(ref_name(args["--scope"], args["--tree-id"], args.get("--suffix", "")))
+        return 0
+    if argv[:1] == ["lookup"]:
+        found = lookup(args["--remote"], args["--ref"])
+        print("found=%s" % ("true" if found else "false"))
+        if found:
+            print("recorded-commit=%s" % found["commit"])
+            print("recorded-note=%s" % found["note"])
+        return 0
+    if argv[:1] == ["record"]:
+        record(args["--remote"], args["--ref"], args["--commit"], args["--run"], args.get("--note", ""))
         return 0
     print(__doc__, file=sys.stderr)
     return 2
