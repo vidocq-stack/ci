@@ -63,10 +63,18 @@ def escape(s):
 
 class Ref:
     """One reference from a module to an artifact."""
-    __slots__ = ('ga', 'version', 'kind', 'scope')
+    __slots__ = ('ga', 'version', 'kind', 'scope', 'type', 'classifier')
 
-    def __init__(self, ga, version, kind, scope=''):
+    def __init__(self, ga, version, kind, scope='', type='', classifier=''):
         self.ga, self.version, self.kind, self.scope = ga, version or None, kind, scope
+        self.type, self.classifier = type or '', classifier or ''
+
+    def uses_test_classes(self):
+        """True when the reference may reach the referenced module's TEST classes: a test-jar
+        type, any classifier or non-jar type, a plugin configuration (dependenciesToScan...) or
+        a nested build."""
+        return (self.type not in ('', 'jar', 'pom') or bool(self.classifier)
+                or self.kind in ('plugin configuration', 'plugin configuration text', 'nested build'))
 
     def label(self):
         return f'{self.kind}({self.scope})' if self.scope else self.kind
@@ -178,7 +186,7 @@ def _parse_project(p):
             m.properties[strip(prop.tag)] = (prop.text or '').strip()
     for d in children(child(p, 'dependencies'), 'dependency'):
         m.refs.append(Ref(f"{text(d, 'groupId')}:{text(d, 'artifactId')}", text(d, 'version'),
-                          'dependency', text(d, 'scope', 'compile')))
+                          'dependency', text(d, 'scope', 'compile'), text(d, 'type'), text(d, 'classifier')))
     dm = child(p, 'dependencyManagement')
     if dm is not None:
         m.dm_xml = plain_xml(dm)
@@ -198,7 +206,7 @@ def _parse_project(p):
                           text(pl, 'version'), 'plugin'))
         for d in children(child(pl, 'dependencies'), 'dependency'):
             m.refs.append(Ref(f"{text(d, 'groupId')}:{text(d, 'artifactId')}", text(d, 'version'),
-                              'plugin dependency'))
+                              'plugin dependency', '', text(d, 'type'), text(d, 'classifier')))
         _scan_config(child(pl, 'configuration'), m, 'plugin configuration')
         for ex in children(child(pl, 'executions'), 'execution'):
             _scan_config(child(ex, 'configuration'), m, 'plugin configuration')
@@ -258,7 +266,8 @@ def scan_nested(m, reactor_dirs=()):
             if not g or not a:
                 m.doubts.append(f'nested pom {rel} names {raw_g}:{raw_a}, which cannot be resolved (doubt)')
                 continue
-            m.nested_refs.append(Ref(f'{g}:{a}', m.interpolate(text(el, 'version'), own), 'nested build'))
+            m.nested_refs.append(Ref(f'{g}:{a}', m.interpolate(text(el, 'version'), own), 'nested build',
+                                     '', text(el, 'type'), text(el, 'classifier')))
 
 
 def scan_raw_imports(m):
@@ -312,6 +321,22 @@ def load_reactor(path):
     return mods
 
 
+JVM_SOURCES = ('.java', '.kt', '.groovy', '.scala')
+BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.S)
+LINE_COMMENT = re.compile(r'(?m)^\s*//.*$')
+TRAILING_COMMENT = re.compile(r'(?m)(;|\{|\}|\))\s*//.*$')
+
+
+def strip_comments(source):
+    """Remove Javadoc and block comments, whole-line // comments, and // comments after a
+    statement end (;, {, } or )): a name there is never resolved at run time. Known limit: a
+    comment marker inside a string literal ("/*", or "); //") may drop the rest of that literal
+    from the search; rare, accepted."""
+    source = BLOCK_COMMENT.sub(' ', source)
+    source = LINE_COMMENT.sub('', source)
+    return TRAILING_COMMENT.sub(r'\1', source)
+
+
 TEST_SOURCE_DIRS = ('test', 'it', 'testFixtures', 'integration-test')
 
 
@@ -347,7 +372,10 @@ def scan_sources(m, artifact_ids, cap=1 << 20, where=None):
                 continue
             if b'\0' in data[:8192]:
                 continue
-            hit = rx.search(data.decode('utf-8', errors='ignore'))
+            content = data.decode('utf-8', errors='ignore')
+            if name.endswith(JVM_SOURCES):
+                content = strip_comments(content)
+            hit = rx.search(content)
             if hit:
                 return [f'producer artifact {hit.group(1)} named in {os.path.relpath(path, m.basedir)}']
     return []
@@ -377,6 +405,29 @@ def close_dependents(seeds, mods):
                 reason[d] = f'depends on reactor module {mods[cur].artifact_id}'
                 queue.append(d)
     return reason
+
+
+def close_with_test_only(seeds, test_only, mods):
+    """close_dependents of the seeds, plus the "test-only" modules (only their tests may observe
+    the change, their main artifact does not change): they are affected without their plain
+    dependents, but a module that reaches their test classes (Ref.uses_test_classes: a test-jar
+    or tests classifier, a plugin configuration such as dependenciesToScan, a nested build)
+    becomes a seed in turn, and so on."""
+    seeds = dict(seeds)
+    while True:
+        affected = close_dependents(seeds, mods)
+        for ga, why in test_only.items():
+            affected.setdefault(ga, why)
+        more = {}
+        for t in test_only:
+            for ga, m in mods.items():
+                if ga in affected or ga in more:
+                    continue
+                if any(r.ga == t and r.uses_test_classes() for r in m.all_refs()):
+                    more[ga] = f'uses the test classes of {mods[t].artifact_id}'
+        if not more:
+            return affected
+        seeds.update(more)
 
 
 def read_dependency_list(path):

@@ -209,7 +209,7 @@ class Analysis:
                 if not main:
                     tests = pommodel.scan_sources(m, artifact_ids, where='test')
                     if tests:
-                        self.test_only[ga] = tests[0] + ' (tests only: its dependents are not affected)'
+                        self.test_only[ga] = tests[0] + ' (tests only: dependents that do not use its test classes are not affected)'
             if reasons:
                 hits[ga] = sorted(reasons)
         return hits
@@ -217,10 +217,8 @@ class Analysis:
     def close(self, direct):
         """Direct hits closed over the reactor, plus the modules whose test sources only name a
         producer artifact: their tests run, their artifact does not change, so no dependent."""
-        affected = pommodel.close_dependents({ga: '; '.join(sorted(r)) for ga, r in direct.items()}, self.mods)
-        for ga, why in self.test_only.items():
-            affected.setdefault(ga, why)
-        return affected
+        return pommodel.close_with_test_only({ga: '; '.join(sorted(r)) for ga, r in direct.items()},
+                                             self.test_only, self.mods)
 
     def closure_needs(self, affected):
         """{key: entry} for the suspect externals of the modules not affected yet; key =
