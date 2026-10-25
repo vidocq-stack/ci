@@ -61,6 +61,10 @@ def escape(s):
     return s.strip().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+# Types whose file is the module's main artifact (never its test classes).
+MAIN_ARTIFACT_TYPES = ('', 'jar', 'pom', 'maven-plugin', 'war', 'ear', 'ejb', 'rar', 'bundle')
+
+
 class Ref:
     """One reference from a module to an artifact."""
     __slots__ = ('ga', 'version', 'kind', 'scope', 'type', 'classifier')
@@ -71,10 +75,10 @@ class Ref:
 
     def uses_test_classes(self):
         """True when the reference may reach the referenced module's TEST classes: a test-jar
-        type, any classifier or non-jar type, a plugin configuration (dependenciesToScan...) or
-        a nested build."""
-        return (self.type not in ('', 'jar', 'pom') or bool(self.classifier)
-                or self.kind in ('plugin configuration', 'plugin configuration text', 'nested build'))
+        type, any classifier or a type other than a main artifact's (dependencies, plugin dependencies and nested
+        builds record them), or a plugin configuration (dependenciesToScan...)."""
+        return (self.type not in MAIN_ARTIFACT_TYPES or bool(self.classifier)
+                or self.kind in ('plugin configuration', 'plugin configuration text'))
 
     def label(self):
         return f'{self.kind}({self.scope})' if self.scope else self.kind
