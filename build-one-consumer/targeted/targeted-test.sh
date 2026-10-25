@@ -177,6 +177,8 @@ check "pom-packaged module, unaffected: never in the skip list" "none" "$(status
 check "pom-packaged root: never in the skip list" "none" "$(status .)"
 check "nested invoker build naming the producer: affected" "1" "$(reason invoker | grep -c 'nested build io.vidocq.knock:knock-core')"
 check "nested build naming only its own projects and pruned externals: not affected" "skip" "$(status invoker-clean)"
+check "intermediate upstream from central-snapshots: matched by groupId:artifactId, whatever the producer version its pom declares" \
+  "1" "$(grep -c 'io.vidocq.knock:knock-core:jar:1.0' "$TMP"/synth/m*/deps.txt)"
 check "transitive through an external jar: affected" \
   "io.vidocq.knock:knock-core via dependency io.vidocq.cyrano:cyrano-core" "$(reason via-cyrano)"
 check "external of a repo that does not consume the producer: not affected" "skip" "$(status via-peano)"

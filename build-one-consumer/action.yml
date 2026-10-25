@@ -51,7 +51,7 @@ inputs:
       still compiles, test-compiles, packages and installs every module in the same single
       install, but test execution is turned off in the modules whose build cannot see any
       artifact of the producer (effective-POM analysis, build-one-consumer/targeted/). Falls back
-      to 'full' on any doubt (intermediate upstreams, companion branch, analysis or Maven
+      to 'full' on any doubt (a companion branch for the consumer or an intermediate upstream, analysis or Maven
       error...), with the reason in the job summary.
     default: 'full'
   graph-pruning:

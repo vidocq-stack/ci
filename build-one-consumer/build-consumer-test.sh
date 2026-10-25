@@ -171,10 +171,18 @@ check "targeted, no producer artifact list: the build succeeds" "0" "$(run CONSU
 check "targeted, no producer artifact list: falls back to full" "1" \
   "$(grep -c '| full (fallback: the producer artifact list is missing or empty (see the producer rebuild step)) |$' "$TMP/summary")"
 
+# Intermediate upstreams from central-snapshots (no companion branch): analysed like any external.
 run CONSUMER=Vidocq/cyrano UPSTREAMS=Vidocq/ravel HEAD_REF= TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
-check "targeted, intermediate upstreams: falls back to full without any analysis" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"
-check "targeted, intermediate upstreams: the summary says why" "1" \
-  "$(grep -c '| full (fallback: the consumer has impacted intermediate upstreams (Vidocq/ravel)) |$' "$TMP/summary")"
+check "targeted, intermediate upstreams as published: the analysis runs" "1" "$(grep -c '^cyrano .*:effective-pom' "$TMP/mvn-calls")"
+check "targeted, intermediate upstreams as published: no fallback for them" "0" "$(grep -c 'intermediate upstream' "$TMP/summary")"
+check "targeted, intermediate upstreams as published: the log says how they are analysed" "1" \
+  "$(grep -c 'analysed as external artifacts' "$TMP/out")"
+
+# An intermediate rebuilt from its companion branch (mini-chain): its artifacts differ from Central.
+run CONSUMER=Vidocq/cyrano UPSTREAMS=Vidocq/ravel TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
+check "targeted, intermediate rebuilt from a companion branch: falls back to full without any analysis" "0" "$(grep -c '^cyrano .*:effective-pom' "$TMP/mvn-calls")"
+check "targeted, intermediate rebuilt from a companion branch: the summary says why" "1" \
+  "$(grep -c "| full (fallback: intermediate upstream(s) rebuilt from the companion branch 'feat/x': Vidocq/ravel) |\$" "$TMP/summary")"
 
 run CONSUMER=Vidocq/foy TESTS=targeted PRODUCER_ARTIFACTS="$TMP/producer-artifacts.txt" >/dev/null
 check "targeted, companion branch of the consumer: falls back to full without any analysis" "0" "$(grep -c 'effective-pom' "$TMP/mvn-calls")"

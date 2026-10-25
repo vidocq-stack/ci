@@ -29,8 +29,10 @@
 #   TESTS               full (default): every test of the consumer runs | targeted: test
 #                       execution is turned off in the modules that cannot see any artifact of
 #                       the producer (targeted/targeted-tests.sh); full instead, with the
-#                       reason, when the consumer has intermediate upstreams or a companion
-#                       branch, or on any doubt of the analysis
+#                       reason, when the consumer or an intermediate upstream is built from a
+#                       companion branch, or on any doubt of the analysis. Intermediate
+#                       upstreams that come from central-snapshots as published are external
+#                       io.vidocq artifacts: the analysis resolves their closures like any other
 #   GRAPH_PRUNING       true: the targeted analysis trusts the dependency graph to skip the
 #                       closure of the externals of repositories that do not consume the
 #                       producer (faster, but the graph is not checked); false (default): every
@@ -145,13 +147,16 @@ if [ -n "$consumer_branch" ]; then
 else
   echo "  branch: default"
 fi
-# Targeted tests: never with a mini-chain or a companion branch (the changed set would have to
-# include their artifacts too), and never on any doubt of the analysis.
+# Targeted tests: never with a mini-chain or a companion branch (their artifacts differ from what
+# Central holds, so the changed set would have to include them too), and never on any doubt of the
+# analysis. Intermediate upstreams that come from central-snapshots as published are external
+# io.vidocq artifacts: the analysis resolves their closures, so a module reaching the producer
+# through one of them is affected (matched by groupId:artifactId, whatever version they declare).
 prepare=()
 if [ "$TESTS" = targeted ]; then
   why=""
-  if [ -n "$UPSTREAMS" ]; then
-    why="the consumer has impacted intermediate upstreams ($UPSTREAMS)"
+  if [ "${#chain[@]}" -gt 0 ]; then
+    why="intermediate upstream(s) rebuilt from the companion branch '$companion': ${chain[*]}"
   elif [ -n "$consumer_branch" ]; then
     why="the consumer is built on its companion branch '$consumer_branch'"
   fi
@@ -160,6 +165,9 @@ if [ "$TESTS" = targeted ]; then
     echo "Tests: full (fallback: $why)"
   else
     prepare=(--prepare "$HERE/targeted/targeted-tests.sh")
+    if [ -n "$UPSTREAMS" ]; then
+      echo "Targeted tests: the intermediate upstreams ($UPSTREAMS) come from central-snapshots and are analysed as external artifacts"
+    fi
     # Replaced by the analysis' own line; stays if it stops before writing one.
     echo "full (the targeted analysis did not complete)" > "$TESTS_MODE_OUT"
     if [ "${GRAPH_PRUNING:-false}" = true ]; then
