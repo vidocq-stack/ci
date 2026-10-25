@@ -121,6 +121,19 @@ jobs: {}'
 commit "ci.yml now runs on pull requests"
 check "a push-only workflow that gains a pull request trigger is code" "different" "$(same_or_diff "$wf_base")"
 wf_base=$(id)
+put .forgejo/workflows/after.yml 'on:
+  workflow_run:
+    workflows: [pr-validate]
+jobs: {}'
+commit "a workflow_run workflow"
+wf_base=$(id)
+put .forgejo/workflows/after.yml 'on:
+  workflow_run:
+    workflows: [pr-validate]
+jobs: {x: {runs-on: y}}'
+commit "the workflow_run workflow changes"
+check "a workflow_run workflow (runs because of a pull request) is code" "different" "$(same_or_diff "$wf_base")"
+wf_base=$(id)
 put .forgejo/actions/local/action.yml 'runs: {using: composite}'
 commit "a local action"
 check "other .forgejo files stay code" "different" "$(same_or_diff "$wf_base")"

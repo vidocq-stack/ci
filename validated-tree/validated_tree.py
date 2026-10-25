@@ -25,7 +25,7 @@ packaged). Commits do not count, only content: a docs-only commit, a rebase on a
 by documentation only, or the merge-bot's re-signing of an unchanged rebase keep the id. CI
 configuration (.forgejo/) is code: a workflow change must run to exercise itself. The exception is
 a workflow a pull request cannot run: a .forgejo/workflows/*.yml|yaml whose triggers (`on:`) have
-no pull_request or pull_request_target and that no such workflow names (a reusable workflow it
+no pull_request, pull_request_target or workflow_run and that no such workflow names (a reusable workflow it
 calls). ci.yml (push on main), release or scheduled workflows are not exercised by the pull
 request's run, so a change to them proves nothing a build of the same code has not proved. A
 workflow whose triggers cannot be read counts as code.
@@ -59,7 +59,8 @@ def is_doc(path):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in DOCS)
 
 
-PR_TRIGGERS = ("pull_request", "pull_request_target")
+# workflow_run: such a workflow runs because of a pull request and may post a status on it.
+PR_TRIGGERS = ("pull_request", "pull_request_target", "workflow_run")
 WORKFLOW = re.compile(r"^\.forgejo/workflows/[^/]+\.ya?ml$")
 
 
