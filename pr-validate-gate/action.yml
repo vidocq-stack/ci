@@ -9,7 +9,7 @@ description: >
   request as it was reproduces the verdict of the latest completed run on the same commit instead of building
   again. mode 'verdict', in the aggregator (`pr-validate`, required check), decides from toJSON(needs): it FAILS
   a train member, a WIP pull request, and any expected work that did not succeed; a skipped job never passes
-  unless no work was expected. Reads the Forgejo API (public repositories read anonymously); writes nothing.
+  unless no work was expected. Reads the Forgejo API (public repositories read anonymously). Its only write, with a token: cancelling a merge the merge-bot scheduled, when the pull request is not ready or gets a push the merge-bot did not announce.
   Needs python3. See gate.py.
 
 inputs:

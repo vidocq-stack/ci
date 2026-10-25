@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # merge.sh — rebase a PR's head branch onto its base, re-sign every replayed
 # commit with the dedicated CI bot GPG key, force-push, then (unless
-# MERGE_AFTER_REBASE=false) fast-forward merge via the Forgejo API.
+# MERGE_AFTER_REBASE=false) hand the fast-forward to the forge: merged at once
+# when the required checks are already green, otherwise scheduled with
+# Forgejo's "merge when checks succeed". The job never waits for the checks
+# (schedule.py): seventeen /merge runs waiting up to an hour each held 14 of the
+# organisation's 20 runner slots and starved the checks they waited for.
 #
 # Why this exists: any server-side merge/squash/rebase (on Forgejo, GitHub or
 # GitLab alike) strips the contributor's original GPG signature, because the
@@ -16,7 +20,7 @@
 #   BOT_NAME, BOT_EMAIL, MERGE_AFTER_REBASE (true/false, default true)
 #   TRIGGER_EVENT, TRIGGER_COMMENTER, TRIGGER_COMMENT — what set this run off
 #   TRIGGER_BOT_LOGIN — the bot's own account (default vidocq-ci-bot)
-#   CHECKS_TIMEOUT_MINUTES — how long to wait for the required checks (default 60, at most 80)
+#   CHECKS_TIMEOUT_MINUTES — no longer used (the bot does not wait); still validated, 1 to 80
 #   MERGE_BOT_REASON_FILE — optional: every refusal is also written there, for the failure comment
 #
 # Assumes the calling workflow already ran actions/checkout@v4 with
@@ -100,17 +104,34 @@ info "PR #${PR_NUMBER}: ${head_ref} → ${base_ref}"
 # is still allowed: it merges nothing.
 # shellcheck source=refusal.sh
 . "${HERE}/refusal.sh"
+# A merge scheduled earlier (by an earlier /merge, or by hand) is cancelled whenever the bot refuses, and
+# before every rebase: the head it would merge is about to change, and Forgejo's scheduled merge does not pin
+# the head. 404 means there was none.
+cancel_schedule() {
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE -H "$auth_hdr" \
+    "${API}/repos/${REPO}/pulls/${PR_NUMBER}/merge" 2>/dev/null || true)
+  case "$code" in
+    204) info "a scheduled merge of PR #${PR_NUMBER} was cancelled" ;;
+    404) ;;
+    *) info "cancelling a scheduled merge answered HTTP ${code:-none}" ;;
+  esac
+}
 refuse_unmergeable() {
   local file why
   file=$(mktemp)
   printf '%s' "$1" > "$file"
   why=$(merge_refusal "$file")
   rm -f "$file"
-  [[ -z "$why" ]] || die "PR #${PR_NUMBER} is not merged: ${why}."
+  if [[ -n "$why" ]]; then
+    cancel_schedule
+    die "PR #${PR_NUMBER} is not merged: ${why}."
+  fi
 }
 if [[ "${MERGE_AFTER_REBASE:-true}" == "true" ]]; then
   refuse_unmergeable "$pr_json"
 fi
+cancel_schedule
 
 # ---------------------------------------------------------------- 2. signing setup
 
@@ -187,6 +208,22 @@ fi
 
 new_head=$(git rev-parse HEAD)
 
+# Announce the head the forge will merge BEFORE pushing it: the pr-validate run of that push reads this
+# marker and cancels a scheduled merge whose head was not announced (a later push by anyone else).
+if [[ "${MERGE_AFTER_REBASE:-true}" == "true" ]]; then
+  comment=$(python3 -c '
+import json, sys
+head, base = sys.argv[1], sys.argv[2]
+print(json.dumps({"body": (
+    f"⏳ merge-bot: `{head[:10]}` is fast-forwarded into `{base}` by the forge as soon as the required checks "
+    "pass (a scheduled merge: no runner waits). A push, or the pull request becoming WIP, blocked or a train "
+    "member, cancels it: comment /merge again then.\n\n"
+    f"<!-- merge-bot-scheduled-head: {head} -->")}))' "$new_head" "$base_ref")
+  curl -fsS -o /dev/null -X POST -H "$auth_hdr" -H "Content-Type: application/json" -d "$comment" \
+    "${API}/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    || die "could not announce the head to merge on PR #${PR_NUMBER}"
+fi
+
 if [[ "$already_ok" != "true" ]]; then
   info "Force-pushing rebased+signed ${head_ref}"
   timeout 300 git push --force-with-lease origin "HEAD:${head_ref}"
@@ -199,83 +236,18 @@ if [[ "${MERGE_AFTER_REBASE:-true}" != "true" ]]; then
   exit 0
 fi
 
-# The base branch says which checks it requires: wait for those only. The
-# commit's combined state also covers checks it does not require, such as the
-# SonarQube analysis in report mode, and waiting for it made /merge give up on a
-# green pull request (Vidocq/ci#47).
-# Repos without required status checks (enable_status_check=false, e.g.
-# GestionProjet or governance) never report a commit status, so waiting for
-# "success" would burn the whole checks budget and fail. Skip the wait.
-# NOTE: use the read-level /branches/{branch} endpoint — /branch_protections/
-# requires admin rights the bot token does not have (it returned an error page,
-# and the fail-safe fallback made the bot wait forever on check-less repos).
-# If the branch cannot be read, fall back to waiting for every status.
-branch_json=$(mktemp)
-curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/branches/${base_ref}" > "$branch_json" 2>/dev/null \
-  && python3 -c 'import sys,json; json.load(open(sys.argv[1]))' "$branch_json" 2>/dev/null \
-  || echo '{}' > "$branch_json"
-checks_required=$(python3 -c 'import sys,json; print(str(json.load(open(sys.argv[1])).get("enable_status_check", True)).lower())' "$branch_json")
-
-if [[ "$checks_required" != "true" ]]; then
-  info "Branch protection on ${base_ref} does not require status checks — skipping check wait"
-else
-  info "Waiting for required status checks on ${new_head}"
-  # CHECKS_TIMEOUT_MINUTES, 60 by default, on the clock: some repos run a full
-  # Maven build (pr-validate) as part of the required checks, and Vauban's
-  # rebuilds its consumers too, about 48 minutes. The 10-minute budget, then the
-  # 30-minute one, lost the race whenever a slow runner or a slow repository
-  # held the checks (Vidocq/ci#49). Counting attempts instead of minutes also
-  # left out the time each status request takes.
-  # A failed request (HTTP error, network hiccup, non-JSON body) must not end
-  # the job: under `set -e -o pipefail` it used to kill the bot on the first
-  # poll, typically right after the force-push while the forge was still
-  # indexing the new head. Count it as "still pending" and give up only after
-  # 12 failures in a row (one minute).
-  status_json=$(mktemp)
-  unreachable=0
-  deadline=$((SECONDS + checks_timeout_minutes * 60))
-  verdict="pending"
-  while (( SECONDS < deadline )); do
-    if curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/commits/${new_head}/status" > "$status_json" \
-        && verdict=$(python3 "${HERE}/required-checks.py" "$branch_json" "$status_json" 2>/dev/null); then
-      unreachable=0
-    else
-      unreachable=$((unreachable + 1))
-      verdict="unreachable"
-      info "status API not answering for ${new_head} (${unreachable}/12 in a row), retrying in 5s..."
-      (( unreachable < 12 )) || die "status API failed 12 times in a row for ${new_head}"
-    fi
-    [[ "$verdict" == "success" ]] && break
-    [[ "$verdict" == failure:* ]] && die "required status check on ${new_head} reported ${verdict}"
-    sleep 5
-  done
-  [[ "$verdict" == "success" ]] || die "required status checks on ${new_head} did not succeed within ${checks_timeout_minutes} minutes (last state: ${verdict})"
-fi
-
 pr_json=$(curl -fsS -H "$auth_hdr" "${API}/repos/${REPO}/pulls/${PR_NUMBER}") \
   || die "could not fetch PR #${PR_NUMBER} again before merging it"
 refuse_unmergeable "$pr_json"
 
-info "Merging PR #${PR_NUMBER} (fast-forward-only)"
-merge_body=$(python3 -c "
-import json
-print(json.dumps({
-    'Do': 'fast-forward-only',
-    'delete_branch_after_merge': True,
-    'head_commit_id': '${new_head}',
-}))
-")
-for attempt in $(seq 1 5); do
-  resp=$(curl -sS -w '\n%{http_code}' -X POST \
-    -H "$auth_hdr" -H "Content-Type: application/json" \
-    -d "$merge_body" \
-    "${API}/repos/${REPO}/pulls/${PR_NUMBER}/merge")
-  http_code=$(tail -n1 <<<"$resp")
-  body=$(sed '$d' <<<"$resp")
-  case "$http_code" in
-    200|201) ok "PR #${PR_NUMBER} merged (fast-forward, signed by ${GIT_SIGNING_KEY_ID})"; exit 0 ;;
-    405) info "merge not yet allowed (status checks still settling), retrying in 3s..."; sleep 3 ;;
-    *) die "merge API returned HTTP ${http_code}: ${body}" ;;
-  esac
-done
-die "merge API kept returning 405 after retries: ${body}"
+# The base branch says which checks it requires (merge-bot/required-checks.py, Vidocq/ci#47): green already,
+# or none required, the head is fast-forwarded now; pending, the forge merges it when they pass; red, refused.
+# The read-level /branches/{branch} endpoint: /branch_protections/ needs admin rights the bot does not have.
+info "Handing PR #${PR_NUMBER} (${new_head}) to the forge"
+result=$(python3 "${HERE}/schedule.py" --api "$API" --token "$BOT_TOKEN" --repo "$REPO" --pr "$PR_NUMBER" \
+  --head "$new_head" --branch "$base_ref") || die "PR #${PR_NUMBER} is not merged: ${result#refused: }"
+case "$result" in
+  *result=merged*) ok "PR #${PR_NUMBER} merged (fast-forward of ${new_head}, signed by ${GIT_SIGNING_KEY_ID})" ;;
+  *result=scheduled*) ok "PR #${PR_NUMBER} scheduled: the forge fast-forwards ${new_head} when the required checks pass" ;;
+  *) die "unexpected answer while merging PR #${PR_NUMBER}: ${result}" ;;
+esac

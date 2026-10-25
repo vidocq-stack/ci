@@ -27,7 +27,7 @@ on:
         default: 'true'
         type: string
       checks-timeout-minutes:
-        description: 'Minutes to wait for the required checks, 1 to 80 — raise it for a slow pr-validate'
+        description: 'No longer used (the bot schedules the merge instead of waiting); accepted for existing callers, 1 to 80'
         required: false
         default: '60'
         type: string
@@ -61,9 +61,10 @@ jobs:
        github.event.comment.user.login != 'vidocq-ci-bot' &&
        (startsWith(github.event.comment.body, '/merge') || startsWith(github.event.comment.body, '/rebase')))
     runs-on: vidocq-runner
-    # The checks budget (checks-timeout-minutes, 80 at most) plus the rebase,
-    # the re-signing and the push.
-    timeout-minutes: 90
+    # The rebase, the re-signing, the push and one merge request: the bot no
+    # longer waits for the checks (it schedules the merge with the forge), so a
+    # /merge holds a runner for a minute or two, not up to an hour.
+    timeout-minutes: 20
     steps:
       - name: Resolve PR number, actor and mode
         id: ctx

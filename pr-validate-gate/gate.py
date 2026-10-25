@@ -73,6 +73,20 @@ class Api:
     def get(self, path):
         return json.loads(self.get_text(path, "application/json"))
 
+    def delete(self, path):
+        """The HTTP status of a DELETE (no retry, no raise: the callers only report it)."""
+        headers = {"Accept": "application/json"}
+        if self.token:
+            headers["Authorization"] = "token " + self.token
+        req = urllib.request.Request(self.base + path, headers=headers, method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status
+        except urllib.error.HTTPError as err:
+            return err.code
+        except (urllib.error.URLError, OSError):
+            return 0
+
     def get_text(self, path, accept="text/plain"):
         headers = {"Accept": accept}
         if self.token:
@@ -312,6 +326,54 @@ def read_pr(api, repo, number, event_path, fallback=True):
 
 # ---------------------------------------------------------------------------------------------- state
 
+ANNOUNCE = re.compile(r"<!-- merge-bot-scheduled-head: ([0-9a-f]{40}) -->")
+
+
+def announced_head(api, repo, number):
+    """The head the merge-bot last announced it would merge (its comment, written before it pushes), or ""."""
+    login = (api.get("/user") or {}).get("login")
+    if not login:
+        raise ApiError("the token's account is unknown")
+    comments, seen = [], set()
+    for page in (1, 2, 3, 4, 5):
+        batch = api.get(f"/repos/{repo}/issues/{number}/comments?limit=50&page={page}")
+        if not isinstance(batch, list):
+            raise ApiError("the comments are not a list")
+        for c in batch:
+            if isinstance(c, dict) and c.get("id") not in seen:
+                seen.add(c.get("id"))
+                comments.append(c)
+        if len(batch) != 50:
+            break
+    heads = [m.group(1) for c in comments if (c.get("user") or {}).get("login") == login
+             for m in [ANNOUNCE.search(c.get("body") or "")] if m]
+    return heads[-1] if heads else ""
+
+
+def cancel_stale_schedule(api, a, mode, head, why_not_ready):
+    """Forgejo's scheduled merge ("merge when checks succeed", set by the merge-bot) does not pin the head and
+    outlives a label change. With a token, cancel it when the pull request is not ready, and on a push the
+    merge-bot did not announce. Never fails the job."""
+    if not a.token or not a.pr:
+        return
+    reason = ""
+    if mode != "ready":
+        reason = why_not_ready
+    elif a.activity in ("synchronize", "synchronized"):
+        try:
+            if announced_head(api, a.repo, a.pr) != head:
+                reason = "a push the merge-bot did not announce"
+        except ApiError as err:
+            reason = f"a push, and the merge-bot's announcement cannot be read ({err})"
+    if not reason:
+        return
+    status = api.delete(f"/repos/{a.repo}/pulls/{a.pr}/merge")
+    if status == 204:
+        notice("warning", "pr-validate-gate", f"scheduled merge cancelled: {reason}. Comment /merge again when ready.")
+    elif status not in (404,):
+        notice("warning", "pr-validate-gate", f"could not cancel a scheduled merge ({reason}): HTTP {status}")
+
+
 def base_changed(event_path):
     """An `edited` event that retargets the pull request carries changes.base: never reproduce then."""
     try:
@@ -371,6 +433,8 @@ def cmd_state(a):
                    f"({prev['mode']}, {prev['verdict']}): its verdict is reproduced, nothing is built")
     state["why"] = why
 
+    cancel_stale_schedule(api, a, c["mode"], head,
+                          train_message(state) if c["mode"] == "train" else f"{not_ready_message(state)} ({c['wip-reason']})")
     run_producer = c["mode"] != "train" and not state["reproduce"]
     run_downstream = c["mode"] == "ready" and not state["reproduce"]
     summary = {"train": train_message(state), "wip": f"{not_ready_message(state)} ({c['wip-reason']})",

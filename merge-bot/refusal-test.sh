@@ -99,6 +99,9 @@ check "/merge on a train member: refused before any git or gpg call" \
   "1|PR #7 is not merged: it is a member of a PR train (label train-member): it is validated through the train's top PR #12 and merged by the train script after it, never on its own.|" \
   "$(merge)"
 
+check "the refusal also cancels a merge scheduled earlier" "DELETE /api/v1/repos/Vidocq/demo/pulls/7/merge" \
+  "$(grep -o '^DELETE [^ ]*' "$TMP/calls.log" | head -1)"
+
 pr "WIP: faster parser" ""
 result=$(merge false)
 check "/rebase on a WIP pull request is still allowed: it goes on to git" "git" "${result##*|}"
@@ -106,6 +109,42 @@ check "/rebase on a WIP pull request is still allowed: it goes on to git" "git" 
 pr "faster parser" ""
 result=$(merge)
 check "/merge on a ready pull request goes on to git" "git" "${result##*|}"
+
+# ------------------------------------------------------------- merge.sh hands the merge to the forge
+# git and gpg cooperate: the branch is already rebased and signed (no push). The bot must cancel any old
+# schedule, announce the head, re-check the refusals, schedule the merge with the forge and exit: no wait.
+H=1111111111111111111111111111111111111111
+mkdir -p "$TMP/ok-bin"
+printf '#!/bin/sh\necho "git $*" >> "%s/tools.log"\ncase "$1" in rev-parse|rev-list) echo %s ;; esac\nexit 0\n' \
+  "$TMP" "$H" > "$TMP/ok-bin/git"
+printf '#!/bin/sh\necho "gpg $*" >> "%s/tools.log"\ncase "$*" in *--list-secret-keys*) echo "sec:u:4096" ;; esac\nexit 0\n' \
+  "$TMP" > "$TMP/ok-bin/gpg"
+chmod +x "$TMP/ok-bin/git" "$TMP/ok-bin/gpg"
+pr "faster parser" ""
+python3 -c '
+import json, sys
+p, h = sys.argv[1], sys.argv[2]
+r = json.load(open(p))
+R = "/api/v1/repos/Vidocq/demo"
+r[R + "/branches/main"] = {"name": "main", "enable_status_check": True, "status_check_contexts": ["v"]}
+r[R + "/commits/" + h + "/status"] = {"state": "pending", "statuses": [{"context": "v", "status": "pending"}]}
+r["POST " + R + "/pulls/7/merge"] = {"status": 201, "body": {}}
+r["DELETE " + R + "/pulls/7/merge"] = {"status": 404, "body": {}}
+json.dump(r, open(p, "w"))' "$TMP/routes.json" "$H"
+: > "$TMP/calls.log"; : > "$TMP/tools.log"; rm -f "$TMP/reason"
+start=$SECONDS
+PATH="$TMP/ok-bin:$PATH" PR_NUMBER=7 REPO=Vidocq/demo BASE_URL="http://127.0.0.1:$(cat "$TMP/port")" BOT_TOKEN=t \
+  GIT_SIGNING_PRIVATE_KEY=k GIT_SIGNING_PASSPHRASE=p GIT_SIGNING_KEY_ID=i MERGE_AFTER_REBASE=true \
+  MERGE_BOT_REASON_FILE="$TMP/reason" bash "$HERE/merge.sh" > "$TMP/merge.out" 2>&1
+check "/merge with checks pending: the bot schedules the merge and exits 0" "0" "$?"
+check "without waiting" "true" "$([ $((SECONDS - start)) -lt 20 ] && echo true || echo false)"
+check "cancel the old schedule, announce the head, schedule the exact head" \
+  "DELETE /pulls/7/merge;POST /issues/7/comments;POST /pulls/7/merge;" \
+  "$(grep -vE '^GET ' "$TMP/calls.log" | cut -d' ' -f1-2 | sed 's#/api/v1/repos/Vidocq/demo##' | tr '\n' ';')"
+check "the announcement carries the head for the gate" "1" "$(grep -c "merge-bot-scheduled-head: $H" "$TMP/calls.log")"
+check "the merge request names the head and asks the forge to wait for the checks" "1" \
+  "$(grep '^POST /api/v1/repos/Vidocq/demo/pulls/7/merge' "$TMP/calls.log" | grep -c "\"head_commit_id\": \"$H\".*\"merge_when_checks_succeed\": true")"
+check "nothing was pushed (already rebased and signed)" "0" "$(grep -c '^git push' "$TMP/tools.log")"
 
 echo
 if [ "$failures" -gt 0 ]; then

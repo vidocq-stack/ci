@@ -97,6 +97,8 @@ elif cmd == "many":
                      "status": "success", "stopped": "2026-10-25T08:00:00Z"})
     routes[listing] = {"workflow_runs": runs, "total_count": len(runs)}
     routes[listing.replace("page=1", "page=2")] = {"workflow_runs": runs, "total_count": len(runs)}
+elif cmd == "raw-route":
+    routes[args[0]] = json.loads(args[1])
 elif cmd == "logs-broken":
     for k in list(routes):
         if k.endswith("/logs"):
@@ -344,6 +346,68 @@ GITHUB_REPOSITORY="$REPO" FORGE_API="$API" GITHUB_OUTPUT="$TMP/out" python3 "$SC
 check "outside a pull request: full validation" "ready true" "$(out mode) $(out run-downstream)"
 
 # -------------------------------------------------------------------------------------------- verdict
+# ------------------------------------------------------------------- scheduled merges (merge-bot)
+# With a token, the state job cancels Forgejo's scheduled merge (which does not pin the head) when the pull
+# request is not ready, and on a push the merge-bot did not announce in a comment of its own.
+R=/repos/Vidocq/demo
+announce() { # announce <login> <head>: a merge-bot comment announcing the head it schedules
+  python3 -c '
+import json, sys
+p, login, head = sys.argv[1:4]
+r = json.load(open(p))
+c = r.get("/repos/Vidocq/demo/issues/7/comments", [])
+c.append({"id": len(c) + 1, "user": {"login": login},
+          "body": "merge-bot: scheduled.\n\n<!-- merge-bot-scheduled-head: " + head + " -->"})
+r["/repos/Vidocq/demo/issues/7/comments"] = c
+json.dump(r, open(p, "w"))' "$TMP/routes.json" "$1" "$2"
+}
+cancel_routes() {
+  forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+  forge raw-route "DELETE $R/pulls/7/merge" '{"status": 204, "body": {}}'
+}
+state_tok() { # state with the bot token
+  : > "$TMP/out"; : > "$TMP/calls.log"
+  FORGE_API="$API" GITHUB_REPOSITORY="$REPO" GATE_PR=7 GATE_HEAD="$HEAD" GATE_ACTIVITY="$1" GATE_TOKEN=t \
+    GATE_ATTEMPT=1 GATE_RUN_ID=500 GITHUB_EVENT_PATH="$TMP/event.json" \
+    GITHUB_OUTPUT="$TMP/out" python3 "$SCRIPT" state > "$TMP/stdout" 2>&1
+  echo "rc=$?" >> "$TMP/out"
+}
+deleted() { grep -c "^DELETE $R/pulls/7/merge" "$TMP/calls.log"; }
+
+forge reset; forge pr "faster parser" "WIP"; cancel_routes
+state_tok labeled
+check "a pull request that becomes WIP: its scheduled merge is cancelled" "1" "$(deleted)"
+contains "and says so" "scheduled merge" "$(cat "$TMP/stdout")"
+forge reset; forge pr "faster parser" "status/blocked"; cancel_routes
+state_tok labeled
+check "a blocked pull request: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" "train-member" "Train-top: #12"; cancel_routes
+state_tok labeled
+check "a train member: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes
+state_tok edited
+check "a ready pull request edited: nothing cancelled" "0" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; announce vidocq-ci-bot "$HEAD"
+state_tok synchronized
+check "a push the merge-bot announced: nothing cancelled" "0" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; announce vidocq-ci-bot "$HEAD"; announce vidocq-ci-bot 3333333333333333333333333333333333333333
+state_tok synchronized
+check "a push of another head than the last announced one: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes
+state_tok synchronized
+check "a push nobody announced: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" ""; cancel_routes; announce someone-else "$HEAD"
+state_tok synchronized
+check "an announcement by anyone but the bot does not count: cancelled" "1" "$(deleted)"
+forge reset; forge pr "faster parser" "WIP"; cancel_routes
+: > "$TMP/calls.log"
+state labeled
+check "without a token nothing is written" "0" "$(grep -vc '^GET ' "$TMP/calls.log")"
+forge reset; forge pr "faster parser" "WIP"; forge raw-route "/user" '{"login": "vidocq-ci-bot"}'
+forge raw-route "DELETE $R/pulls/7/merge" '{"status": 500, "body": {}}'
+state_tok labeled
+check "a failed cancellation does not fail the state job" "0" "$(out rc)"
+
 # needs <governance> <state result> <state json> <producer> <impacted> <downstream> [docs-only] [test-only] [count] [reused]
 needs() {
   python3 - "$@" <<'EOF'
