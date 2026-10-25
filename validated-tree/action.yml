@@ -1,0 +1,138 @@
+name: 'Reuse the validation of an unchanged code tree'
+description: >
+  Vidocq/ci#57. A pull request rebuilt everything on every push, even when its code had not changed
+  since its last green run: a docs-only commit, a rebase on a main that moved by documentation only,
+  the merge-bot's re-signing of an unchanged rebase. This action keys a validation on the code-tree
+  id of HEAD (its tree without the documentation files, validated_tree.py) instead of the commit.
+  mode 'check' says whether a run with the same scope already validated that id; mode 'record',
+  at the end of a green run, records it. The record is an actions/cache entry, the cache the
+  runners already serve to setup-maven: an evicted entry only costs a rebuild. Needs the repository
+  checked out (mode 'check' and the id), git and python3.
+
+inputs:
+  mode:
+    description: "'check' (before the work) or 'record' (after it succeeded)"
+    required: true
+  scope:
+    description: >
+      What was validated, part of the key: 'pr-validate' for the producer's build and the downstream
+      check, 'sonar-pr<number>' for a pull request's SonarQube analysis. A record of one scope never
+      satisfies another.
+    required: true
+  tree-id:
+    description: "mode 'record': the id the check output (a job output of the checking job). Empty: computed from HEAD."
+    default: ''
+  note:
+    description: "mode 'record': one more line kept with the record, read back by a later check as recorded-note (e.g. 'analysis=<SonarQube analysis id>')"
+    default: ''
+  bot-token:
+    description: 'Codefloe token (org secret VIDOCQ_BOT_TOKEN), to look for companion branches without rate limits; may be empty'
+    default: ''
+
+outputs:
+  tree-id:
+    description: 'The code-tree id of HEAD'
+    value: ${{ steps.id.outputs.tree-id }}
+  reused:
+    description: "mode 'check': 'true' when this run may skip its work, the same code having been validated"
+    value: ${{ steps.verdict.outputs.reused }}
+  reason:
+    description: "mode 'check': why the run reuses a validation or builds"
+    value: ${{ steps.verdict.outputs.reason }}
+  recorded-commit:
+    description: "mode 'check', on reuse: the commit whose run recorded the validation"
+    value: ${{ steps.verdict.outputs.recorded-commit }}
+  recorded-note:
+    description: "mode 'check', on reuse: the note recorded with the validation"
+    value: ${{ steps.verdict.outputs.recorded-note }}
+
+runs:
+  using: composite
+  steps:
+    - name: Code-tree id
+      id: id
+      shell: bash
+      env:
+        GIVEN: ${{ inputs.tree-id }}
+        SCRIPT: ${{ github.action_path }}/validated_tree.py
+      run: |
+        set -euo pipefail
+        if [ -n "$GIVEN" ]; then id="$GIVEN"; else id=$(python3 "$SCRIPT" id); fi
+        echo "tree-id=$id" >> "$GITHUB_OUTPUT"
+        echo "Code-tree id: $id"
+
+    - name: May this run reuse a validation?
+      id: eligible
+      if: inputs.mode == 'check'
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        ATTEMPT: ${{ github.run_attempt }}
+        OWNER: ${{ github.repository_owner }}
+        REPOSITORY: ${{ github.repository }}
+        HEAD_REF: ${{ github.head_ref }}
+        API: ${{ github.server_url }}/api/v1
+        TOKEN: ${{ inputs.bot-token }}
+        SCRIPT: ${{ github.action_path }}/validated_tree.py
+      run: |
+        set -euo pipefail
+        python3 "$SCRIPT" check --event "$EVENT" --attempt "${ATTEMPT:-${GITHUB_RUN_ATTEMPT:-}}" \
+          --owner "$OWNER" --repo "${REPOSITORY#*/}" --branch "$HEAD_REF" --api "$API" --token "$TOKEN" \
+          | tee -a "$GITHUB_OUTPUT"
+
+    # The cache's version is derived from `path`, so check and record must name the same relative path.
+    # A record is a few bytes: it is restored, for the commit and note it carries, then removed.
+    - name: Look the validation up
+      id: lookup
+      if: inputs.mode == 'check' && steps.eligible.outputs.eligible == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .vidocq-validated-tree
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}
+
+    - name: Verdict
+      id: verdict
+      if: inputs.mode == 'check'
+      shell: bash
+      env:
+        ELIGIBLE: ${{ steps.eligible.outputs.eligible }}
+        WHY: ${{ steps.eligible.outputs.reason }}
+        HIT: ${{ steps.lookup.outputs.cache-hit }}
+        SCOPE: ${{ inputs.scope }}
+      run: |
+        set -euo pipefail
+        if [ "$ELIGIBLE" != true ]; then
+          reused=false; reason="builds: $WHY"
+        elif [ "$HIT" = true ]; then
+          record=.vidocq-validated-tree/validated
+          commit=$(sed -n 's/^commit=//p' "$record" 2>/dev/null | head -1)
+          note=$(sed -n 's/^note=//p' "$record" 2>/dev/null | head -1)
+          rm -rf .vidocq-validated-tree
+          echo "recorded-commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "recorded-note=$note" >> "$GITHUB_OUTPUT"
+          reused=true; reason="this code tree was already validated ($SCOPE, commit ${commit:0:8}): nothing to build again"
+        else
+          reused=false; reason="builds: this code tree was never validated ($SCOPE)"
+        fi
+        echo "reused=$reused" >> "$GITHUB_OUTPUT"
+        echo "reason=$reason" >> "$GITHUB_OUTPUT"
+        echo "::notice title=Validated tree::$reason"
+
+    - name: Record what was validated
+      if: inputs.mode == 'record'
+      shell: bash
+      env:
+        SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_number }}
+        NOTE: ${{ inputs.note }}
+      run: |
+        set -euo pipefail
+        mkdir -p .vidocq-validated-tree
+        printf 'commit=%s\nrun=%s\nnote=%s\n' "$SHA" "$RUN" "$NOTE" > .vidocq-validated-tree/validated
+
+    - name: Save the record
+      if: inputs.mode == 'record'
+      uses: actions/cache/save@v4
+      with:
+        path: .vidocq-validated-tree
+        key: validated-${{ inputs.scope }}-${{ github.repository }}-${{ steps.id.outputs.tree-id }}

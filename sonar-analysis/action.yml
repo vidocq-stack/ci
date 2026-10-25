@@ -45,7 +45,54 @@ inputs:
 runs:
   using: composite
   steps:
+    # Vidocq/ci#57: a pull request whose code tree was already analysed (a docs-only commit, a rebase on a
+    # docs-only move of main, the merge-bot's re-signing of an unchanged rebase) gets the quality gate of that
+    # analysis read again, instead of a new build and analysis: when that analysis is still the pull
+    # request's last one, so the gate on the server is the gate of this code.
+    - name: Was this code tree already analysed?
+      id: tree
+      if: github.event_name == 'pull_request' && inputs.sonar-token != ''
+      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
+      with:
+        mode: check
+        scope: sonar-pr${{ github.event.pull_request.number }}
+        bot-token: ${{ inputs.bot-token }}
+
+    - name: Is its analysis still the pull request's last one?
+      id: reuse
+      if: steps.tree.outputs.reused == 'true'
+      shell: bash
+      env:
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        SONAR_HOST_URL: ${{ inputs.host-url }}
+        PROJECT_KEY: ${{ inputs.project-key }}
+        REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        NOTE: ${{ steps.tree.outputs.recorded-note }}
+      run: |
+        python3 - <<'PY' >> "$GITHUB_OUTPUT"
+        import json, os, sys, urllib.parse, urllib.request
+        q = urllib.parse.quote
+        host = os.environ["SONAR_HOST_URL"].rstrip("/")
+        key = (os.environ.get("PROJECT_KEY") or "vidocq-" + os.environ["REPOSITORY"].split("/")[-1]).lower()
+        recorded = os.environ.get("NOTE", "").removeprefix("analysis=")
+        try:
+            req = urllib.request.Request(
+                "%s/api/project_analyses/search?project=%s&pullRequest=%s&ps=1" % (host, q(key), q(os.environ["PR_NUMBER"])),
+                headers={"Authorization": "Bearer " + os.environ["SONAR_TOKEN"]})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                last = (json.load(r).get("analyses") or [{}])[0].get("key", "")
+        except Exception as e:  # any doubt analyses again
+            print("::warning::Cannot read the pull request's last analysis (%s): analysing again." % e, file=sys.stderr)
+            last = ""
+        same = bool(recorded) and recorded == last
+        if not same:
+            print("::notice::The pull request was analysed since this code tree (%s, last %s): analysing again." % (recorded or "?", last or "?"), file=sys.stderr)
+        print("reuse=%s" % ("true" if same else "false"))
+        PY
+
     - name: SonarQube analysis
+      if: steps.reuse.outputs.reuse != 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
@@ -77,6 +124,13 @@ runs:
         key="${key,,}"
         api="${SONAR_HOST_URL%/}/api"
         auth=(-H "Authorization: Bearer ${SONAR_TOKEN}")
+        # A server that does not answer is said on the pull request (quality-gate step), not hidden behind a green job.
+        if ! curl -fsS -m 20 "${api}/system/status" 2>/dev/null | grep -q '"status":"UP"'; then
+          echo "::warning::SonarQube (${SONAR_HOST_URL}) does not answer: no analysis."
+          echo "SONAR_ANALYSED=false" >> "$GITHUB_ENV"
+          echo "SONAR_UNREACHABLE=true" >> "$GITHUB_ENV"
+          exit 0
+        fi
         # SonarQube refuses to analyse a pull request of a project that does not exist yet.
         if [ "$(curl -sS -o /dev/null -w '%{http_code}' "${auth[@]}" "${api}/components/show?component=${key}")" = "404" ]; then
           created=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
@@ -158,11 +212,13 @@ runs:
         fi
 
     - name: SonarQube quality gate
-      if: env.SONAR_ANALYSED == 'true'
+      id: gate
+      if: env.SONAR_ANALYSED == 'true' || env.SONAR_UNREACHABLE == 'true' || steps.reuse.outputs.reuse == 'true'
       shell: bash
       env:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
         SONAR_HOST_URL: ${{ inputs.host-url }}
+        PROJECT_KEY: ${{ inputs.project-key }}
         BOT_TOKEN: ${{ inputs.bot-token }}
         BLOCKING: ${{ inputs.blocking }}
         EVENT_NAME: ${{ github.event_name }}
@@ -170,6 +226,8 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REPOSITORY: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
+        REUSED: ${{ steps.reuse.outputs.reuse }}
+        REUSED_FROM: ${{ steps.tree.outputs.recorded-commit }}
       run: |
         python3 - <<'PY'
         import json, os, sys, time, urllib.error, urllib.parse, urllib.request
@@ -179,6 +237,9 @@ runs:
         blocking = os.environ.get("BLOCKING") == "true"
         is_pr = os.environ.get("EVENT_NAME") == "pull_request"
         pr = os.environ.get("PR_NUMBER", "")
+        reused = os.environ.get("REUSED") == "true"
+        unreachable = os.environ.get("SONAR_UNREACHABLE") == "true"
+        head = os.environ.get("HEAD_SHA", "")[:8]
         q = urllib.parse.quote
 
         def sonar(path):
@@ -196,40 +257,13 @@ runs:
                 raw = r.read()
                 return json.loads(raw) if raw else None
 
-        # The scanner writes the task of the server-side processing next to the root module.
-        task = dict(line.rstrip("\n").split("=", 1) for line in open("target/sonar/report-task.txt") if "=" in line)
-        ce, deadline = None, time.time() + 600
-        while time.time() < deadline:
-            ce = sonar("/api/ce/task?id=" + q(task["ceTaskId"]))["task"]
-            if ce["status"] in ("SUCCESS", "FAILED", "CANCELED"):
-                break
-            time.sleep(5)
-        if not ce or ce["status"] != "SUCCESS":
-            print("::warning::SonarQube did not process the analysis (%s)." % (ce or {}).get("status", "timeout"))
-            sys.exit(1 if blocking else 0)
+        marker = "<!-- vidocq-sonarqube -->"
 
-        gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
-        status = gate.get("status", "NONE")
-        failed = [c for c in gate.get("conditions", []) if c.get("status") == "ERROR"]
-        key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
-        scope = "&pullRequest=" + q(pr) if is_pr else ""
-        issues = sonar("/api/issues/search?components=%s%s&resolved=false&ps=1" % (q(key), scope))["total"]
-        hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
-        print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
-
-        if is_pr and os.environ.get("BOT_TOKEN") and pr:
-            marker = "<!-- vidocq-sonarqube -->"
-            verdict = {"OK": "✅ passed", "ERROR": "❌ failed", "WARN": "⚠️ warning"}.get(status, "➖ " + status.lower())
-            lines = [marker, "### SonarQube quality gate: " + verdict, "",
-                     "New issues: **%s** · security hotspots to review: **%s**" % (issues, hotspots)]
-            if failed:
-                lines += ["", "Failed conditions:"] + [
-                    "- `%s`: %s (must be %s %s)" % (c.get("metricKey"), c.get("actualValue", "?"),
-                                                    "≥" if c.get("comparator") == "LT" else "≤", c.get("errorThreshold", "?"))
-                    for c in failed]
-            lines += ["", "[Open the analysis](%s) · %s · commit `%s`" % (
-                dashboard, "blocking" if blocking else "report mode, not blocking", os.environ.get("HEAD_SHA", "")[:8])]
-            body = "\n".join(lines)
+        def comment(lines):
+            """The pull request's one SonarQube comment, created or kept up to date."""
+            if not (is_pr and os.environ.get("BOT_TOKEN") and pr):
+                return
+            body = "\n".join([marker] + lines)
             repo = os.environ["REPOSITORY"]
             try:
                 comments = forge("GET", "/repos/%s/issues/%s/comments" % (repo, pr)) or []
@@ -241,9 +275,70 @@ runs:
             except urllib.error.URLError as e:
                 print("::warning::Could not post the SonarQube comment: %s" % e)
 
+        if unreachable:
+            # Said on the pull request: a silent green job read as "nothing to report" (Vidocq/ci#57).
+            comment(["### SonarQube quality gate: ➖ not analysed", "",
+                     "SonarQube (%s) did not answer, so commit `%s` has no analysis. Re-run the sonar job, or push "
+                     "again, once it is back." % (host, head)])
+            sys.exit(1 if blocking else 0)
+
+        if reused:
+            # The same code tree, by the analysis that is still the pull request's last one: its quality gate, read
+            # again, follows what was resolved on the server since (false positives, accepted issues).
+            key = (os.environ.get("PROJECT_KEY") or "vidocq-" + os.environ["REPOSITORY"].split("/")[-1]).lower()
+            gate = sonar("/api/qualitygates/project_status?projectKey=%s&pullRequest=%s" % (q(key), q(pr)))["projectStatus"]
+            dashboard = "%s/dashboard?id=%s&pullRequest=%s" % (host, q(key), q(pr))
+        else:
+            # The scanner writes the task of the server-side processing next to the root module.
+            task = dict(line.rstrip("\n").split("=", 1) for line in open("target/sonar/report-task.txt") if "=" in line)
+            ce, deadline = None, time.time() + 600
+            while time.time() < deadline:
+                ce = sonar("/api/ce/task?id=" + q(task["ceTaskId"]))["task"]
+                if ce["status"] in ("SUCCESS", "FAILED", "CANCELED"):
+                    break
+                time.sleep(5)
+            if not ce or ce["status"] != "SUCCESS":
+                print("::warning::SonarQube did not process the analysis (%s)." % (ce or {}).get("status", "timeout"))
+                sys.exit(1 if blocking else 0)
+            with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                out.write("analysis-id=%s\n" % ce["analysisId"])
+            gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
+            key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
+
+        status = gate.get("status", "NONE")
+        failed = [c for c in gate.get("conditions", []) if c.get("status") == "ERROR"]
+        scope = "&pullRequest=" + q(pr) if is_pr else ""
+        issues = sonar("/api/issues/search?components=%s%s&resolved=false&ps=1" % (q(key), scope))["total"]
+        hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
+        print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
+
+        verdict = {"OK": "✅ passed", "ERROR": "❌ failed", "WARN": "⚠️ warning"}.get(status, "➖ " + status.lower())
+        lines = ["### SonarQube quality gate: " + verdict, "",
+                 "New issues: **%s** · security hotspots to review: **%s**" % (issues, hotspots)]
+        if failed:
+            lines += ["", "Failed conditions:"] + [
+                "- `%s`: %s (must be %s %s)" % (c.get("metricKey"), c.get("actualValue", "?"),
+                                                "≥" if c.get("comparator") == "LT" else "≤", c.get("errorThreshold", "?"))
+                for c in failed]
+        footer = "[Open the analysis](%s) · %s · commit `%s`" % (
+            dashboard, "blocking" if blocking else "report mode, not blocking", head)
+        if reused:
+            footer += " · same code as `%s`, whose analysis is reused" % os.environ.get("REUSED_FROM", "")[:8]
+        comment(lines + ["", footer])
+
         if blocking and status != "OK":
             sys.exit(1)
         PY
+
+    - name: Record the analysed code tree
+      # The next push of the same code (Vidocq/ci#57) reads this analysis's gate instead of analysing again.
+      if: steps.gate.outputs.analysis-id != '' && github.event_name == 'pull_request'
+      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
+      with:
+        mode: record
+        scope: sonar-pr${{ github.event.pull_request.number }}
+        tree-id: ${{ steps.tree.outputs.tree-id }}
+        note: analysis=${{ steps.gate.outputs.analysis-id }}
 
     - name: API compatibility report
       # A module whose build runs japicmp (Vidocq/vidocq#288) leaves target/japicmp/: its summary goes to
