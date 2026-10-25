@@ -62,6 +62,7 @@ jobs:
           bash resolve-impacted/impacted-matrix-test.sh
           bash build-one-consumer/build-consumer-test.sh
           bash build-one-consumer/targeted/targeted-test.sh
+          bash targeted-producer-tests/producer-tests-test.sh
           bash select-tck/select-tck-test.sh
           bash validated-tree/validated-tree-test.sh
           bash bench-window/bench-window-test.sh

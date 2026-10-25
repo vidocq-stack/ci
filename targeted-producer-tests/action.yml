@@ -1,0 +1,46 @@
+name: 'Targeted producer tests'
+description: >
+  PR-only, opt-in, for a repository's own pull request: place it after the PR version is set and
+  just before the build's `mvn install`. In mode 'targeted', it keeps the tests of the modules the
+  pull request changes and of every reactor module depending on them, and turns off test
+  execution (skipTests/skipITs/invoker.skip written into the poms) in every other non-pom module:
+  every module still compiles, packages and installs in the same install. Falls back to every
+  test on any doubt (a change in the root module or outside every module, an empty list, an
+  effective-POM failure, any error), with the reason in a notice and the job summary. Mode 'full'
+  (the default) does nothing. Needs the repository checked out and Java + Maven on the PATH.
+
+inputs:
+  changed-files:
+    description: 'File listing the pull request changed paths, one per line, relative to the repository root'
+    required: true
+  mode:
+    description: "'full' (default): nothing changes, every test runs. 'targeted': as described above."
+    default: 'full'
+  maven-args:
+    description: 'Maven args of the effective-POM run: the same profiles and properties as the install that follows'
+    default: '-B -ntp'
+  working-directory:
+    description: 'Repository root'
+    default: '.'
+
+outputs:
+  mode:
+    description: '"targeted": tests skipped in `skipped` modules; "full": every test runs (mode full, or a fallback)'
+    value: ${{ steps.prepare.outputs.mode }}
+  skipped:
+    description: 'Number of modules whose tests are skipped (0 in full mode)'
+    value: ${{ steps.prepare.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - name: Turn off the tests of the modules the pull request does not reach
+      id: prepare
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        MODE: ${{ inputs.mode }}
+        CHANGED_FILES: ${{ inputs.changed-files }}
+        MVN_ARGS: ${{ inputs.maven-args }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/producer-tests.sh"

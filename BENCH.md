@@ -33,6 +33,31 @@ raw results, delta against the previous run.
   2:19 min install, 272 tests, 21 / 77 modules, 48 externals. No source-text doubt was raised, and the gain holds
   (−75 %).
 - **Before this change**, the job fell back to full ("the consumer has impacted intermediate upstreams").
+---
+
+## 2026-10-25 — targeted-producer-tests on vidocq's own pull requests (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
+- **Source**: vidocq `ee782c0` (origin/main).
+- **Setup**: the PR version was set as in vidocq's `pr.yml` (`versions:set 0.4.0-PR0.prod` plus the plugin.xml
+  sync). Then `targeted-producer-tests/producer-tests.sh` ran with `MODE=targeted` and a one-line
+  `pr-changed-files.txt`, followed by `mvn -B -ntp install` through `verify-mvn.sh` (isolated repository, warm).
+- **Network.** The same slow central-snapshots resolution as in the entry below: the full install took 579 s here,
+  against about 222 s at a quiet hour.
+
+| Change | Non-pom modules keeping their tests | Analysis | Install | Full install | Tests run (targeted / full) |
+|---|---:|---:|---:|---:|---:|
+| knock-health-extension (main source) | 7 / 77 | 3 s | 124 s (−78 %) | 579 s | 852 / 3 246 |
+| vidocq-runtime-core (main source) | 71 / 77 | 3 s | 571 s (≈ full) | 579 s | 3 116 / 3 246 |
+| petstore example (main source) | 1 / 77 | 3 s | 87 s (−85 %) | 579 s | 1 / 3 246 |
+
+- **knock-extension: 7 modules keep their tests.** These are the extension, its `-dev` module and the example
+  (reactor dependents), plus four modules whose `src/` names it:
+  - `vidocq-runtime-tooling` (the extension catalog);
+  - `vidocq-runtime-maven-plugin` (a test);
+  - the dirac and heisenberg extensions (`module-info.java`).
+- **vidocq-runtime-core: not every module.** The 6 modules that do not depend on core still skip their tests:
+  codegen-commons, core-codegen, devconsole-spi, devservices-spi, devservice-keycloak and devservice-postgres.
 
 ---
 
