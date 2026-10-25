@@ -38,7 +38,7 @@ if [ "${TESTS:-full}" = targeted ]; then
 fi
 out=$(python3 "$HERE/fetch_install.py" --api "${ARTIFACTS_API:-}" --run "${ARTIFACTS_RUN:-}" \
         --name "${PRODUCER_ARTIFACTS_NAME:-}" --token "${ARTIFACTS_TOKEN:-}" --version "${PRODUCER_VERSION:-}" \
-        --modules "$WORK/modules.txt" --repo "$repo" --work "$WORK" ${list_out[@]+"${list_out[@]}"} 2>&1)
+        --modules "$WORK/modules.txt" --eff "$WORK/eff.xml" --repo "$repo" --work "$WORK" ${list_out[@]+"${list_out[@]}"} 2>&1)
 rc=$?
 printf '%s\n' "$out"
 [ "$rc" -eq 0 ] || refuse "$(printf '%s\n' "$out" | sed -n 's/^REASON: //p' | tail -n 1)"

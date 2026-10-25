@@ -23,14 +23,17 @@ check() {
 }
 
 V=0.4.0-PR7.abc12345
-# The producer "knock": effective POM with three modules; knock-it is never installed.
-cat > "$TMP/eff.xml" <<'EOF'
+# The producer "knock": effective POM of the producer job (after versions:set) with three modules;
+# knock-it skips install by design (maven.install.skip), as the vauban examples and TCK runners do.
+cat > "$TMP/eff.xml" <<EOF
 <projects>
-  <project><groupId>io.vidocq.knock</groupId><artifactId>knock-parent</artifactId><packaging>pom</packaging></project>
-  <project><parent><groupId>io.vidocq.knock</groupId></parent><artifactId>knock-core</artifactId></project>
-  <project><groupId>io.vidocq.knock</groupId><artifactId>knock-it</artifactId></project>
+  <project><groupId>io.vidocq.knock</groupId><artifactId>knock-parent</artifactId><version>$V</version><packaging>pom</packaging></project>
+  <project><parent><groupId>io.vidocq.knock</groupId><version>$V</version></parent><artifactId>knock-core</artifactId><version>$V</version></project>
+  <project><groupId>io.vidocq.knock</groupId><artifactId>knock-it</artifactId><version>$V</version><properties><maven.install.skip>true</maven.install.skip></properties></project>
 </projects>
 EOF
+# The same reactor as a downstream job's producer checkout describes it, before any versions:set.
+sed "s/$V/0.4.0-SNAPSHOT/g" "$TMP/eff.xml" > "$TMP/eff-consumer.xml"
 # The producer job's local repository after its install.
 PREPO="$TMP/producer-m2"
 put() { mkdir -p "$(dirname "$PREPO/$1")"; printf '%s' "${2:-content of $1}" > "$PREPO/$1"; }
@@ -41,6 +44,8 @@ put io/vidocq/knock/knock-core/$V/knock-core-$V.jar
 put io/vidocq/knock/knock-core/$V/knock-core-$V-sources.jar
 put io/vidocq/knock/knock-core/$V/knock-core-$V-javadoc.jar
 put io/vidocq/knock/knock-core/$V/knock-core-$V-tests.jar
+put io/vidocq/knock/knock-core/$V/knock-core-$V-test-sources.jar
+put io/vidocq/knock/knock-it/$V/knock-it-$V.jar
 put io/vidocq/knock/knock-core/0.4.0-SNAPSHOT/knock-core-0.4.0-SNAPSHOT.jar
 put io/vidocq/knock/knock-core/maven-metadata-local.xml
 
@@ -69,14 +74,26 @@ manifest() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(
 check "pack: exits 0" "0" "$(pack)"
 check "pack: the manifest names the version" "$V" "$(manifest 'm["version"]')"
 check "pack: every module of the reactor" "io.vidocq.knock:knock-core io.vidocq.knock:knock-it io.vidocq.knock:knock-parent" "$(manifest '" ".join(sorted(m["modules"]))')"
-check "pack: only the PR-version files, no sources, javadoc or test jars" \
-  "io/vidocq/knock/knock-core/$V/knock-core-$V.jar io/vidocq/knock/knock-core/$V/knock-core-$V.pom io/vidocq/knock/knock-parent/$V/_remote.repositories io/vidocq/knock/knock-parent/$V/knock-parent-$V.pom" \
+check "pack: only the PR-version files, test jars included, no sources or javadoc" \
+  "io/vidocq/knock/knock-core/$V/knock-core-$V-tests.jar io/vidocq/knock/knock-core/$V/knock-core-$V.jar io/vidocq/knock/knock-core/$V/knock-core-$V.pom io/vidocq/knock/knock-parent/$V/_remote.repositories io/vidocq/knock/knock-parent/$V/knock-parent-$V.pom" \
   "$(manifest '" ".join(sorted(m["files"]))')"
-check "pack: a module that installed nothing is listed apart" "io.vidocq.knock:knock-it" "$(manifest '" ".join(m["not_installed"])')"
+check "pack: a module that skips install is listed apart, its stale files left out" "io.vidocq.knock:knock-it" "$(manifest '" ".join(m["install_skipped"])')"
 check "pack: sha256 of each file" "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "content of io/vidocq/knock/knock-core/$V/knock-core-$V.jar")" \
   "$(manifest 'm["files"]["io/vidocq/knock/knock-core/'"$V"'/knock-core-'"$V"'.jar"]')"
 check "pack: one archive and the manifest" "artifacts.tar.gz manifest.json" "$(ls "$TMP/out" | sort | paste -sd' ' -)"
 check "pack: a release-style version only" "1" "$(pack PRODUCER_VERSION=0.4.0-SNAPSHOT)"
+variant() { # variant <file> <python code editing s, the effective POM text>
+  python3 -c 'import sys; s = open(sys.argv[1]).read(); exec(sys.argv[3]); open(sys.argv[2], "w").write(s)' "$TMP/eff.xml" "$TMP/$1" "$2"
+}
+variant eff-noinstall.xml 's = s.replace("</projects>", "<project><groupId>io.vidocq.knock</groupId><artifactId>knock-extra</artifactId><version>'"$V"'</version></project></projects>")'
+check "pack: a module that installed nothing without skipping install: nothing packed" "1" "$(pack STUB_EFF="$TMP/eff-noinstall.xml")"
+check "pack: ... and the reason" "1" "$(grep -c 'io.vidocq.knock:knock-extra installed nothing' "$TMP/pack.out")"
+variant eff-version.xml 's = s.replace("<artifactId>knock-core</artifactId><version>'"$V"'", "<artifactId>knock-core</artifactId><version>0.4.0-SNAPSHOT")'
+check "pack: a module that kept another version: nothing packed" "1" "$(pack STUB_EFF="$TMP/eff-version.xml")"
+check "pack: ... and the reason" "1" "$(grep -c 'io.vidocq.knock:knock-core is at 0.4.0-SNAPSHOT' "$TMP/pack.out")"
+variant eff-plugin-skip.xml 's = s.replace("<artifactId>knock-it</artifactId><version>'"$V"'</version><properties><maven.install.skip>true</maven.install.skip></properties>", "<artifactId>knock-it</artifactId><version>9.9</version><build><plugins><plugin><artifactId>maven-install-plugin</artifactId><executions><execution><id>default-install</id><configuration><skip>true</skip></configuration></execution></executions></plugin></plugins></build>")'
+check "pack: install skipped by the plugin configuration, at any version" "0|io.vidocq.knock:knock-it" \
+  "$(pack STUB_EFF="$TMP/eff-plugin-skip.xml")|$(manifest '" ".join(m["install_skipped"])')"
 
 # --- the forge API --------------------------------------------------------------------------
 cat > "$TMP/server.py" <<'PY'
@@ -113,7 +130,7 @@ CREPO="$TMP/consumer-m2"
 consume() { # consume [VAR=value...] -> exit status
   rm -f "$TMP/mvn-calls" "$TMP/api/requests"; rm -rf "$CREPO" "$TMP/runner"; mkdir -p "$CREPO" "$TMP/runner"
   (env PATH="$TMP/bin:$PATH" STUB_REPO="$CREPO" RUNNER_TEMP="$TMP/runner" PRODUCER_DIR="$TMP/producer" \
-     PRODUCER_VERSION="$V" PRODUCER_MVN_ARGS='-B -ntp' PRODUCER_ARTIFACTS_NAME=producer-artifacts-77 \
+     STUB_EFF="$TMP/eff-consumer.xml" PRODUCER_VERSION="$V" PRODUCER_MVN_ARGS='-B -ntp' PRODUCER_ARTIFACTS_NAME=producer-artifacts-77 \
      ARTIFACTS_API="$API" ARTIFACTS_RUN=77 ARTIFACTS_TOKEN=job-token \
      "$@" bash "$HERE/../build-one-consumer/rebuild-producer.sh") > "$TMP/consume.out" 2>&1
   echo $?
@@ -125,6 +142,9 @@ check "shared: exits 0" "0" "$(consume)"
 check "shared: no rebuild" "0" "$(rebuilt)"
 check "shared: the artifacts are in the local repository, byte for byte" "" \
   "$(diff "$PREPO/io/vidocq/knock/knock-core/$V/knock-core-$V.jar" "$CREPO/io/vidocq/knock/knock-core/$V/knock-core-$V.jar")"
+check "shared: the tests jar reached it, as the rebuild installs it" "" \
+  "$(diff "$PREPO/io/vidocq/knock/knock-core/$V/knock-core-$V-tests.jar" "$CREPO/io/vidocq/knock/knock-core/$V/knock-core-$V-tests.jar" 2>&1)"
+check "shared: no stale file of a module that skips install" "no" "$([ -e "$CREPO/io/vidocq/knock/knock-it/$V/knock-it-$V.jar" ] && echo yes || echo no)"
 check "shared: no sources jar reached it" "no" "$([ -e "$CREPO/io/vidocq/knock/knock-core/$V/knock-core-$V-sources.jar" ] && echo yes || echo no)"
 check "shared: a notice says so" "1" "$(grep -c '^::notice title=Producer artifacts::' "$TMP/consume.out")"
 check "shared: the download uses the job token" "1" "$(grep -c 'GET /api/v1/repos/Vidocq/knock/actions/runs/77/artifacts token job-token' "$TMP/api/requests")"
@@ -143,8 +163,45 @@ fallback "artifact not found" "not found" PRODUCER_ARTIFACTS_NAME=producer-artif
 fallback "API unreachable" "download" ARTIFACTS_API="http://127.0.0.1:1/api"
 fallback "version mismatch" "version" PRODUCER_VERSION=0.4.0-PR8.def
 STUB_EFF_OTHER="$TMP/eff-other.xml"
-sed 's/knock-it/knock-new/' "$TMP/eff.xml" > "$STUB_EFF_OTHER"
+sed 's/knock-it/knock-new/' "$TMP/eff-consumer.xml" > "$STUB_EFF_OTHER"
 fallback "module list mismatch" "modules" STUB_EFF="$STUB_EFF_OTHER"
+# Several artifacts with the run's name: which one is the producer's is unknown.
+publish producer-artifacts-77
+printf '[{"id":9,"name":"producer-artifacts-77","archive_download_url":"http://127.0.0.1:%s/zip/9","expired":false},{"id":10,"name":"producer-artifacts-77","archive_download_url":"http://127.0.0.1:%s/zip/9","expired":false}]' "$PORT" "$PORT" \
+  > "$TMP/api/files/api_v1_repos_Vidocq_knock_actions_runs_77_artifacts"
+fallback "several artifacts with the name" "several artifacts"
+# The downstream checkout says knock-it installs, the manifest says it skipped install.
+publish producer-artifacts-77
+sed 's|<properties><maven.install.skip>true</maven.install.skip></properties>||' "$TMP/eff-consumer.xml" > "$TMP/eff-consumer-noskip.xml"
+fallback "install skip differs" "skip install" STUB_EFF="$TMP/eff-consumer-noskip.xml"
+cat > "$TMP/tamper.py" <<'PY'
+import hashlib, io, json, sys, tarfile, zipfile
+z = zipfile.ZipFile(sys.argv[1]); man = json.loads(z.read('manifest.json'))
+src = tarfile.open(fileobj=io.BytesIO(z.read('artifacts.tar.gz')))
+files = {m.name: src.extractfile(m).read() for m in src.getmembers()}
+def add(name, data): files[name] = data; man['files'][name] = hashlib.sha256(data).hexdigest()
+def drop(name): files.pop(name, None); man['files'].pop(name, None)
+exec(sys.argv[2])
+out = io.BytesIO(); dst = tarfile.open(fileobj=out, mode='w:gz')
+for name, data in files.items():
+    ti = tarfile.TarInfo(name); ti.size = len(data); dst.addfile(ti, io.BytesIO(data))
+dst.close()
+w = zipfile.ZipFile(sys.argv[1], 'w'); w.writestr('manifest.json', json.dumps(man)); w.writestr('artifacts.tar.gz', out.getvalue())
+PY
+tamper() { publish producer-artifacts-77; python3 "$TMP/tamper.py" "$TMP/api/files/zip_9" "$1"; }
+# A module of the manifest that installed nothing although it does not skip install.
+tamper '[drop(n) for n in list(files) if "/knock-core/" in n]'
+fallback "a module installed nothing" "installed nothing"
+# Manifest paths outside the listed modules' PR-version directories, their sha256 consistent.
+tamper 'add("io/vidocq/knock/knock-core/0.4.0-SNAPSHOT/knock-core-0.4.0-SNAPSHOT.jar", b"x")'
+fallback "a path at another version" "outside the modules"
+check "fallback a path at another version: nothing extracted" "no" "$([ -e "$CREPO/io/vidocq/knock/knock-core/$V/knock-core-$V.jar" ] && echo yes || echo no)"
+tamper 'add("org/apache/commons/commons-lang3/'"$V"'/commons-lang3-'"$V"'.jar", b"x")'
+fallback "a path of a foreign artifact" "outside the modules"
+tamper 'add("io/vidocq/knock/knock-it/'"$V"'/knock-it-'"$V"'.jar", b"x")'
+fallback "a path of a module that skips install" "outside the modules"
+tamper 'add("io/vidocq/knock/knock-core/'"$V"'/sub/x.jar", b"x")'
+fallback "a path below a module directory" "outside the modules"
 # A file whose bytes do not match the manifest.
 publish producer-artifacts-77
 python3 - "$TMP/api/files/zip_9" <<'PY'

@@ -24,4 +24,4 @@ python3 "$HERE/../build-one-consumer/targeted/producer-artifacts.py" "$WORK/eff.
 repo=$(mvn $MVN_ARGS -N -q "$HELP:evaluate" -Dexpression=settings.localRepository -DforceStdout </dev/null 2>/dev/null) \
   && [ -d "$repo" ] || { echo "pack.sh: the local repository is unknown" >&2; exit 1; }
 rm -rf "$OUT"
-python3 "$HERE/pack.py" --repo "$repo" --modules "$WORK/modules.txt" --version "$PRODUCER_VERSION" --out "$OUT"
+python3 "$HERE/pack.py" --repo "$repo" --modules "$WORK/modules.txt" --eff "$WORK/eff.xml" --version "$PRODUCER_VERSION" --out "$OUT"

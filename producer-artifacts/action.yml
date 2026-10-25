@@ -2,7 +2,8 @@ name: 'Shared producer artifacts'
 description: >
   PR-only. mode 'publish', in the producer job right after its install: packs the producer reactor's
   artifacts at the pull-request version from the job's local repository (poms, jars, wars, plugin
-  jars; no sources, javadoc or test jars), with a manifest (modules, sha256 of every file), and
+  jars, test jars; no sources, javadoc or maven-metadata), with a manifest (modules, modules that
+  skip install, sha256 of every file), and
   uploads them as the run's artifact (actions/upload-artifact@v3, one-day retention), so that the
   downstream jobs install them instead of rebuilding the producer (build-one-consumer input
   producer-artifacts). mode 'delete', in the verdict job (if: always(), after downstream): deletes
