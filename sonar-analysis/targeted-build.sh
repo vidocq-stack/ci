@@ -14,7 +14,9 @@
 #   TARGETED_TESTS   true | false
 #   EVENT_NAME       pull_request: targeted; anything else: full
 #   BASE_REF, PR_NUMBER  the pull request (targeted-producer-tests reads the changed paths from git)
-#   ANALYSIS_ARGS    Maven args with the build's profiles, for the effective POM (-B -ntp -Pquality)
+#   MAVEN_ARGS_IN    the build's Maven args: their -B, -ntp, -P... and -D... flags (no goal or phase) make
+#                    the effective POM, so that it sees the same profiles as the build
+#   ANALYSIS_ARGS    fallback when MAVEN_ARGS_IN is empty
 #   PRODUCER_TESTS   targeted-producer-tests/producer-tests.sh
 #   TARGETED_DIR     work directory of targeted-producer-tests ($RUNNER_TEMP/targeted/sonar)
 set -uo pipefail
@@ -33,10 +35,22 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRODUCER_TESTS="${PRODUCER_TESTS:-$HERE/../targeted-producer-tests/producer-tests.sh}"
 export TARGETED_DIR="${TARGETED_DIR:-${RUNNER_TEMP:-/tmp}/targeted/sonar}"
 
-if ! MODE=targeted MVN_ARGS="${ANALYSIS_ARGS:--B -ntp}" BASE_REF="${BASE_REF:-}" PR_NUMBER="${PR_NUMBER:-}" \
+# The effective POM sees the build's own profiles and properties, without its goals and phases.
+flags=()
+for a in ${MAVEN_ARGS_IN:-}; do
+  case "$a" in -B|-ntp|--batch-mode|--no-transfer-progress|-P*|-D*|--activate-profiles=*) flags+=("$a") ;; esac
+done
+effective_args="${flags[*]:-${ANALYSIS_ARGS:--B -ntp}}"
+if ! MODE=targeted MVN_ARGS="$effective_args" BASE_REF="${BASE_REF:-}" PR_NUMBER="${PR_NUMBER:-}" \
      TESTS_MODE_OUT="$TARGETED_DIR/mode.txt" bash "$PRODUCER_TESTS"; then
-  echo "::error::Targeted tests: the poms could not be restored after a failed preparation; no Sonar build."
-  exit 1
+  if [ -e "$TARGETED_DIR/EDITS-IN-PLACE" ]; then
+    echo "::error::Targeted tests: the poms could not be restored after a failed preparation; no Sonar build."
+    exit 1
+  fi
+  # Nothing was edited: the full build is safe.
+  echo "::warning::Targeted tests: the preparation failed before editing any pom; every test runs."
+  "$@"
+  exit $?
 fi
 rc=0
 "$@" || rc=$?
