@@ -35,6 +35,31 @@ raw results, delta against the previous run.
 - **Before this change**, the job fell back to full ("the consumer has impacted intermediate upstreams").
 ---
 
+## 2026-10-25 (mention-local) — targeted-producer-tests, knock-extension change, `ci.targeted.mention-local` set (Vidocq/vidocq#285)
+
+- **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
+- **Source and setup**: same as the entry below (vidocq `ee782c0`), with one addition. The local clone's root pom
+  got the property on `main`, so the property itself is not a changed path:
+  `<ci.targeted.mention-local>vidocq-runtime-tooling/src/main/resources/META-INF/vidocq/extension-catalog.properties</ci.targeted.mention-local>`.
+- **Code**: this branch, including two more fixes:
+  - a module affected only through its tests keeps the same artifact, so naming it does not count;
+  - a `maven-plugin` type or a nested build is no use of test classes.
+
+| Change | Non-pom modules keeping their tests | Analysis | Install | Full install (same session) | Tests run (targeted / full) | Restore / guard |
+|---|---:|---:|---:|---:|---:|---|
+| knock-health-extension | 5 / 77 | 5 s | 125 s (−79 %) | 593 s | 833 / 3 246 | ok / ok, poms identical |
+
+- **The five modules:**
+  - the extension, its `-dev` module and its example (reactor dependents);
+  - `vidocq-runtime-tooling`: the catalog mention stays local, so `ExtensionCatalogTest` still runs;
+  - `vidocq-runtime-maven-plugin`: a test names the `-dev` artifact.
+- **Without the two extra fixes**, the same case kept 8 modules and took 575 s. The invoker ITs (Application
+  layer, Continuous testing, Brick codegen) were pulled in, either through the maven-plugin's test-only mention or
+  through their `<type>maven-plugin</type>` dependency.
+- **Delta vs the entry below** (no property): 611 s → 125 s.
+
+---
+
 ## 2026-10-25 — targeted-producer-tests on vidocq's own pull requests (Vidocq/vidocq#285)
 
 - **Hardware/JVM**: Apple M5 Max, Temurin 25, Maven 3.9.16, `CI=true`.
