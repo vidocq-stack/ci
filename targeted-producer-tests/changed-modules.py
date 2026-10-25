@@ -128,7 +128,9 @@ def analyse(eff, repo, changed, build_eff=None, keep=(), mention_local=()):
         return not is_local(path)
     while True:
         affected = pommodel.close_with_test_only(seeds, test_only, mods)
-        ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom'}
+        # Only artifacts that change count: a module affected through its tests only (or a
+        # mention-local file) keeps the same artifact.
+        ids = {mods[ga].artifact_id for ga in affected if mods[ga].packaging != 'pom' and ga not in test_only}
         grew = False
         for ga, m in mods.items():
             if ga in affected or m.packaging == 'pom':

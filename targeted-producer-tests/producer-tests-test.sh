@@ -75,6 +75,8 @@ fixture() {
   module tck-extra      tck-extra     jar root "$(dep core)" "" "" yes
   module abd            abd           jar root "" "" "" "" "$(dep codegen)"
   module abd-only       abd-only      jar root "" "" "" default "$(dep codegen)"
+  module tooling-mentioner tooling-mentioner jar root ""
+  mkdir -p "$ROOT/tooling-mentioner/src/it/p" && echo '<project><artifactId>p</artifactId><build><plugins><plugin><groupId>io.vidocq.rt</groupId><artifactId>tooling</artifactId></plugin></plugins></build></project>' > "$ROOT/tooling-mentioner/src/it/p/pom.xml"
   module catalog-holder catalog-holder jar root ""
   mkdir -p "$ROOT/catalog-holder/src/main/resources" && echo 'knock = ext-knock' > "$ROOT/catalog-holder/src/main/resources/catalog.properties"
   module catalog-user   catalog-user  jar root "$(dep catalog-holder)"
@@ -104,6 +106,7 @@ check "extension change: targeted" "targeted" "$(field decision)"
 check "extension change: the module, its dependents, the modules naming it" \
   "catalog-holder catalog-user example ext-knock ext-knock-dev res-holder res-user tooling" "$(field affected)"
 check "a test-source mention keeps the module's tests, not its plain dependents" "skip" "$(skipped tooling-user)"
+check "naming a module affected only through its tests does not count (its artifact does not change)" "skip" "$(skipped tooling-mentioner)"
 check "the reason names the changed path" "owns ext-knock/src/main/java/A.java" \
   "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["affected"]["ext-knock"])' "$TMP/report.json")"
 
@@ -132,7 +135,7 @@ check "default and -Ptck models combined: a module only in the default model is 
 
 analyse 'core/src/main/java/C.java' > /dev/null
 check "core change: everything depending on core and what names those; never a ci.tck.modules runner" \
-  "abd abd-only agg-mention codegen exts/ext-x plugin-p t-helper t-plain t-user tooling-user u-app" "$(field skip)"
+  "abd abd-only agg-mention codegen exts/ext-x plugin-p t-helper t-plain t-user tooling-mentioner tooling-user u-app" "$(field skip)"
 
 analyse 'exts/pom.xml' > /dev/null
 check "pom parent change: its children; naming the pom module itself does not count" "exts exts/ext-x" "$(field affected)"
@@ -211,9 +214,9 @@ fixture; forge 'ext-knock/src/main/java/A.java'
 check "targeted: exits 0" "0" "$(run)"
 check "targeted: the changed paths come from git" "ext-knock/src/main/java/A.java" "$(cat "$TMP/work/changed-files.txt")"
 check "targeted: the unaffected non-pom modules of the default reactor are edited, never a TCK runner" \
-  "abd abd-only agg-mention codegen core ext-other exts/ext-x plugin-p t-helper t-plain t-user tooling-user u-app" "$(edited)"
-check "targeted: the outputs" "targeted|13" "$(out mode)|$(out skipped)"
-check "targeted: a notice" "1" "$(grep -c '^::notice title=Targeted producer tests::Vidocq/rt: targeted: tests skipped in 13 module(s) (still compiled)' "$TMP/run.out")"
+  "abd abd-only agg-mention codegen core ext-other exts/ext-x plugin-p t-helper t-plain t-user tooling-mentioner tooling-user u-app" "$(edited)"
+check "targeted: the outputs" "targeted|14" "$(out mode)|$(out skipped)"
+check "targeted: a notice" "1" "$(grep -c '^::notice title=Targeted producer tests::Vidocq/rt: targeted: tests skipped in 14 module(s) (still compiled)' "$TMP/run.out")"
 check "targeted: the summary lists the affected modules" "1" "$(grep -c '| `ext-knock` | owns ext-knock/src/main/java/A.java |' "$TMP/summary")"
 check "targeted: two effective POMs, the second with -Ptck (ci.tck.modules), never -DskipTests" "1|1|0" \
   "$(grep -c '^rt -B -ntp org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom -Doutput=' "$TMP/mvn-calls")|$(grep -c '^rt -B -ntp -Ptck org.apache.maven.plugins:maven-help-plugin:[0-9.]*:effective-pom' "$TMP/mvn-calls")|$(grep -c -- '-DskipTests' "$TMP/mvn-calls")"
