@@ -123,7 +123,7 @@ EOF
 ANALYSIS="$HERE/affected-modules.py"
 analyse() { # analyse [extra args] -> exit status; report in $TMP/report.json
   python3 "$ANALYSIS" --effective-pom "$EFF" --repo "$ROOT" --producer-artifacts "$TMP/producer.txt" \
-    --synthetic "$TMP/synth" --report "$TMP/report.json" "$@" > "$TMP/analysis.out" 2>&1
+    --synthetic "$TMP/synth" --report "$TMP/report.json" ${UPSTREAM_GROUPS:+--upstream-groups "$UPSTREAM_GROUPS"} "$@" > "$TMP/analysis.out" 2>&1
   echo $?
 }
 field() { python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); v=r.get(sys.argv[2]); print(v if not isinstance(v,(list,dict)) else json.dumps(v, sort_keys=True))' "$TMP/report.json" "$1"; }
@@ -446,12 +446,21 @@ add_module src-string acme-src-string jar acme-parent "" ""
 mkdir -p "$ROOT/src-string/src/main/java" && printf 'class S { String a = "x"; // comment\n  String c = "io.vidocq.knock:knock-core"; }\n' > "$ROOT/src-string/src/main/java/S.java"
 add_module src-glob acme-src-glob jar acme-parent "" ""
 mkdir -p "$ROOT/src-glob/src/main/java" && printf 'class M {\n  static final String JARS = "glob:**/*.jar";\n  static final String CORE = "io.vidocq.knock:knock-core";\n  /** Docs. */\n  void run() {}\n}\n' > "$ROOT/src-glob/src/main/java/M.java"
+add_module src-interm acme-src-interm jar acme-parent "" ""
+mkdir -p "$ROOT/src-interm/src/test/java" && echo 'class I { String C = "io.vidocq.cyrano:cyrano-core:0.4.0-SNAPSHOT"; }' > "$ROOT/src-interm/src/test/java/I.java"
+add_module src-interm-nover acme-src-interm-nover jar acme-parent "" ""
+mkdir -p "$ROOT/src-interm-nover/src/test/java" && echo 'class J { String C = "io.vidocq.cyrano:cyrano-extra:" + V; }' > "$ROOT/src-interm-nover/src/test/java/J.java"
+add_module src-reactor-coord acme-src-reactor-coord jar acme-parent "" ""
+mkdir -p "$ROOT/src-reactor-coord/src/test/java" && echo 'class R { String C = "io.vidocq.acme:acme-core:1.0"; String D = "org.example:lib:1.0"; }' > "$ROOT/src-reactor-coord/src/test/java/R.java"
 add_module src-quiet acme-src-quiet jar acme-parent "" ""
 mkdir -p "$ROOT/src-quiet/src/main/resources" && echo 'see knock-core-extras and myknock-api' > "$ROOT/src-quiet/src/main/resources/notes.txt"
 printf 'knock-core\0binary' > "$ROOT/src-quiet/src/main/resources/blob.bin"
 add_module agg2 acme-agg2 pom acme-parent "" ""
 add_module agg2/kid acme-agg2-kid jar acme-agg2 "" ""
 nested_pom "$ROOT/agg2/tck-runner/pom.xml" io.vidocq.acme acme-tck-runner "$(dep io.vidocq.knock:knock-core 1)"
+add_module src-other-repo acme-src-other-repo jar acme-parent "" ""
+mkdir -p "$ROOT/src-other-repo/src/test/java" && echo 'class O { String C = "io.vidocq.peano:peano-api:" + V; String D = "io.vidocq.runtime:vidocq-runtime-"; }' > "$ROOT/src-other-repo/src/test/java/O.java"
+UPSTREAM_GROUPS=io.vidocq.cyrano
 analyse > /dev/null
 check "text: phase 1 resolves the external written as a coordinate, with its version" "1" \
   "$(python3 -c 'import json,sys; print(sum(1 for e in json.load(open(sys.argv[1])).values() if e["ga"]=="io.vidocq.cyrano:cyrano-core" and "txt-ext" in e["modules"]))' "$TMP/synth/index.json")"
@@ -471,6 +480,12 @@ check "nested: a profile-only module under a pom module does not reach its child
 check "sources: a producer coordinate in a test source" "affected" "$(status src-coord)"
 check "sources: a producer artifactId in a resource" "affected" "$(status src-bare)"
 check "sources: longer names and binary files do not count" "skip" "$(status src-quiet)"
+check "sources: an external io.vidocq coordinate with a version gets its closure (intermediate upstream)" \
+  "io.vidocq.knock:knock-core via source text io.vidocq.cyrano:cyrano-core" "$(reason src-interm)"
+check "sources: an external io.vidocq coordinate without a version makes its module affected" "1" \
+  "$(reason src-interm-nover | grep -c 'cyrano-extra without a version')"
+check "sources: reactor and third-party coordinates are no suspects" "skip" "$(status src-reactor-coord)"
+check "sources: coordinates of repositories that are neither the producer nor an intermediate upstream are ignored" "skip" "$(status src-other-repo)"
 check "sources: a mention in test sources only does not reach the module's dependents" "skip" "$(status src-coord-user)"
 check "sources: a mention in main sources does" "affected" "$(status src-bare-user)"
 check "sources: the test-only reason says so" "1" "$(reason src-coord | grep -c 'tests only')"

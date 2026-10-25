@@ -452,6 +452,39 @@ def close_with_test_only(seeds, test_only, mods):
         seeds.update(more)
 
 
+SOURCE_SEPARATORS = re.compile(r"""["'`()\[\]{}<>=+]""")
+
+
+def source_coordinates(m, cap=1 << 20):
+    """Refs (kind 'source text') for the Maven coordinates g:a[:...][:version] written in any
+    text file of the module's src/ (a test may resolve them at run time: ShrinkWrap, a CLI
+    fixture, the local repository). Comments of JVM sources are left out; string delimiters,
+    brackets and operators separate tokens; the groupId must hold a dot."""
+    refs, seen = [], set()
+    src = os.path.join(m.basedir, 'src')
+    for d, dirs, files in os.walk(src):
+        dirs[:] = sorted(x for x in dirs if x != 'target' and not x.startswith('.'))
+        for name in sorted(files):
+            path = os.path.join(d, name)
+            try:
+                if os.path.getsize(path) > cap:
+                    continue
+                with open(path, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                continue
+            if b'\0' in data[:8192]:
+                continue
+            content = data.decode('utf-8', errors='ignore')
+            if name.endswith(JVM_SOURCES):
+                content = strip_comments(content)
+            for g, a, v in text_coordinates(SOURCE_SEPARATORS.sub(' ', content)):
+                if (g, a, v) not in seen:
+                    seen.add((g, a, v))
+                    refs.append(Ref(f'{g}:{a}', v, 'source text'))
+    return refs
+
+
 def read_dependency_list(path):
     """The groupId:artifactId of every artifact listed in a `dependency:list -DoutputFile`
     file (lines like '   g:a:jar:1.0:compile -- module x')."""

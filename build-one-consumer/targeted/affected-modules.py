@@ -69,7 +69,8 @@ from pommodel import PomError, child, children, text  # noqa: E402
 
 VIDOCQ_GROUP = 'io.vidocq'
 CLOSURE_KINDS = ('dependency', 'plugin', 'plugin dependency', 'extension', 'plugin configuration',
-                 'plugin configuration text', 'nested build')
+                 'plugin configuration text', 'nested build', 'source text')
+SOURCE = 'source text'
 TEXT = 'plugin configuration text'
 
 
@@ -127,6 +128,7 @@ class Analysis:
     def __init__(self, args):
         self.args = args
         self.repo = os.path.realpath(args.repo)
+        self.upstream_groups = [g.strip() for g in (args.upstream_groups or '').split(',') if g.strip()]
         self.changed = set(read_lines(args.producer_artifacts))
         if not self.changed:
             raise Fallback('the producer artifact set is empty (the producer artifacts could not '
@@ -150,6 +152,13 @@ class Analysis:
             if r.startswith('..'):
                 raise PomError(f'module {ga} lies outside the repository ({m.basedir})')
             self.rel[ga] = r
+
+    def may_carry(self, ga):
+        """A coordinate written in sources is only worth a closure, or a doubt, when it belongs to
+        the producer or to an impacted intermediate upstream (groupId io.vidocq.<repository>):
+        the artifacts of any other repository cannot contain the producer."""
+        g = group_of(ga)
+        return g in self.producer_groups or any(g == u or g.startswith(u + '.') for u in self.upstream_groups)
 
     def suspect(self, ga):
         if ga in self.mods or ga in self.changed or not is_vidocq(ga, self.producer_groups):
@@ -204,6 +213,14 @@ class Analysis:
             reasons |= set(m.doubts)
             reasons |= set(self.chain_reasons(m))
             if m.packaging != 'pom':
+                # io.vidocq coordinates written in sources (an intermediate upstream a test
+                # resolves at run time): a suspect gets its closure; without a version, a doubt.
+                m.source_refs = [r for r in pommodel.source_coordinates(m)
+                                 if r.ga not in self.changed and r.ga not in self.mods
+                                 and not pommodel.TOKEN.search(r.ga) and self.may_carry(r.ga)]
+                for r in m.source_refs:
+                    if self.suspect(r.ga) and not self.text_version(m, r):
+                        reasons.add(f'source text names {r.ga} without a version, closure unknown (doubt)')
                 main = pommodel.scan_sources(m, artifact_ids, where='main')
                 reasons |= set(main)
                 if not main:
@@ -227,11 +244,13 @@ class Analysis:
         for ga, m in sorted(self.mods.items()):
             if ga in affected:
                 continue
-            for r in m.all_refs():
+            for r in m.all_refs() + getattr(m, 'source_refs', []):
                 if r.kind not in CLOSURE_KINDS or r.ga in m.nested_local or not self.suspect(r.ga):
                     continue
                 version = r.version
-                if r.kind == TEXT:
+                if r.kind == SOURCE and not self.text_version(m, r):
+                    continue                  # already a doubt: the module is affected
+                if r.kind in (TEXT, SOURCE):
                     version = self.text_version(m, r)
                 elif not version and r.kind == 'plugin configuration':
                     version = m.dm_versions.get(r.ga) or None
@@ -332,6 +351,9 @@ def main():
     ap.add_argument('--graph')
     ap.add_argument('--producer-slug', default='')
     ap.add_argument('--closures', action='store_true')
+    ap.add_argument('--upstream-groups', default='', help='comma-separated groupIds of the impacted '
+                    'intermediate upstreams (io.vidocq.<repository>): coordinates written in sources are '
+                    'suspects only for them and the producer')
     ap.add_argument('--local-repo', help='the local Maven repository, to follow the external parent '
                     'and BOM import chains; without it an external io.vidocq chain is a doubt')
     args = ap.parse_args()

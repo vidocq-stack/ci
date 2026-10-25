@@ -186,8 +186,17 @@ else
   echo "Local repository unknown: external io.vidocq parent and BOM chains count as doubts"
 fi
 
+# The groupIds of the impacted intermediate upstreams (io.vidocq.<repository>, by convention):
+# coordinates written in sources are suspects for them and for the producer only.
+upstream_groups=""
+for up in ${UPSTREAMS:-}; do
+  short="${up##*/}"
+  upstream_groups="${upstream_groups:+$upstream_groups,}io.vidocq.$(printf '%s' "$short" | tr '[:upper:]' '[:lower:]')"
+done
+
 analyse() {
   python3 "$HERE/affected-modules.py" --effective-pom "$DIR/effective-pom.xml" --repo "$REPO" \
+    --upstream-groups "$upstream_groups" \
     --producer-artifacts "$PRODUCER_ARTIFACTS" --synthetic "$DIR/synthetic" \
     --report "$DIR/report.json" ${graph_args[@]+"${graph_args[@]}"} ${chain_args[@]+"${chain_args[@]}"} "$@"
 }

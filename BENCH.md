@@ -29,6 +29,9 @@ raw results, delta against the previous run.
 - **Through an intermediate.** `vidocq-runtime-cervantes-jwt-extension` is affected only through intermediates:
   "io.vidocq.champollion:champollion-api via dependency io.vidocq.cervantes:cervantes-cdi-vauban". The match is by
   groupId:artifactId; the intermediate's pom declares the SNAPSHOT version.
+- **Re-run after the review fix 62-I1** (`io.vidocq` coordinates written in sources are suspects too): 159 s job,
+  2:19 min install, 272 tests, 21 / 77 modules, 48 externals. No source-text doubt was raised, and the gain holds
+  (−75 %).
 - **Before this change**, the job fell back to full ("the consumer has impacted intermediate upstreams").
 
 ---
