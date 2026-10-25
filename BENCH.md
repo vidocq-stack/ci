@@ -39,8 +39,8 @@ raw results, delta against the previous run.
 
 - **Reference**: vauban#222, run 49864, 16 downstream jobs rebuilding the producer took 28–91 s each, 1 098 s in
   total (18.3 runner-min). With the shared artifacts, about 7–16 s each.
-- **The `impacted` job** took 13 s in run 50025. Making `producer` wait for it (to publish only when consumers
-  exist) delays the producer by at most that much.
+- **The `impacted` job** took 13 s in run 50025. The producer does not wait for it: the artifact is published
+  whenever the producer build runs, and deleted by the verdict job.
 
 ---
 
