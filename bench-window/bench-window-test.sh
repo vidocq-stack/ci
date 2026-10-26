@@ -53,7 +53,7 @@ class Stub(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b'{"StatusCode": 0}')
         if "/images/create" in self.path:
             return self.reply(200, b'{"status": "done"}')
-        if "/CodefloeRunnerMontreuil02/start" in self.path:
+        if "/CodefloeRunnerMontreuil02/restart" in self.path:
             return self.reply(304)
         self.reply(204)
     def do_DELETE(self):
@@ -98,7 +98,7 @@ out=$(window close)
 check "close restores the recorded CPU settings" \
   "CPU settings restored: governor schedutil, no_turbo 0" "$(echo "$out" | grep restored)"
 check "close starts each Docker-in-Docker container, then its runner (a 304 is fine)" \
-  "POST CodefloeRunnerMontreuil01-dind/start|POST CodefloeRunnerMontreuil01/start|POST CodefloeRunnerMontreuil02-dind/start|POST CodefloeRunnerMontreuil02/start" \
+  "POST CodefloeRunnerMontreuil01-dind/restart?t=0|POST CodefloeRunnerMontreuil01/restart?t=0|POST CodefloeRunnerMontreuil02-dind/restart?t=0|POST CodefloeRunnerMontreuil02/restart?t=0" \
   "$(calls | paste -sd'|' -)"
 
 rm -f "$TMP/bench-window.json"
@@ -120,7 +120,7 @@ bench_calls() { grep -E "^(POST|DELETE) " "$TMP/calls.log" | grep -E "Bench01|co
 rm -f "$TMP/bench-window.json"
 BENCH_RUNNER=Bench01 window open > /dev/null
 check "open starts the bench runner once the CPU is set" \
-  "POST create|POST create|POST Bench01/start" "$(bench_calls | paste -sd'|' -)"
+  "POST create|POST create|POST Bench01/restart?t=0" "$(bench_calls | paste -sd'|' -)"
 BENCH_RUNNER=Bench01 window close > /dev/null
 check "close stops the bench runner, with its grace, before the CPU is restored" \
   "POST Bench01/stop?t=3600|POST create" "$(bench_calls | paste -sd'|' -)"

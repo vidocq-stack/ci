@@ -52,9 +52,12 @@ class Portainer:
         if self.dry_run and method != "GET":
             print("dry-run: %s %s%s" % (method, path, "" if body is None else " " + json.dumps(body)))
             return None
-        data = None if body is None else json.dumps(body).encode()
-        request = urllib.request.Request(self.url + path, data=data, method=method, headers={
-            "X-API-Key": self.token, "Content-Type": "application/json", "User-Agent": "vidocq-bench-window"})
+        headers = {"X-API-Key": self.token, "User-Agent": "vidocq-bench-window"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read()
@@ -83,7 +86,12 @@ class Portainer:
 
     def start(self, container):
         print("starting %s" % container, flush=True)
-        self.call("POST", "%s/containers/%s/start" % (self.docker, container))
+        self.start_quietly(container)
+
+    def start_quietly(self, container):
+        # Portainer's proxy hands Docker a request body on /start, which Docker refuses (API >= 1.24);
+        # /restart has no such check and starts a stopped or created container.
+        self.call("POST", "%s/containers/%s/restart?t=0" % (self.docker, container))
 
     def run_privileged(self, script):
         """Runs `script` in a throwaway privileged container and returns its output."""
@@ -96,7 +104,7 @@ class Portainer:
             return ""
         container = created["Id"]
         try:
-            self.call("POST", "%s/containers/%s/start" % (self.docker, container))
+            self.start_quietly(container)
             status = self.call("POST", "%s/containers/%s/wait" % (self.docker, container), timeout=120)
             output = self.call("GET", "%s/containers/%s/logs?stdout=1&stderr=1" % (self.docker, container),
                                raw=True)
