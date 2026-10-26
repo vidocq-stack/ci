@@ -882,6 +882,67 @@ PY
 
 # ---------------------------------------------------------------- 7. set_version_and_commit
 
+# versions:set can leave a nested aggregator's <parent> on the old version (vidocq: the
+# 0.4.0-RC1 log shows "Updating parent vidocq-runtime-build from 0.4.0-RC1 to
+# 0.4.0-SNAPSHOT" 17 times, then "Non-resolvable parent POM ...-extensions:0.4.0-RC1").
+# Whatever the cause, every <parent> that points at another module of this reactor must
+# carry RELEASE_VERSION: set it, and say which poms needed it.
+lock_internal_parents() {
+  RELEASE_VERSION="$RELEASE_VERSION" python3 <<'PY' || die "could not align the internal <parent> versions"
+import os, re
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+release = os.environ['RELEASE_VERSION']
+poms, seen = [], set()
+def parse(pom):
+    text = pom.read_text(encoding='utf-8')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return None, None, text
+    try: return ET.fromstring(text), m.group(1), text
+    except ET.ParseError: return None, None, text
+def visit(pom):
+    pp = pom.resolve()
+    if pp in seen or not pom.exists(): return
+    seen.add(pp)
+    root, ns, _ = parse(pom)
+    if root is None: return
+    poms.append(pom)
+    mods = root.find(f'{{{ns}}}modules')
+    if mods is not None:
+        for m in mods.findall(f'{{{ns}}}module'):
+            if (m.text or '').strip(): visit(pom.parent / m.text.strip() / 'pom.xml')
+visit(Path('pom.xml'))
+
+internal = set()
+for pom in poms:
+    root, ns, _ = parse(pom)
+    par = root.find(f'{{{ns}}}parent')
+    g = (root.findtext(f'{{{ns}}}groupId') or (par.findtext(f'{{{ns}}}groupId') if par is not None else '') or '').strip()
+    a = (root.findtext(f'{{{ns}}}artifactId') or '').strip()
+    internal.add((g, a))
+
+fixed = 0
+for pom in poms:
+    root, ns, text = parse(pom)
+    par = root.find(f'{{{ns}}}parent')
+    if par is None: continue
+    pg = (par.findtext(f'{{{ns}}}groupId') or '').strip()
+    pa = (par.findtext(f'{{{ns}}}artifactId') or '').strip()
+    pv = (par.findtext(f'{{{ns}}}version') or '').strip()
+    if (pg, pa) not in internal or pv == release: continue
+    new = re.sub(r'<parent>.*?</parent>',
+                 lambda b: re.sub(r'(<version>)[^<]*(</version>)', lambda x: x.group(1) + release + x.group(2), b.group(0), count=1),
+                 text, count=1, flags=re.S)
+    if new != text:
+        pom.write_text(new, encoding='utf-8')
+        print(f"  parent of {pom} realigned: {pv} -> {release}")
+        fixed += 1
+print(f"  internal <parent> versions aligned on {release} ({fixed} fixed)")
+PY
+}
+
+
 # Flip every reactor module to RELEASE_VERSION and commit on the release branch.
 # -DprocessAllModules=true is critical under Model 4.1: submodules whose
 # <parent> declares an implicit version (no <version> tag) are skipped by
@@ -892,6 +953,7 @@ step_set_version_and_commit() {
       -DnewVersion="${RELEASE_VERSION}" \
       -DprocessAllModules=true \
       -DgenerateBackupPoms=false
+  lock_internal_parents
 
   if [[ -z "$(git status --porcelain)" ]]; then
     info "no POM changes — versions:set was a no-op"
