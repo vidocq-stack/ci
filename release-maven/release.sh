@@ -689,6 +689,44 @@ PY
       rm -f "$up_log"
     fi
 
+    # 1b) <parent> of every OTHER reactor module that points straight at the
+    #     overridden coordinate (vidocq-runtime-bom -> io.vidocq:vidocq-parent):
+    #     versions:update-parent above only touches the root pom.
+    python3 - "$g" "$a" "$v" <<'PY'
+import sys, re
+import xml.etree.ElementTree as ET
+from pathlib import Path
+g, a, v = sys.argv[1], sys.argv[2], sys.argv[3]
+seen = set()
+def visit(pom):
+    pp = pom.resolve()
+    if pp in seen or not pom.exists(): return
+    seen.add(pp)
+    text = pom.read_text(encoding='utf-8')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return
+    ns = m.group(1)
+    try: root = ET.fromstring(text)
+    except ET.ParseError: return
+    par = root.find(f'{{{ns}}}parent')
+    if par is not None and pom.name == 'pom.xml' and pom.parent != Path('.'):
+        pg = (par.findtext(f'{{{ns}}}groupId') or '').strip()
+        pa = (par.findtext(f'{{{ns}}}artifactId') or '').strip()
+        pv = (par.findtext(f'{{{ns}}}version') or '').strip()
+        if pg == g and (not a or pa == a) and pv.endswith('-SNAPSHOT'):
+            def fix(block):
+                return re.sub(r'(<version>)\s*[^<]*-SNAPSHOT\s*(</version>)', lambda x: x.group(1) + v + x.group(2), block.group(0), count=1)
+            new = re.sub(r'<parent>.*?</parent>', fix, text, count=1, flags=re.S)
+            if new != text:
+                pom.write_text(new, encoding='utf-8')
+                print(f"      patched <parent> of {pom}: {pv} -> {v}")
+    mods = root.find(f'{{{ns}}}modules')
+    if mods is not None:
+        for mm in mods.findall(f'{{{ns}}}module'):
+            if (mm.text or '').strip(): visit(pom.parent / mm.text.strip() / 'pom.xml')
+visit(Path('pom.xml'))
+PY
+
     # 2) Properties referenced by <dependency groupId=$g> blocks.
     local prop
     while IFS= read -r prop; do
