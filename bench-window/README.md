@@ -27,6 +27,7 @@ the Portainer API.
 | `BENCH_RUNNERS` | `CodefloeRunnerMontreuil01,CodefloeRunnerMontreuil02` | CI runners to stop; each has a `<name>-dind` companion |
 | `BENCH_RUNNER` | none | The bench runner (`BenchMontreuil01`, label `vidocq-bench`), running only inside the window |
 | `BENCH_GRACE` | `3600` | Seconds a runner gets to finish its jobs once asked to stop |
+| `BENCH_POLL` | `5` | Seconds between two looks at a container that is still draining (see below) |
 | `BENCH_STATE` | `bench-window.json` | Where `open` keeps the settings it found, for `close`; without it, `close` puts back governor `powersave` and turbo on, the usual state of macuntu |
 
 The token can create privileged containers: it is root on the host. It only goes to workflows of `main`;
@@ -68,3 +69,11 @@ jobs:
 
 The open and close jobs do not share a file system, so `close` puts back the usual state of macuntu
 (governor `powersave`, turbo on); `open` still prints the settings it found, in its log.
+
+## A runner with running jobs
+
+Stopping a runner that still has jobs takes as long as its longest job, up to `BENCH_GRACE`. The proxy in
+front of Portainer gives up after about a minute and answers HTTP 504 or 502, while the Docker daemon goes on
+stopping the container. The script treats that answer as "draining" and looks at the container state every
+`BENCH_POLL` seconds until it has exited (at most `BENCH_GRACE` plus two minutes), then goes on with the next
+container. Found on 2026-10-26, opening a window while three jobs were running.

@@ -33,11 +33,14 @@ The CPU settings are written from a short-lived privileged container (alpine), a
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 CPU_IMAGE = ("alpine", "3.20")
 DEFAULT_RUNNERS = "CodefloeRunnerMontreuil01,CodefloeRunnerMontreuil02"
+PENDING = object()  # a gateway gave up waiting for a long call that the Docker daemon goes on with
+POLL_SECONDS = float(os.environ.get("BENCH_POLL", "5"))
 CPU_FILES = ("G=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; "
              "T=/sys/devices/system/cpu/intel_pstate/no_turbo; ")
 READ_CPU = CPU_FILES + 'echo "governor=$(cat $G)"; echo "no_turbo=$(cat $T 2>/dev/null || echo none)"'
@@ -48,7 +51,7 @@ class Portainer:
         self.url, self.token, self.dry_run = url.rstrip("/"), token, dry_run
         self.docker = None
 
-    def call(self, method, path, body=None, timeout=60, raw=False):
+    def call(self, method, path, body=None, timeout=60, raw=False, pending=()):
         if self.dry_run and method != "GET":
             print("dry-run: %s %s%s" % (method, path, "" if body is None else " " + json.dumps(body)))
             return None
@@ -64,6 +67,8 @@ class Portainer:
         except urllib.error.HTTPError as error:
             if error.code == 304:  # Docker: the container already is in the requested state
                 return None
+            if error.code in pending:
+                return PENDING
             raise SystemExit("%s %s: HTTP %d %s" % (method, path, error.code, error.read()[:300]))
         if raw:
             return payload.decode("utf-8", "replace")
@@ -82,7 +87,19 @@ class Portainer:
 
     def stop(self, container, grace):
         print("stopping %s (up to %ds)" % (container, grace), flush=True)
-        self.call("POST", "%s/containers/%s/stop?t=%d" % (self.docker, container, grace), timeout=grace + 120)
+        # A runner with jobs takes up to `grace` seconds to stop, longer than the proxy in front of Portainer
+        # waits (HTTP 504). The Docker daemon goes on: the container is then waited for.
+        if self.call("POST", "%s/containers/%s/stop?t=%d" % (self.docker, container, grace), timeout=grace + 120,
+                     pending=(502, 504)) is PENDING:
+            self.wait_stopped(container, grace + 120)
+
+    def wait_stopped(self, container, limit):
+        print("%s is draining (the gateway gave up waiting): waiting for it to stop" % container, flush=True)
+        deadline = time.monotonic() + limit
+        while self.state(container) == "running":
+            if time.monotonic() > deadline:
+                raise SystemExit("%s still running after %d s" % (container, limit))
+            time.sleep(POLL_SECONDS)
 
     def start(self, container):
         print("starting %s" % container, flush=True)

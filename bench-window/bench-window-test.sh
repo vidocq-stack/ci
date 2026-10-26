@@ -25,6 +25,7 @@ import http.server, json, re, sys
 log = open(sys.argv[1], "a")
 class Stub(http.server.BaseHTTPRequestHandler):
     last_cmd = ""
+    slow_polls = 0
     def reply(self, code, body=b""):
         self.send_response(code); self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
@@ -33,6 +34,10 @@ class Stub(http.server.BaseHTTPRequestHandler):
         if self.path == "/api/endpoints":
             return self.reply(200, b'[{"Id": 3}]')
         if self.path.endswith("/json"):
+            if "/SlowRunner/" in self.path:
+                Stub.slow_polls += 1
+                status = "running" if Stub.slow_polls <= 3 else "exited"
+                return self.reply(200, ('{"State": {"Status": "%s"}}' % status).encode())
             return self.reply(200, b'{"State": {"Status": "running"}}')
         if "/logs" in self.path:
             cmd = Stub.last_cmd
@@ -55,6 +60,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b'{"status": "done"}')
         if "/CodefloeRunnerMontreuil02/restart" in self.path:
             return self.reply(304)
+        if "/SlowRunner/stop" in self.path:
+            return self.reply(504, b"<html>Gateway Time-out</html>")
         self.reply(204)
     def do_DELETE(self):
         log.write("DELETE %s\n" % self.path); log.flush()
@@ -124,6 +131,14 @@ check "open starts the bench runner once the CPU is set" \
 BENCH_RUNNER=Bench01 window close > /dev/null
 check "close stops the bench runner, with its grace, before the CPU is restored" \
   "POST Bench01/stop?t=3600|POST create" "$(bench_calls | paste -sd'|' -)"
+
+rm -f "$TMP/bench-window.json"
+out=$(BENCH_RUNNERS=SlowRunner BENCH_POLL=0.05 window open)
+check "a stop that times out at the gateway waits for the container to exit" \
+  "yes" "$(echo "$out" | grep -q 'SlowRunner is draining' && echo yes || echo no)"
+check "after a slow stop, the window goes on with the Docker-in-Docker container" \
+  "POST SlowRunner/stop?t=3600|POST SlowRunner-dind/stop?t=60" \
+  "$(grep -E '^POST .*containers/SlowRunner' "$TMP/calls.log" | sed -E 's#/api/endpoints/3/docker/containers/##' | paste -sd'|' -)"
 
 echo
 if [ "$failures" -eq 0 ]; then echo "all tests passed"; else echo "$failures test(s) failed"; exit 1; fi
