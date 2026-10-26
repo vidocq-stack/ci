@@ -158,7 +158,11 @@ _install_modules_in_declaration_order() {
 # tolerated) into a comma-separated "!a,!b,!c" string suitable for `mvn -pl`.
 # Empty input → empty output (caller must omit -pl entirely in that case).
 _build_excluded_pl_args() {
-  local result="" mod
+  local result="" mod listed
+  # release.yml lists the modules that were flagged when it was generated; a module
+  # added since (maven.deploy.skip=true in its own properties) would be bundled
+  # unsigned and fail Central validation. Add every flagged reactor module here too.
+  listed="${EXCLUDED_MODULES:-}"$'\n'"$(_deploy_skip_modules)"
   while IFS= read -r mod; do
     mod="${mod#"${mod%%[![:space:]]*}"}"
     mod="${mod%"${mod##*[![:space:]]}"}"
@@ -169,6 +173,7 @@ _build_excluded_pl_args() {
       echo "::warning::excluded module '${mod}' is not in the reactor any more: ignored" >&2
       continue
     fi
+    [[ ",${result}," == *",!:${mod},"* ]] && continue
     # ':artifactId' selector form: a bare name is resolved as a RELATIVE PATH
     # first, so nested modules (cassini-examples/cassini-examples-chappe)
     # break `mvn -pl` with "Could not find the selected project in the
@@ -178,8 +183,43 @@ _build_excluded_pl_args() {
     else
       result="${result},!:${mod}"
     fi
-  done <<< "${EXCLUDED_MODULES:-}"
+  done <<< "$listed"
   printf '%s' "$result"
+}
+
+# artifactId of every reactor module declaring <maven.deploy.skip>true</maven.deploy.skip>
+# in its own <properties>, walking <modules> from the root pom (same rule as
+# bootstrap-workflows.sh `collect_excluded`).
+_deploy_skip_modules() {
+  python3 - <<'PY'
+import re, xml.etree.ElementTree as ET
+from pathlib import Path
+
+def parse(pom):
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return None, None
+    try: return ET.parse(pom).getroot(), m.group(1)
+    except ET.ParseError: return None, None
+
+seen = set()
+def walk(pom):
+    p = pom.resolve()
+    if p in seen or not pom.exists(): return
+    seen.add(p)
+    root, ns = parse(pom)
+    if root is None: return
+    props = root.find(f'{{{ns}}}properties')
+    if props is not None and (props.findtext(f'{{{ns}}}maven.deploy.skip') or '').strip().lower() == 'true':
+        aid = root.findtext(f'{{{ns}}}artifactId')
+        if aid: print(aid)
+    mods = root.find(f'{{{ns}}}modules')
+    if mods is not None:
+        for m in mods.findall(f'{{{ns}}}module'):
+            if (m.text or '').strip(): walk(pom.parent / m.text.strip() / 'pom.xml')
+
+walk(Path('pom.xml'))
+PY
 }
 
 # ---------------------------------------------------------------- 1. pre-checks
