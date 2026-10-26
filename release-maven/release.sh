@@ -190,7 +190,7 @@ _build_excluded_pl_args() {
 # artifactId of every reactor module whose effective maven.deploy.skip is true: its own
 # <properties> value, else the one of its <parent> when that is a module of the reactor
 # (the integration-test modules take it from vidocq-runtime-integration-tests). Walks
-# <modules> from the root pom, profiles included.
+# <modules> from the root pom (modules of inactive profiles are not in the reactor).
 _deploy_skip_modules() {
   python3 - <<'PY'
 import re
@@ -221,7 +221,10 @@ def walk(pom):
     a = t(root, 'artifactId')
     info[(g, a)] = (own, (t(par, 'groupId'), t(par, 'artifactId')) if par is not None else None)
     order.append((g, a))
-    for mods in root.iter(f'{{{ns}}}modules'):
+    # direct <modules> only: a module declared inside an inactive <profile> is not in the
+    # reactor, and `mvn -pl !:x` fails on a project it cannot select
+    mods = root.find(f'{{{ns}}}modules')
+    if mods is not None:
         for m in mods.findall(f'{{{ns}}}module'):
             if (m.text or '').strip(): walk(pom.parent / m.text.strip() / 'pom.xml')
 walk(Path('pom.xml'))
