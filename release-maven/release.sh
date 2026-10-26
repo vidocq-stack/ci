@@ -187,38 +187,53 @@ _build_excluded_pl_args() {
   printf '%s' "$result"
 }
 
-# artifactId of every reactor module declaring <maven.deploy.skip>true</maven.deploy.skip>
-# in its own <properties>, walking <modules> from the root pom (same rule as
-# bootstrap-workflows.sh `collect_excluded`).
+# artifactId of every reactor module whose effective maven.deploy.skip is true: its own
+# <properties> value, else the one of its <parent> when that is a module of the reactor
+# (the integration-test modules take it from vidocq-runtime-integration-tests). Walks
+# <modules> from the root pom, profiles included.
 _deploy_skip_modules() {
   python3 - <<'PY'
-import re, xml.etree.ElementTree as ET
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
     if not m: return None, None
-    try: return ET.parse(pom).getroot(), m.group(1)
+    try: return ET.fromstring(text), m.group(1)
     except ET.ParseError: return None, None
 
-seen = set()
+info, seen, order = {}, set(), []
 def walk(pom):
-    p = pom.resolve()
-    if p in seen or not pom.exists(): return
-    seen.add(p)
+    pp = pom.resolve()
+    if pp in seen or not pom.exists(): return
+    seen.add(pp)
     root, ns = parse(pom)
     if root is None: return
+    t = lambda el, tag: (el.findtext(f'{{{ns}}}{tag}') or '').strip()
+    par = root.find(f'{{{ns}}}parent')
     props = root.find(f'{{{ns}}}properties')
-    if props is not None and (props.findtext(f'{{{ns}}}maven.deploy.skip') or '').strip().lower() == 'true':
-        aid = root.findtext(f'{{{ns}}}artifactId')
-        if aid: print(aid)
-    mods = root.find(f'{{{ns}}}modules')
-    if mods is not None:
+    own = None
+    if props is not None and props.find(f'{{{ns}}}maven.deploy.skip') is not None:
+        own = (props.findtext(f'{{{ns}}}maven.deploy.skip') or '').strip().lower() == 'true'
+    g = t(root, 'groupId') or (t(par, 'groupId') if par is not None else '')
+    a = t(root, 'artifactId')
+    info[(g, a)] = (own, (t(par, 'groupId'), t(par, 'artifactId')) if par is not None else None)
+    order.append((g, a))
+    for mods in root.iter(f'{{{ns}}}modules'):
         for m in mods.findall(f'{{{ns}}}module'):
             if (m.text or '').strip(): walk(pom.parent / m.text.strip() / 'pom.xml')
-
 walk(Path('pom.xml'))
+
+def effective(key, depth=0):
+    own, par = info[key]
+    if own is not None: return own
+    if par in info and depth < 20: return effective(par, depth + 1)
+    return False
+
+for key in order:
+    if effective(key): print(key[1])
 PY
 }
 
