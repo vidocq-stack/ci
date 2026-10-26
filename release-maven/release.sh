@@ -1009,10 +1009,14 @@ step_set_version_and_commit() {
 # fall back to a module-by-module install in <modules> declaration order.
 step_validate_build() {
   info "Validating build with -P${RELEASE_PROFILE} (reactor first, pre-warms ~/.m2 for deploy)"
-  local log
+  local log pl_args pl_flag=""
   log=$(mktemp)
+  # Same selection as the deploy: a module kept out of the release (its dependencies need
+  # not even be on Central, e.g. an external SNAPSHOT) is not built here either.
+  pl_args=$(_build_excluded_pl_args)
+  [[ -n "$pl_args" ]] && pl_flag="-pl ${pl_args}"
   set +e
-  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" clean install \
+  mvn -B -ntp ${MVN_NET_FLAGS} -P"${RELEASE_PROFILE}" clean install ${pl_flag} \
       -DskipTests \
       -Dgpg.passphrase="${GPG_PASSPHRASE}" \
       -Dgpg.keyname="${GPG_KEY_ID}" 2>&1 | tee "$log"
