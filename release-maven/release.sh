@@ -163,6 +163,12 @@ _build_excluded_pl_args() {
     mod="${mod#"${mod%%[![:space:]]*}"}"
     mod="${mod%"${mod##*[![:space:]]}"}"
     [[ -z "$mod" || "$mod" == \#* ]] && continue
+    # A module that left the reactor since release.yml was generated would make
+    # `mvn -pl` fail with "Could not find the selected project". Skip it, loudly.
+    if ! grep -rqF --include=pom.xml "<artifactId>${mod}</artifactId>" . 2>/dev/null; then
+      echo "::warning::excluded module '${mod}' is not in the reactor any more: ignored" >&2
+      continue
+    fi
     # ':artifactId' selector form: a bare name is resolved as a RELATIVE PATH
     # first, so nested modules (cassini-examples/cassini-examples-chappe)
     # break `mvn -pl` with "Could not find the selected project in the
