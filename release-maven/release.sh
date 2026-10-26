@@ -882,13 +882,15 @@ PY
 
 # ---------------------------------------------------------------- 7. set_version_and_commit
 
-# versions:set can leave a nested aggregator's <parent> on the old version (vidocq: the
-# 0.4.0-RC1 log shows "Updating parent vidocq-runtime-build from 0.4.0-RC1 to
-# 0.4.0-SNAPSHOT" 17 times, then "Non-resolvable parent POM ...-extensions:0.4.0-RC1").
-# Whatever the cause, every <parent> that points at another module of this reactor must
-# carry RELEASE_VERSION: set it, and say which poms needed it.
+# versions:set does not always hold: on vidocq's CI runs the log shows nested aggregators
+# going "from 0.4.0-SNAPSHOT to 0.4.0-RC1" and straight back, and the root pom kept its
+# own SNAPSHOT version while its children moved ("Non-resolvable parent POM ...-build:pom:
+# 0.4.0-RC1 (absent)"). Reproduced on no other machine. So the result is checked and
+# completed here: in every reactor pom, the project's own literal <version>, the <version>
+# of a <parent> naming a module of this reactor, and the literal <version> of a dependency
+# naming one (or a plugin naming one), are all RELEASE_VERSION. Properties and external coordinates are not touched.
 lock_internal_parents() {
-  RELEASE_VERSION="$RELEASE_VERSION" python3 <<'PY' || die "could not align the internal <parent> versions"
+  RELEASE_VERSION="$RELEASE_VERSION" python3 <<'PY' || die "could not align the internal versions"
 import os, re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -908,37 +910,56 @@ def visit(pom):
     root, ns, _ = parse(pom)
     if root is None: return
     poms.append(pom)
-    mods = root.find(f'{{{ns}}}modules')
-    if mods is not None:
+    for mods in root.iter(f'{{{ns}}}modules'):   # also the ones declared inside a <profile>
         for m in mods.findall(f'{{{ns}}}module'):
             if (m.text or '').strip(): visit(pom.parent / m.text.strip() / 'pom.xml')
 visit(Path('pom.xml'))
 
+def text_of(el, ns, tag): return (el.findtext(f'{{{ns}}}{tag}') or '').strip()
 internal = set()
 for pom in poms:
     root, ns, _ = parse(pom)
     par = root.find(f'{{{ns}}}parent')
-    g = (root.findtext(f'{{{ns}}}groupId') or (par.findtext(f'{{{ns}}}groupId') if par is not None else '') or '').strip()
-    a = (root.findtext(f'{{{ns}}}artifactId') or '').strip()
-    internal.add((g, a))
+    g = text_of(root, ns, 'groupId') or (text_of(par, ns, 'groupId') if par is not None else '')
+    internal.add((g, text_of(root, ns, 'artifactId')))
 
+SET = lambda v: (lambda x: x.group(1) + v + x.group(2))
+VER = re.compile(r'(<version>)[^<]*(</version>)')
 fixed = 0
 for pom in poms:
     root, ns, text = parse(pom)
+    new = text
+    changes = []
+    # 1) the project's own literal version: first <version> after the parent block
+    own = root.find(f'{{{ns}}}version')
+    if own is not None and (own.text or '').strip() != release and not (own.text or '').strip().startswith('${'):
+        cut = new.find('</parent>')
+        cut = cut + len('</parent>') if cut >= 0 else new.find('<artifactId>')
+        m = VER.search(new, cut)
+        if m:
+            new = new[:m.start()] + m.group(1) + release + m.group(2) + new[m.end():]
+            changes.append(f"own {(own.text or '').strip()}")
+    # 2) the parent, when it is a module of this reactor
     par = root.find(f'{{{ns}}}parent')
-    if par is None: continue
-    pg = (par.findtext(f'{{{ns}}}groupId') or '').strip()
-    pa = (par.findtext(f'{{{ns}}}artifactId') or '').strip()
-    pv = (par.findtext(f'{{{ns}}}version') or '').strip()
-    if (pg, pa) not in internal or pv == release: continue
-    new = re.sub(r'<parent>.*?</parent>',
-                 lambda b: re.sub(r'(<version>)[^<]*(</version>)', lambda x: x.group(1) + release + x.group(2), b.group(0), count=1),
-                 text, count=1, flags=re.S)
+    if par is not None and (text_of(par, ns, 'groupId'), text_of(par, ns, 'artifactId')) in internal \
+            and text_of(par, ns, 'version') != release:
+        new = re.sub(r'<parent>.*?</parent>', lambda b: VER.sub(SET(release), b.group(0), count=1), new, count=1, flags=re.S)
+        changes.append(f"parent {text_of(par, ns, 'version')}")
+    # 3) literal versions of dependencies naming a module of this reactor
+    for tag, dep in [(t, d) for t in ('dependency', 'plugin') for d in root.iter(f'{{{ns}}}{t}')]:
+        key = (text_of(dep, ns, 'groupId'), text_of(dep, ns, 'artifactId'))
+        v = text_of(dep, ns, 'version')
+        if key in internal and v and not v.startswith('${') and v != release:
+            blk = re.compile(r'<' + tag + r'>(?:(?!</' + tag + r'>).)*?<artifactId>' + re.escape(key[1]) + r'</artifactId>.*?</' + tag + r'>', re.S)
+            new2 = blk.sub(lambda b: VER.sub(SET(release), b.group(0), count=1) if '<version>' in b.group(0) else b.group(0), new)
+            if new2 != new:
+                new = new2
+                changes.append(f"{tag} {key[1]} {v}")
     if new != text:
         pom.write_text(new, encoding='utf-8')
-        print(f"  parent of {pom} realigned: {pv} -> {release}")
+        print(f"  {pom}: {', '.join(changes)} -> {release}")
         fixed += 1
-print(f"  internal <parent> versions aligned on {release} ({fixed} fixed)")
+print(f"  internal versions aligned on {release} ({fixed} pom(s) completed)")
 PY
 }
 
