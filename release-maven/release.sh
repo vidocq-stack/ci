@@ -1158,6 +1158,78 @@ step_wait_central() {
   ok "all artifacts propagated to Maven Central"
 }
 
+# A release.yml is generated at one point in time: it can miss an io.vidocq family the
+# project began to depend on since (humboldt -> cyrano). When the whole ecosystem is
+# released on one line, such a dependency still points at this line's SNAPSHOT
+# (NEXT_DEV_VERSION): lock it to RELEASE_VERSION, the version its own release publishes.
+# Anything else (another line, a family already overridden) is left to the fail-fast scan.
+step_auto_lock_same_line() {
+  local extra
+  extra=$(OVERRIDES="${OVERRIDES:-}" NEXT_DEV_VERSION="$NEXT_DEV_VERSION" RELEASE_VERSION="$RELEASE_VERSION" python3 <<'PY'
+import os, re, xml.etree.ElementTree as ET
+from pathlib import Path
+
+PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
+line, release = os.environ['NEXT_DEV_VERSION'], os.environ['RELEASE_VERSION']
+covered = set()
+for l in os.environ.get('OVERRIDES', '').splitlines():
+    l = l.strip()
+    if l and not l.startswith('#') and '=' in l:
+        covered.add(l.split('=', 1)[0].strip())
+
+def parse(pom):
+    text = pom.read_text(encoding='utf-8', errors='replace')
+    m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
+    if not m: return None, None
+    try: return ET.parse(pom).getroot(), m.group(1)
+    except ET.ParseError: return None, None
+
+seen, poms = set(), []
+def visit(pom):
+    p = pom.resolve()
+    if p in seen or not pom.exists(): return
+    seen.add(p)
+    root, ns = parse(pom)
+    if root is None: return
+    poms.append(pom)
+    mods = root.find(f'{{{ns}}}modules')
+    if mods is not None:
+        for m in mods.findall(f'{{{ns}}}module'):
+            if (m.text or '').strip(): visit(pom.parent / m.text.strip() / 'pom.xml')
+visit(Path('pom.xml'))
+
+own, gprops = set(), {}
+for pom in poms:
+    root, ns = parse(pom)
+    own.add(root.findtext(f'{{{ns}}}artifactId') or '')
+    pe = root.find(f'{{{ns}}}properties')
+    if pe is not None:
+        for c in pe: gprops.setdefault(c.tag.split('}', 1)[-1], (c.text or '').strip())
+
+found = set()
+for pom in poms:
+    root, ns = parse(pom)
+    props = dict(gprops)
+    pe = root.find(f'{{{ns}}}properties')
+    if pe is not None:
+        for c in pe: props[c.tag.split('}', 1)[-1]] = (c.text or '').strip()
+    for tag in (f'{{{ns}}}parent', f'{{{ns}}}dependency'):
+        for e in root.iter(tag):
+            g, a, v = (e.findtext(f'{{{ns}}}{k}') or '' for k in ('groupId', 'artifactId', 'version'))
+            if not g.startswith('io.vidocq') or a in own or g in covered or f'{g}:{a}' in covered: continue
+            m = PROP_RE.match(v)
+            if (props.get(m.group(1), '') if m else v) == line:
+                found.add(f'{g}:{a}')
+for c in sorted(found): print(f'{c}={release}')
+PY
+  ) || die "could not scan for same-line io.vidocq SNAPSHOTs"
+  if [[ -n "$extra" ]]; then
+    info "Not in the overrides but on ${NEXT_DEV_VERSION}: locked to ${RELEASE_VERSION}"
+    while IFS= read -r l; do info "  • ${l}"; done <<< "$extra"
+    OVERRIDES="${OVERRIDES:-}"$'\n'"${extra}"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 
 main() {
@@ -1167,6 +1239,7 @@ main() {
   step_import_git_signing_key
   step_reroute_ssh
   step_branch_create
+  step_auto_lock_same_line
   step_apply_overrides
   step_failfast_scan
   step_set_version_and_commit
