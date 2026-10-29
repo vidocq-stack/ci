@@ -1,0 +1,35 @@
+name: main-watch
+
+# Every ten minutes, posts a loud "🚨 ALERT — MAIN IS RED 🚨" Slack message for each
+# Vidocq repository whose `main` head has a failed post-merge job: the SonarQube
+# analysis, build-and-deploy, or any other "(push)" check. A pull request only shows
+# the findings on the lines it changes, so a merge can leave main red without any
+# pull request having been red (the #227 train of vauban, 2026-10-28): this watcher
+# makes it seen at once. One alert per commit: the watcher then sets the status
+# `main-watch / alerted` on that commit. See main-watch/watch.mjs.
+#
+# Prerequisites: org secrets VIDOCQ_BOT_TOKEN (read the repositories, write the
+# marker status), SLACK_WEBHOOK_URL and SONAR_TOKEN; org variable SONAR_HOST_URL.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Print the alerts instead of posting them ('true' or 'false')"
+        default: 'false'
+
+jobs:
+  watch:
+    runs-on: vidocq-runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Alert on red main branches
+        env:
+          BOT_TOKEN: ${{ secrets.VIDOCQ_BOT_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry-run || 'false' }}
+        run: node main-watch/watch.mjs

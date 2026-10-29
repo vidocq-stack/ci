@@ -266,6 +266,18 @@ only `/merge` and this script refuse it, not the forge's merge button, so roll t
 producer at once. In a repository without
 a `pr-validate` check (`ci`, `GestionProjet`), pass `--context ''` to rely on the branch's required checks alone.
 
+### Red `main` alert — `.forgejo/workflows/main-watch.yml`
+
+Every ten minutes, `main-watch/watch.mjs` reads the head of `main` in every repository of the organisation. A
+post-merge job in failure (a context ending in `(push)`: the SonarQube analysis, `build-and-deploy`...) posts a
+loud **🚨 ALERT — MAIN IS RED 🚨** message to Slack: repository, commit and author, the failed jobs with their
+runs, and, for SonarQube, the quality-gate conditions that failed. A pull-request analysis only reports the
+findings on the lines it changes, so a merge can leave `main` red although no pull request was (a removed last
+caller makes a private method unused on a line nobody touched): the alert makes it seen at once. One alert per
+commit: the watcher then sets the status `main-watch / alerted` on it. It lives here only, nothing to wire in the
+repositories. A manual run with `dry-run: true` prints the alerts without posting them; locally:
+`BOT_TOKEN=... DRY_RUN=1 node main-watch/watch.mjs`, and `node --test main-watch/` for the tests.
+
 ## Secrets
 
 A composite action **does not inherit** `secrets.*`: they must be passed explicitly via
