@@ -86,7 +86,8 @@ runs:
     - name: Configure settings.xml (resolve SNAPSHOT deps from maven.vidocq.dev and central-snapshots)
       shell: bash
       # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream
-      # io.vidocq.* SNAPSHOTs: maven.vidocq.dev first, where main publishes them, then central-snapshots
+      # io.vidocq.* SNAPSHOTs: maven.vidocq.dev first, where main publishes them, maven.bak.vidocq.dev (a copy of it,
+      # synchronised every 10 minutes) when it is down, then central-snapshots
       # for the other projects' SNAPSHOTs. Both are publicly readable (no credentials).
       # deploy-maven later overwrites this file with the same repos + the deploy servers.
       run: |
@@ -106,6 +107,12 @@ runs:
                   <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
                 </repository>
                 <repository>
+                  <id>vidocq-snapshots-bak</id>
+                  <url>https://maven.bak.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+                </repository>
+                <repository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                   <releases><enabled>false</enabled></releases>
@@ -119,6 +126,12 @@ runs:
                 <pluginRepository>
                   <id>vidocq-snapshots</id>
                   <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+                </pluginRepository>
+                <pluginRepository>
+                  <id>vidocq-snapshots-bak</id>
+                  <url>https://maven.bak.vidocq.dev/snapshots</url>
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
                 </pluginRepository>

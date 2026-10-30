@@ -83,6 +83,12 @@ runs:
                   <snapshots><enabled>true</enabled></snapshots>
                 </repository>
                 <repository>
+                  <id>vidocq-snapshots-bak</id>
+                  <url>https://maven.bak.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </repository>
+                <repository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                   <releases><enabled>false</enabled></releases>
@@ -93,6 +99,12 @@ runs:
                 <pluginRepository>
                   <id>vidocq-snapshots</id>
                   <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </pluginRepository>
+                <pluginRepository>
+                  <id>vidocq-snapshots-bak</id>
+                  <url>https://maven.bak.vidocq.dev/snapshots</url>
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled></snapshots>
                 </pluginRepository>
