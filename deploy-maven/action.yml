@@ -1,5 +1,5 @@
 name: 'Deploy to Maven Central'
-description: 'Write settings.xml + import GPG key + deploy: SNAPSHOT via maven-deploy-plugin (central-snapshots), RELEASE via central-publishing. Maven must already be on the PATH.'
+description: 'Write settings.xml + import GPG key + deploy: SNAPSHOT via maven-deploy-plugin (maven.vidocq.dev when snapshot credentials are given, else central-snapshots), RELEASE via central-publishing. Maven must already be on the PATH.'
 
 inputs:
   central-username:
@@ -14,6 +14,15 @@ inputs:
   gpg-passphrase:
     description: 'GPG key passphrase'
     required: true
+  snapshot-repository-url:
+    description: 'Maven repository the SNAPSHOTs go to when snapshot-username and snapshot-password are set'
+    default: 'https://maven.vidocq.dev/snapshots'
+  snapshot-username:
+    description: 'User of snapshot-repository-url (a Reposilite token name); empty = SNAPSHOTs go to central-snapshots'
+    default: ''
+  snapshot-password:
+    description: 'Secret of snapshot-username'
+    default: ''
   snapshot-profile:
     description: 'Maven profile for SNAPSHOT deployments'
     default: 'snapshot'
@@ -34,14 +43,24 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Configure Maven credentials (Sonatype Central Portal)
+    - name: Configure Maven credentials (Sonatype Central Portal, maven.vidocq.dev)
       shell: bash
       env:
         CENTRAL_USERNAME: ${{ inputs.central-username }}
         CENTRAL_PASSWORD: ${{ inputs.central-password }}
+        SNAPSHOT_USERNAME: ${{ inputs.snapshot-username }}
+        SNAPSHOT_PASSWORD: ${{ inputs.snapshot-password }}
       run: |
         set -euo pipefail
         mkdir -p ~/.m2
+        # With maven.vidocq.dev credentials, central-snapshots is only read, anonymously: a Central token on
+        # that server authenticates every SNAPSHOT read, and a refused token then fails them all with 403
+        # (2026-10-30). Without them, the SNAPSHOTs still go to central-snapshots, which needs the token.
+        if [ -n "$SNAPSHOT_PASSWORD" ]; then
+          SNAPSHOT_SERVERS="<server><id>vidocq-snapshots</id><username>${SNAPSHOT_USERNAME}</username><password>${SNAPSHOT_PASSWORD}</password></server>"
+        else
+          SNAPSHOT_SERVERS="<server><id>central-snapshots</id><username>${CENTRAL_USERNAME}</username><password>${CENTRAL_PASSWORD}</password></server>"
+        fi
         cat > ~/.m2/settings.xml <<EOF
         <?xml version="1.0" encoding="UTF-8"?>
         <settings>
@@ -51,16 +70,18 @@ runs:
               <username>${CENTRAL_USERNAME}</username>
               <password>${CENTRAL_PASSWORD}</password>
             </server>
-            <server>
-              <id>central-snapshots</id>
-              <username>${CENTRAL_USERNAME}</username>
-              <password>${CENTRAL_PASSWORD}</password>
-            </server>
+            ${SNAPSHOT_SERVERS}
           </servers>
           <profiles>
             <profile>
               <id>vidocq-snapshots</id>
               <repositories>
+                <repository>
+                  <id>vidocq-snapshots</id>
+                  <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </repository>
                 <repository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
@@ -69,6 +90,12 @@ runs:
                 </repository>
               </repositories>
               <pluginRepositories>
+                <pluginRepository>
+                  <id>vidocq-snapshots</id>
+                  <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </pluginRepository>
                 <pluginRepository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
@@ -117,14 +144,22 @@ runs:
         SNAPSHOT_PROFILE: ${{ inputs.snapshot-profile }}
         RELEASE_PROFILE: ${{ inputs.release-profile }}
         SKIP_TESTS: ${{ inputs.skip-tests }}
+        SNAPSHOT_URL: ${{ inputs.snapshot-repository-url }}
+        SNAPSHOT_PASSWORD: ${{ inputs.snapshot-password }}
       run: |
         set -euo pipefail
         SKIP_ARG=-DskipTests
         if [ "$SKIP_TESTS" = "false" ]; then SKIP_ARG=""; fi
         VERSION=$(mvn -q -DforceStdout -N help:evaluate -Dexpression=project.version)
         if [[ "$VERSION" == *-SNAPSHOT ]]; then
-          echo "Version $VERSION → publishing SNAPSHOT to central-snapshots (maven-deploy-plugin)"
-          mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy $SKIP_ARG
+          if [ -n "$SNAPSHOT_PASSWORD" ]; then
+            echo "Version $VERSION → publishing SNAPSHOT to $SNAPSHOT_URL (maven-deploy-plugin)"
+            mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy $SKIP_ARG \
+              -DaltSnapshotDeploymentRepository="vidocq-snapshots::$SNAPSHOT_URL"
+          else
+            echo "Version $VERSION → publishing SNAPSHOT to central-snapshots (maven-deploy-plugin)"
+            mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy $SKIP_ARG
+          fi
         else
           echo "Version $VERSION → publishing RELEASE via central-publishing-maven-plugin"
           mvn $MVN_ARGS -P"$RELEASE_PROFILE" deploy $SKIP_ARG -Dgpg.passphrase="$GPG_PASSPHRASE"

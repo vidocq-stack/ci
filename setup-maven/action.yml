@@ -83,10 +83,11 @@ runs:
         tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
-    - name: Configure settings.xml (resolve SNAPSHOT deps from central-snapshots)
+    - name: Configure settings.xml (resolve SNAPSHOT deps from maven.vidocq.dev and central-snapshots)
       shell: bash
       # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream
-      # io.vidocq.* SNAPSHOTs. central-snapshots is publicly readable (no credentials).
+      # io.vidocq.* SNAPSHOTs: maven.vidocq.dev first, where main publishes them, then central-snapshots
+      # for the other projects' SNAPSHOTs. Both are publicly readable (no credentials).
       # deploy-maven later overwrites this file with the same repos + the deploy servers.
       run: |
         set -euo pipefail
@@ -99,6 +100,12 @@ runs:
               <id>vidocq-snapshots</id>
               <repositories>
                 <repository>
+                  <id>vidocq-snapshots</id>
+                  <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+                </repository>
+                <repository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                   <releases><enabled>false</enabled></releases>
@@ -109,6 +116,12 @@ runs:
                 </repository>
               </repositories>
               <pluginRepositories>
+                <pluginRepository>
+                  <id>vidocq-snapshots</id>
+                  <url>https://maven.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+                </pluginRepository>
                 <pluginRepository>
                   <id>central-snapshots</id>
                   <url>https://central.sonatype.com/repository/maven-snapshots/</url>
