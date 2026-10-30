@@ -1,5 +1,5 @@
 name: 'Deploy to Maven Central'
-description: 'Write settings.xml + import GPG key + deploy: SNAPSHOT via maven-deploy-plugin (maven.vidocq.dev when snapshot credentials are given, else central-snapshots), RELEASE via central-publishing. Maven must already be on the PATH.'
+description: 'Write settings.xml + import GPG key + deploy: SNAPSHOT via maven-deploy-plugin (maven.vidocq.dev then central-snapshots when snapshot credentials are given, else central-snapshots only), RELEASE via central-publishing. Maven must already be on the PATH.'
 
 inputs:
   central-username:
@@ -23,6 +23,11 @@ inputs:
   snapshot-password:
     description: 'Secret of snapshot-username'
     default: ''
+  snapshot-also-central:
+    description: >
+      'true' (default): with snapshot credentials, the SNAPSHOTs also go to central-snapshots, in a second pass
+      without tests, after snapshot-repository-url. A failure there is a warning: Central's limits never fail main.
+    default: 'true'
   snapshot-profile:
     description: 'Maven profile for SNAPSHOT deployments'
     default: 'snapshot'
@@ -57,7 +62,9 @@ runs:
         # that server authenticates every SNAPSHOT read, and a refused token then fails them all with 403
         # (2026-10-30). Without them, the SNAPSHOTs still go to central-snapshots, which needs the token.
         if [ -n "$SNAPSHOT_PASSWORD" ]; then
-          SNAPSHOT_SERVERS="<server><id>vidocq-snapshots</id><username>${SNAPSHOT_USERNAME}</username><password>${SNAPSHOT_PASSWORD}</password></server>"
+          # The Central token sits under a deploy-only id: reads of central-snapshots stay anonymous, so a refused
+          # token can only fail the Central copy, never a read.
+          SNAPSHOT_SERVERS="<server><id>vidocq-snapshots</id><username>${SNAPSHOT_USERNAME}</username><password>${SNAPSHOT_PASSWORD}</password></server><server><id>central-snapshots-deploy</id><username>${CENTRAL_USERNAME}</username><password>${CENTRAL_PASSWORD}</password></server>"
         else
           SNAPSHOT_SERVERS="<server><id>central-snapshots</id><username>${CENTRAL_USERNAME}</username><password>${CENTRAL_PASSWORD}</password></server>"
         fi
@@ -158,6 +165,7 @@ runs:
         SKIP_TESTS: ${{ inputs.skip-tests }}
         SNAPSHOT_URL: ${{ inputs.snapshot-repository-url }}
         SNAPSHOT_PASSWORD: ${{ inputs.snapshot-password }}
+        ALSO_CENTRAL: ${{ inputs.snapshot-also-central }}
       run: |
         set -euo pipefail
         SKIP_ARG=-DskipTests
@@ -168,6 +176,13 @@ runs:
             echo "Version $VERSION → publishing SNAPSHOT to $SNAPSHOT_URL (maven-deploy-plugin)"
             mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy $SKIP_ARG \
               -DaltSnapshotDeploymentRepository="vidocq-snapshots::$SNAPSHOT_URL"
+            if [ "$ALSO_CENTRAL" = "true" ]; then
+              echo "Version $VERSION → copying the SNAPSHOT to central-snapshots (second pass, no tests)"
+              if ! mvn $MVN_ARGS -P"$SNAPSHOT_PROFILE" deploy -DskipTests \
+                  -DaltSnapshotDeploymentRepository="central-snapshots-deploy::https://central.sonatype.com/repository/maven-snapshots/"; then
+                echo "::warning::The SNAPSHOT is on $SNAPSHOT_URL, but its copy to central-snapshots failed (Central token or limits)."
+              fi
+            fi
           else
             # Named explicitly: vidocq-parent's own snapshotRepository is maven.vidocq.dev since 2026-10-30.
             echo "Version $VERSION → publishing SNAPSHOT to central-snapshots (maven-deploy-plugin)"
