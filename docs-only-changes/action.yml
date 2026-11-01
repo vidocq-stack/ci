@@ -1,0 +1,49 @@
+name: 'Docs-only and test-only change sets of a pull request'
+description: >
+  The change set of a pull request, read from the forge's API (/pulls/N/files): docs-only (only *.md, *.adoc, docs/,
+  LICENSE*, NOTICE*, never under a src/) skips the producer's Maven build and its consumers' rebuild; test-only (only
+  src/test/, .forgejo/ and docs, and no published test jar) skips the consumers' rebuild. Each producer's pr.yml
+  carried this logic inline, until Forgejo v17 answered `null` instead of `[]` for the page after the last one and
+  broke every pull request at once: one copy now, here. Needs curl and python3, and the repository checked out (the
+  test-only rule reads its pom.xml files).
+
+inputs:
+  server-url:
+    description: "The forge's URL; empty: github.server_url"
+    default: ''
+  repository:
+    description: 'owner/repository; empty: github.repository'
+    default: ''
+  pr-number:
+    description: 'The pull request number; empty: github.event.number'
+    default: ''
+  bot-token:
+    description: "Codefloe token (secrets.VIDOCQ_BOT_TOKEN), rate limits only: a fork pull request gets no secret and reads anonymously"
+    default: ''
+
+outputs:
+  docs-only:
+    description: "'true' when every changed file is documentation"
+    value: ${{ steps.changes.outputs.docs-only }}
+  test-only:
+    description: "'true' when every changed file is a test, CI configuration or documentation, and no test jar is published"
+    value: ${{ steps.changes.outputs.test-only }}
+  files:
+    description: 'A file holding the changed paths, one per line ($RUNNER_TEMP/pr-changed-files.txt, read by select-tck)'
+    value: ${{ steps.changes.outputs.files }}
+
+runs:
+  using: composite
+  steps:
+    - name: Docs-only and test-only change sets
+      id: changes
+      shell: bash
+      env:
+        FILES_API: ${{ inputs.server-url || github.server_url }}/api/v1/repos/${{ inputs.repository || github.repository }}/pulls/${{ inputs.pr-number || github.event.number }}/files
+        TOKEN: ${{ inputs.bot-token }}
+        SCRIPT: ${{ github.action_path }}/changes.sh
+      run: |
+        set -euo pipefail
+        export FILES_OUT="${RUNNER_TEMP:-/tmp}/pr-changed-files.txt"
+        bash "$SCRIPT"
+        echo "files=$FILES_OUT" >> "$GITHUB_OUTPUT"
