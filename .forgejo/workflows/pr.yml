@@ -20,10 +20,10 @@ jobs:
   cla-check:
     runs-on: vidocq-runner
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: https://codefloe.com/Vidocq/ci/cla-check@main
+      - uses: https://codefloe.com/Vidocq/ci/cla-check@bdcd808a9076918dcff7817000b5dcdf90288d17
         with:
           pr-author: ${{ github.event.pull_request.user.login }}
           slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -31,24 +31,24 @@ jobs:
   gpg-check:
     runs-on: vidocq-runner
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: https://codefloe.com/Vidocq/ci/gpg-check@main
+      - uses: https://codefloe.com/Vidocq/ci/gpg-check@bdcd808a9076918dcff7817000b5dcdf90288d17
 
   dco-check:
     runs-on: vidocq-runner
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: https://codefloe.com/Vidocq/ci/dco-check@main
+      - uses: https://codefloe.com/Vidocq/ci/dco-check@bdcd808a9076918dcff7817000b5dcdf90288d17
 
   # The actions' own script tests (local git repositories and stubs, no network).
   action-tests:
     runs-on: vidocq-runner
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: |
           if ! command -v git >/dev/null || ! command -v jq >/dev/null || ! command -v python3 >/dev/null; then
             apt-get update && apt-get install -y --no-install-recommends git jq python3

@@ -26,7 +26,7 @@ on:
 jobs:
   merge:
     runs-on: vidocq-runner
-    uses: https://codefloe.com/Vidocq/ci/.forgejo/workflows/merge-bot-reusable.yml@main
+    uses: https://codefloe.com/Vidocq/ci/.forgejo/workflows/merge-bot-reusable.yml@bdcd808a9076918dcff7817000b5dcdf90288d17
     with:
       pr-number: ${{ github.event.inputs.pr-number }}
       merge: ${{ github.event.inputs.merge || 'true' }}

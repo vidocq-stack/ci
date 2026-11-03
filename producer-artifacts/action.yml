@@ -71,7 +71,7 @@ runs:
     - name: Upload the producer artifacts
       if: inputs.mode == 'publish' && steps.pack.outputs.packed == 'true'
       continue-on-error: true
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
       with:
         name: ${{ steps.name.outputs.name }}
         path: ${{ steps.pack.outputs.path }}

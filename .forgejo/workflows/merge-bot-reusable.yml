@@ -104,14 +104,14 @@ jobs:
           $authorized \
             || { echo "::error::@${ACTOR} is not a member of devs/Owners — refusing"; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           token: ${{ secrets.VIDOCQ_BOT_TOKEN }}
 
       # Named in full rather than `./merge-bot`: the checkout above is the
       # calling repository, not this one.
-      - uses: https://codefloe.com/Vidocq/ci/merge-bot@main
+      - uses: https://codefloe.com/Vidocq/ci/merge-bot@bdcd808a9076918dcff7817000b5dcdf90288d17
         with:
           pr-number: ${{ steps.ctx.outputs.pr-number }}
           repo: ${{ github.repository }}

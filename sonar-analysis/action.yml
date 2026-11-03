@@ -111,7 +111,7 @@ runs:
     - name: Was this code tree that analysis?
       id: tree
       if: github.event_name == 'pull_request' && inputs.sonar-token != '' && steps.docs.outputs.docs-only != 'true'
-      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
+      uses: https://codefloe.com/Vidocq/ci/validated-tree@bdcd808a9076918dcff7817000b5dcdf90288d17
       with:
         mode: check
         scope: sonar-pr${{ github.event.pull_request.number }}
@@ -380,7 +380,7 @@ runs:
     - name: Record the analysed code tree
       # The next push of the same code (Vidocq/ci#57) reads this analysis's gate instead of analysing again.
       if: steps.gate.outputs.analysis != '' && github.event_name == 'pull_request'
-      uses: https://codefloe.com/Vidocq/ci/validated-tree@main
+      uses: https://codefloe.com/Vidocq/ci/validated-tree@bdcd808a9076918dcff7817000b5dcdf90288d17
       with:
         mode: record
         scope: sonar-pr${{ github.event.pull_request.number }}
