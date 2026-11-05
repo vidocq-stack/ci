@@ -5,6 +5,26 @@ Vidocq workspace convention: short id, date, symptom, minimal repro, cause hypot
 
 ---
 
+## BUG-20261105-01 — setup-maven reads Maven from a host that drops old versions, and never checks the archive
+
+- **Date**: 2026-11-05
+- **Status**: FIXED on `fix/maven-download` (found while reading Vidocq/vidocq's `crac.yml` run 3034, which failed on
+  a different download: Azul's, see Vidocq/vidocq BUG.md)
+- **Symptom**: `maven-version: 3.9.9`, the README's own example, fails today: `dlcdn.apache.org` answers 404, since
+  it serves the current releases only (3.9.16 and 3.10.0 on 2026-11-05). The default 3.9.16 goes the same way when
+  3.9.17 comes out, and every job using `setup-maven` or `release-maven` fails at once, in every repository. The
+  archive is extracted with no check either: a download cut short shows only as a tar error.
+- **Minimal repro**: `curl -sI https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz`
+  answers 404; `setup-maven` with `maven-version: 3.9.9` fails in its Install Maven step.
+- **Cause**: `setup-maven` and `release-maven` each ran `wget -q <dlcdn url>` then `tar -xzf`, from a host that drops
+  old versions, with no retry and no integrity check.
+- **Fix**: `setup-maven/install-maven.sh <version> <dest-dir>`, used by both actions: Maven Central (every version
+  stays there), the archive extracted only once it matches the SHA-512 published next to it, four attempts with a
+  growing pause, a malformed version refused before any download. Tests `setup-maven/install-maven-test.sh`
+  (offline: `file://` repository and a curl that cuts the first downloads short).
+
+---
+
 ## BUG-20261024-02 — merge-bot gives up after 30 minutes, before Vauban's pr-validate ends
 
 - **Date**: 2026-10-24

@@ -111,7 +111,7 @@ inputs:
     description: 'Temurin JDK version'
     default: '25'
   maven-version:
-    description: 'Maven version (used in https://dlcdn.apache.org/maven/maven-${major}/${version}/binaries/)'
+    description: 'Maven version, from Maven Central (org/apache/maven/apache-maven/<version>/), as setup-maven installs it'
     default: '3.9.16'
 
 runs:
@@ -137,13 +137,10 @@ runs:
       shell: bash
       env:
         MAVEN_VERSION: ${{ inputs.maven-version }}
+      # The same install as setup-maven's: from Maven Central, SHA-512 checked, a cut download tried again.
       run: |
         set -euo pipefail
-        major="${MAVEN_VERSION%%.*}"
-        url="https://dlcdn.apache.org/maven/maven-${major}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-        echo "Downloading Maven ${MAVEN_VERSION} from ${url}"
-        wget -q "$url"
-        tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
+        bash "${{ github.action_path }}/../setup-maven/install-maven.sh" "$MAVEN_VERSION" /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
     - name: Run release pipeline

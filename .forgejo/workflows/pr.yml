@@ -50,8 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: |
-          if ! command -v git >/dev/null || ! command -v jq >/dev/null || ! command -v python3 >/dev/null; then
-            apt-get update && apt-get install -y --no-install-recommends git jq python3
+          if ! command -v git >/dev/null || ! command -v jq >/dev/null || ! command -v python3 >/dev/null \
+              || ! command -v curl >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends git jq python3 curl ca-certificates
           fi
           bash build-impacted/companion-branch-test.sh
           bash build-impacted/graph-freshness-test.sh
@@ -76,3 +77,4 @@ jobs:
           bash merge-bot/schedule-test.sh
           bash pr-validate-gate/gate-test.sh
           bash scripts/train-merge-test.sh
+          bash setup-maven/install-maven-test.sh

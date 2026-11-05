@@ -9,7 +9,7 @@ inputs:
     description: 'JDK distribution passed to setup-java'
     default: 'temurin'
   maven-version:
-    description: 'Maven version to install (e.g. 3.9.16 or 4.0.0-rc-5; the major prefix selects maven-3/ vs maven-4/)'
+    description: 'Maven version to install, from Maven Central (e.g. 3.9.16 or 4.0.0-rc-5)'
     default: '3.9.16'
   cache:
     description: >
@@ -74,13 +74,11 @@ runs:
       shell: bash
       env:
         MAVEN_VERSION: ${{ inputs.maven-version }}
+      # From Maven Central, checked against its SHA-512 and tried again when a download fails or is cut short:
+      # install-maven.sh says why.
       run: |
         set -euo pipefail
-        major="${MAVEN_VERSION%%.*}"
-        url="https://dlcdn.apache.org/maven/maven-${major}/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-        echo "Downloading Maven ${MAVEN_VERSION} from ${url}"
-        wget -q "$url"
-        tar -xzf "apache-maven-${MAVEN_VERSION}-bin.tar.gz" -C /opt
+        bash "${{ github.action_path }}/install-maven.sh" "$MAVEN_VERSION" /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
     - name: Configure settings.xml (resolve SNAPSHOT deps from maven.vidocq.dev and central-snapshots)
