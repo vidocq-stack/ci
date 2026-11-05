@@ -712,12 +712,21 @@ PY
     #     versions:update-parent above only touches the root pom.
     python3 - "$g" "$a" "$v" <<'PY'
 def _all_modules(root, ns):
-    # The <modules> of the project AND of its profiles: a module of a profile the release activates
-    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    # The <modules> of the project AND of the profiles the release activates (RELEASE_PROFILE, e.g.
+    # "release,crac": vidocq's crac profile module is published with the release, so its coordinates are own
+    # ones). Modules of any other profile (the TCK runners, never published) are left out.
+    import os as _os
     import xml.etree.ElementTree as _ET
+    active = {p.strip() for p in _os.environ.get('RELEASE_PROFILE', '').split(',') if p.strip()}
     merged = _ET.Element('modules')
-    for mods in root.iter(f'{{{ns}}}modules'):
-        merged.extend(list(mods))
+    direct = root.find(f'{{{ns}}}modules')
+    if direct is not None:
+        merged.extend(list(direct))
+    for prof in root.iter(f'{{{ns}}}profile'):
+        if (prof.findtext(f'{{{ns}}}id') or '').strip() in active:
+            mods = prof.find(f'{{{ns}}}modules')
+            if mods is not None:
+                merged.extend(list(mods))
     return merged if len(merged) else None
 
 import sys, re
@@ -794,12 +803,21 @@ LEGACY_GROUP_RE = re.compile(r'^fr\.vidocq(\..+)?$')
 
 own_aids = set()
 def _all_modules(root, ns):
-    # The <modules> of the project AND of its profiles: a module of a profile the release activates
-    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    # The <modules> of the project AND of the profiles the release activates (RELEASE_PROFILE, e.g.
+    # "release,crac": vidocq's crac profile module is published with the release, so its coordinates are own
+    # ones). Modules of any other profile (the TCK runners, never published) are left out.
+    import os as _os
     import xml.etree.ElementTree as _ET
+    active = {p.strip() for p in _os.environ.get('RELEASE_PROFILE', '').split(',') if p.strip()}
     merged = _ET.Element('modules')
-    for mods in root.iter(f'{{{ns}}}modules'):
-        merged.extend(list(mods))
+    direct = root.find(f'{{{ns}}}modules')
+    if direct is not None:
+        merged.extend(list(direct))
+    for prof in root.iter(f'{{{ns}}}profile'):
+        if (prof.findtext(f'{{{ns}}}id') or '').strip() in active:
+            mods = prof.find(f'{{{ns}}}modules')
+            if mods is not None:
+                merged.extend(list(mods))
     return merged if len(merged) else None
 
 def parse(pom):
@@ -1339,12 +1357,21 @@ for l in os.environ.get('OVERRIDES', '').splitlines():
         covered.add(l.split('=', 1)[0].strip())
 
 def _all_modules(root, ns):
-    # The <modules> of the project AND of its profiles: a module of a profile the release activates
-    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    # The <modules> of the project AND of the profiles the release activates (RELEASE_PROFILE, e.g.
+    # "release,crac": vidocq's crac profile module is published with the release, so its coordinates are own
+    # ones). Modules of any other profile (the TCK runners, never published) are left out.
+    import os as _os
     import xml.etree.ElementTree as _ET
+    active = {p.strip() for p in _os.environ.get('RELEASE_PROFILE', '').split(',') if p.strip()}
     merged = _ET.Element('modules')
-    for mods in root.iter(f'{{{ns}}}modules'):
-        merged.extend(list(mods))
+    direct = root.find(f'{{{ns}}}modules')
+    if direct is not None:
+        merged.extend(list(direct))
+    for prof in root.iter(f'{{{ns}}}profile'):
+        if (prof.findtext(f'{{{ns}}}id') or '').strip() in active:
+            mods = prof.find(f'{{{ns}}}modules')
+            if mods is not None:
+                merged.extend(list(mods))
     return merged if len(merged) else None
 
 def parse(pom):
