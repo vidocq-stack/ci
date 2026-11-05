@@ -110,6 +110,13 @@ inputs:
   java-version:
     description: 'Temurin JDK version'
     default: '25'
+  java-setup:
+    description: |
+      "true" (default) → install Temurin `java-version` with actions/setup-java.
+      "false" → use the JDK the runner image already provides (JAVA_HOME as the image sets it). For a
+      release that needs a JDK Temurin does not ship, e.g. Azul Zulu CRaC (`jdk.crac`) on the `crac`
+      runner, together with `release-profile: release,crac`.
+    default: 'true'
   maven-version:
     description: 'Maven version, from Maven Central (org/apache/maven/apache-maven/<version>/), as setup-maven installs it'
     default: '3.9.16'
@@ -122,6 +129,7 @@ runs:
     # rate-limiting (504 on burst clones after a force-tag) this is the
     # difference between green and red.
     - name: Set up Java ${{ inputs.java-version }} (temurin)
+      if: inputs.java-setup != 'false'
       uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
       with:
         java-version: ${{ inputs.java-version }}

@@ -57,6 +57,7 @@ the release again, delete the file in the pull request that prepares the release
 | `release-profile` | ❌ | `release` | Profile activated during `release:perform` |
 | `wait-timeout-seconds` | ❌ | `3600` | Max seconds to wait for Central propagation |
 | `wait-interval-seconds` | ❌ | `60` | Polling interval |
+| `java-setup` | ❌ | `true` | `false` skips the Temurin install and uses the JDK of the runner image (its `JAVA_HOME`). For a release that needs a JDK Temurin does not ship: `vidocq` runs on the `crac` runner (Azul Zulu CRaC, `jdk.crac`) with `release-profile: release,crac`, so the CRaC extension is built and published with the rest. |
 
 ## Example — `vidocq-parent` (no inter-project deps)
 
