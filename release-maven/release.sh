@@ -711,6 +711,15 @@ PY
     #     overridden coordinate (vidocq-runtime-bom -> io.vidocq:vidocq-parent):
     #     versions:update-parent above only touches the root pom.
     python3 - "$g" "$a" "$v" <<'PY'
+def _all_modules(root, ns):
+    # The <modules> of the project AND of its profiles: a module of a profile the release activates
+    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    import xml.etree.ElementTree as _ET
+    merged = _ET.Element('modules')
+    for mods in root.iter(f'{{{ns}}}modules'):
+        merged.extend(list(mods))
+    return merged if len(merged) else None
+
 import sys, re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -738,7 +747,7 @@ def visit(pom):
             if new != text:
                 pom.write_text(new, encoding='utf-8')
                 print(f"      patched <parent> of {pom}: {pv} -> {v}")
-    mods = root.find(f'{{{ns}}}modules')
+    mods = _all_modules(root, ns)
     if mods is not None:
         for mm in mods.findall(f'{{{ns}}}module'):
             if (mm.text or '').strip(): visit(pom.parent / mm.text.strip() / 'pom.xml')
@@ -784,6 +793,15 @@ PROP_RE = re.compile(r'^\$\{([^}]+)\}$')
 LEGACY_GROUP_RE = re.compile(r'^fr\.vidocq(\..+)?$')
 
 own_aids = set()
+def _all_modules(root, ns):
+    # The <modules> of the project AND of its profiles: a module of a profile the release activates
+    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    import xml.etree.ElementTree as _ET
+    merged = _ET.Element('modules')
+    for mods in root.iter(f'{{{ns}}}modules'):
+        merged.extend(list(mods))
+    return merged if len(merged) else None
+
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
@@ -809,7 +827,7 @@ def walk_reactor(root_pom):
         root, ns = parse(pom_path)
         if root is None: return
         ordered.append(pom_path)
-        modules_el = root.find(f'{{{ns}}}modules')
+        modules_el = _all_modules(root, ns)
         if modules_el is None: return
         for m in modules_el.findall(f'{{{ns}}}module'):
             sub = (m.text or '').strip()
@@ -1320,6 +1338,15 @@ for l in os.environ.get('OVERRIDES', '').splitlines():
     if l and not l.startswith('#') and '=' in l:
         covered.add(l.split('=', 1)[0].strip())
 
+def _all_modules(root, ns):
+    # The <modules> of the project AND of its profiles: a module of a profile the release activates
+    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    import xml.etree.ElementTree as _ET
+    merged = _ET.Element('modules')
+    for mods in root.iter(f'{{{ns}}}modules'):
+        merged.extend(list(mods))
+    return merged if len(merged) else None
+
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
@@ -1335,7 +1362,7 @@ def visit(pom):
     root, ns = parse(pom)
     if root is None: return
     poms.append(pom)
-    mods = root.find(f'{{{ns}}}modules')
+    mods = _all_modules(root, ns)
     if mods is not None:
         for m in mods.findall(f'{{{ns}}}module'):
             if (m.text or '').strip(): visit(pom.parent / m.text.strip() / 'pom.xml')

@@ -50,6 +50,15 @@ own_aids = set()       # artifactIds in this project
 groupids = set()       # io.vidocq.* groupIds with at least one SNAPSHOT dep
 LEGACY_GROUP_RE = re.compile(r'^fr\.vidocq(\..+)?$')
 
+def _all_modules(root, ns):
+    # The <modules> of the project AND of its profiles: a module of a profile the release activates
+    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    import xml.etree.ElementTree as _ET
+    merged = _ET.Element('modules')
+    for mods in root.iter(f'{{{ns}}}modules'):
+        merged.extend(list(mods))
+    return merged if len(merged) else None
+
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
@@ -74,7 +83,7 @@ def walk_reactor(root_pom):
         root, ns = parse(pom_path)
         if root is None: return
         ordered.append(pom_path)
-        modules_el = root.find(f'{{{ns}}}modules')
+        modules_el = _all_modules(root, ns)
         if modules_el is None: return
         for m in modules_el.findall(f'{{{ns}}}module'):
             sub = (m.text or '').strip()
@@ -157,6 +166,15 @@ from pathlib import Path
 
 project = Path(sys.argv[1]).resolve()
 
+def _all_modules(root, ns):
+    # The <modules> of the project AND of its profiles: a module of a profile the release activates
+    # (vidocq's crac profile, -Prelease,crac) belongs to the release, so its coordinates are own ones.
+    import xml.etree.ElementTree as _ET
+    merged = _ET.Element('modules')
+    for mods in root.iter(f'{{{ns}}}modules'):
+        merged.extend(list(mods))
+    return merged if len(merged) else None
+
 def parse(pom):
     text = pom.read_text(encoding='utf-8', errors='replace')
     m = re.search(r'<project\b[^>]*\bxmlns="([^"]+)"', text)
@@ -178,7 +196,7 @@ def walk(pom_path):
     root, ns = parse(pom_path)
     if root is None: return
     ordered.append(pom_path)
-    modules_el = root.find(f'{{{ns}}}modules')
+    modules_el = _all_modules(root, ns)
     if modules_el is None: return
     for m in modules_el.findall(f'{{{ns}}}module'):
         sub = (m.text or '').strip()
