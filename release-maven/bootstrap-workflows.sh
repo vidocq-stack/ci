@@ -436,7 +436,8 @@ EOF
           git-signing-key-id:      \${{ secrets.CI_BOT_GPG_KEY_ID }}
 
       - name: Notify Slack — release success
-        if: success()
+        # A dry run publishes nothing and creates no tag: it must not announce a release.
+        if: success() && inputs.dry_run != 'true'
         uses: https://codefloe.com/Vidocq/ci/notify-slack@main
         with:
           webhook-url:      \${{ secrets.SLACK_WEBHOOK_URL }}
