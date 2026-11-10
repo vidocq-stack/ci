@@ -21,10 +21,10 @@ REMOTES="$TMP/remotes"; BIN="$TMP/bin"; mkdir -p "$REMOTES/Vidocq" "$BIN"
 # make_repo NAME POM-BODY: a bare repository Vidocq/NAME.git whose main has that root pom.
 make_repo() {
   local name="$1" body="$2" w="$TMP/w-$1"
-  git init -q "$w"
+  git init -q "$w"; git -C "$w" checkout -q -B main
   printf '<?xml version="1.0" encoding="UTF-8"?>\n<project xmlns="http://maven.apache.org/POM/4.0.0">\n%s\n</project>\n' "$body" > "$w/pom.xml"
-  git -C "$w" add -A; git -C "$w" commit -q -m init
-  git clone -q --bare "$w" "$REMOTES/Vidocq/$name.git"
+  git -C "$w" add -A; git -C "$w" -c user.name=fixture -c user.email=fixture@example.org commit -q -m init
+  git clone -q --bare "$w" "$REMOTES/Vidocq/$name.git"; git -C "$REMOTES/Vidocq/$name.git" symbolic-ref HEAD refs/heads/main
 }
 make_repo foy '  <properties><vauban.version>0.4.0-SNAPSHOT</vauban.version><chappe.version>0.4.0-SNAPSHOT</chappe.version><junit.version>5.12.0</junit.version></properties>'
 make_repo cassini '  <properties><vauban.version>0.4.0-SNAPSHOT</vauban.version></properties>'
@@ -113,4 +113,4 @@ PATH="$BIN:$PATH" PRODUCER_SLUG=Vidocq/lonely NEXT_DEV_VERSION=1.0.0 BOT_TOKEN=x
   BUMP_WORK_DIR="$TMP/work-lonely" bash "$SCRIPT" > "$TMP/out-lonely" 2>&1
 check "no consumer: exits 0 and says so" "1" "$(grep -c 'nothing to do' "$TMP/out-lonely")"
 
-[ "$failures" -eq 0 ] && echo "all bump-consumers tests passed" || { echo "$failures test(s) failed"; exit 1; }
+[ "$failures" -eq 0 ] && echo "all bump-consumers tests passed" || { echo "$failures test(s) failed"; echo "git $(git --version)"; for f in "$TMP"/out-*; do echo "--- $f"; tail -15 "$f"; done; exit 1; }
