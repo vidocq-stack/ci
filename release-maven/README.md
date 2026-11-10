@@ -13,6 +13,8 @@ end-to-end, with **no human intervention during the job**:
 5. Blocks until every deployable module's `.pom` is visible on
    `repo1.maven.org` (poll, default timeout 60 min). The bundle must therefore
    use `<autoPublish>true</autoPublish>` (configured in `vidocq-parent`).
+6. After a real release, opens one pull request per direct consumer of the dependency graph that
+   moves `<this brick>.version` to the new dev SNAPSHOT (see "Aligning the consumers" below).
 
 ## Caller responsibilities
 
@@ -144,6 +146,65 @@ The action will fail-fast if an upstream isn't released yet. Suggested order:
 Wait for each wave's wait-for-Central step to succeed before triggering the
 next — the action does this implicitly per job, so you only need to start the
 next workflow when the previous green-passed.
+
+## Aligning the consumers after a release
+
+The post-release commit moves the brick's own version to `<next-dev-version>-SNAPSHOT`, but nothing
+used to move the `<brick>.version` properties of its consumers: they kept the SNAPSHOT of the line
+just released (`0.3.0-SNAPSHOT` after 0.3.0), which the brick no longer publishes. A merge on the
+brick then never reached a consumer's local build, and the skew cost a hand-bump of 14 repositories
+after 0.3.0 ([Vidocq/ci#19](https://codefloe.com/Vidocq/ci/issues/19)).
+
+The last step of the action, `bump-consumers.sh`, runs after the release is visible on Central and
+the `refresh-downstream-release-yml` cascade, **on a real run only**:
+
+1. reads `graph/inverted.json` (`Vidocq/dep-graph`) and takes the **direct** consumers of every
+   artifact the brick publishes (a consumer declares `<brick>.version` only for what it uses itself);
+2. in each, rewrites `<brick>.version` to `<next-dev-version>-SNAPSHOT` with
+   `build-impacted/pin-upstreams.py` (the reactor's poms only, the property only, every other byte
+   untouched; `versions:set-property` when it cannot decide, as `build-impacted` does);
+3. commits `chore(deps): bump <brick>.version to <next-dev>-SNAPSHOT` (GPG-signed with the bot key,
+   `Signed-off-by`), pushes `chore/bump-<brick>-<next-dev>` and opens a pull request through the
+   forge API. The merge is a human one, as for any pull request: pr-validate builds the consumer
+   against it.
+
+Properties of the step: **a dry run touches nothing** (the step is skipped, and the script refuses
+`DRY_RUN=true` too); **idempotent** (a consumer that already has the branch, or whose property is
+absent or already at the target, is skipped); **never fails the job** (the release is published by
+then: a consumer that cannot be bumped is a `::warning`, and the guard below reports the skew).
+
+Why a pull request and not a direct push to `main` (as `refresh-release-yml` does): a bump changes
+what the consumer compiles against, so it deserves the consumer's own validation. Why in the release
+step and not a scheduled sweep: the release is the only moment the next dev version is created, the
+step already holds the bot token and signing key, and a sweep would need a second place that knows
+what "the dev line" is.
+
+A consumer pull request is opened right after the producer's post-release commit: the
+`<next-dev>-SNAPSHOT` must have been published to `central-snapshots` by the producer's `main` build
+before pr-validate can resolve it. If that job fails on resolution, re-run it a few minutes later.
+`vidocq-parent` has no `<dependency>` consumers in the graph (a `<parent>` is not tracked): it gets
+no bump pull requests.
+
+### The guard: `check-brick-versions`
+
+`check-brick-versions/` (run by `pr-validate-gate` in its `state` mode, so every producer's
+pr-validate gets it from `@main` without touching its `pr.yml`) is the safety net for what the
+step above misses (a failed consumer, a pull request left open, a hand-edit). **Report mode**: it
+prints `::warning` annotations and never changes the verdict. For the repository under pull request
+it warns when:
+
+- a `<brick>.version` is neither the **latest release of that brick on Maven Central**
+  (`maven-metadata.xml`) nor the brick's **current development version** (root `<version>` of its
+  `main`); a SNAPSHOT superseded by a release is named as such;
+- its **own** SNAPSHOT version is superseded by its own latest release (a brick left on
+  `0.3.0-SNAPSHOT` after 0.3.0, as foy, heisenberg, humboldt and mansart were) or lags the highest
+  development version of the bricks.
+
+It reads the poms through the forge archive API (no checkout) and skips quietly when the graph, the
+forge or Central cannot be read. Blocking (`--strict`, the `strict` input of the action) is
+available but off: between the release of a brick and the merge of its consumers' bump pull
+requests, every consumer legitimately sits on the superseded line for a while, and a mid-release
+state must not turn a pull request red.
 
 ## Required `vidocq-parent` configuration
 

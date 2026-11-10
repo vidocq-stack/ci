@@ -1,0 +1,42 @@
+name: 'Check io.vidocq brick versions'
+description: >
+  Report-mode guard against brick version skew (Vidocq/ci#19): warns when a repository pins an
+  io.vidocq brick (`<brick>.version`) to a version that is neither the latest release on Maven Central nor
+  the producer's current development SNAPSHOT, and when the repository's own SNAPSHOT version is superseded
+  by its release or lags the development line. Reads the repository through the forge archive API (no
+  checkout needed) and the brick set from the dependency graph. Needs python3 and curl. Never fails the job
+  unless `strict` is true. See check_brick_versions.py.
+
+inputs:
+  repo:
+    description: 'Slug of the repository whose poms are checked (the pull request head repository on a fork)'
+    required: true
+  ref:
+    description: 'Commit (or branch) of that repository to check'
+    required: true
+  self-repo:
+    description: 'Slug of the base repository, whose own version is compared to its releases (default: repo)'
+    default: ''
+  token:
+    description: 'Codefloe token (VIDOCQ_BOT_TOKEN) to lift API rate limits; empty on a fork pull request (public reads)'
+    default: ''
+  strict:
+    description: "'true' turns a finding into a failure"
+    default: 'false'
+  base-url:
+    description: 'Forge base URL'
+    default: 'https://codefloe.com'
+
+runs:
+  using: composite
+  steps:
+    - name: Check brick versions
+      shell: bash
+      env:
+        CHECK_REPO: ${{ inputs.repo }}
+        CHECK_REF: ${{ inputs.ref }}
+        CHECK_SELF: ${{ inputs.self-repo }}
+        BOT_TOKEN: ${{ inputs.token }}
+        STRICT: ${{ inputs.strict }}
+        BASE_URL: ${{ inputs.base-url }}
+      run: bash "${{ github.action_path }}/fetch-and-check.sh"

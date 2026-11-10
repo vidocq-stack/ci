@@ -95,3 +95,18 @@ runs:
           state|verdict) python3 "$SCRIPT" "$MODE" ;;
           *) echo "::error title=pr-validate-gate::mode must be 'state' or 'verdict' (got '$MODE')"; exit 1 ;;
         esac
+
+    # Vidocq/ci#19: report-mode guard against io.vidocq brick version skew. Warnings only, never a verdict:
+    # an outage or a mid-release state must not turn a pull request red. Reads the poms through the API
+    # (the state job has no checkout).
+    - name: Check brick versions (report mode)
+      if: inputs.mode == 'state'
+      continue-on-error: true
+      shell: bash
+      env:
+        CHECK_REPO: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        CHECK_REF: ${{ github.event.pull_request.head.sha }}
+        CHECK_SELF: ${{ github.repository }}
+        BOT_TOKEN: ${{ inputs.token }}
+        BASE_URL: ${{ github.server_url }}
+      run: bash "${{ github.action_path }}/../check-brick-versions/fetch-and-check.sh"

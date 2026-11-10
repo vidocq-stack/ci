@@ -188,3 +188,23 @@ runs:
       with:
         producer-slug: ${{ github.repository }}
         bot-token:     ${{ inputs.bot-token }}
+
+    # Vidocq/ci#19: the release moved this repository to its next dev version, but every
+    # consumer still points `<this brick>.version` at the SNAPSHOT of the line just released
+    # (a pre-release nothing publishes any more). Open one pull request per direct consumer of
+    # the dependency graph that moves the property to the new dev SNAPSHOT. Never on a dry run
+    # (the script also refuses it), and it never fails the job: the release is out by now.
+    - name: Open consumer dependency-bump pull requests
+      if: success() && inputs.dry-run != 'true'
+      shell: bash
+      env:
+        PRODUCER_SLUG:           ${{ github.repository }}
+        NEXT_DEV_VERSION:        ${{ inputs.next-dev-version }}
+        BOT_TOKEN:               ${{ inputs.bot-token }}
+        BOT_NAME:                ${{ inputs.bot-name }}
+        BOT_EMAIL:               ${{ inputs.bot-email }}
+        GIT_SIGNING_PRIVATE_KEY: ${{ inputs.git-signing-private-key }}
+        GIT_SIGNING_PASSPHRASE:  ${{ inputs.git-signing-passphrase }}
+        GIT_SIGNING_KEY_ID:      ${{ inputs.git-signing-key-id }}
+        DRY_RUN:                 ${{ inputs.dry-run }}
+      run: bash "${{ github.action_path }}/bump-consumers.sh"
