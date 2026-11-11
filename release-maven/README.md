@@ -155,7 +155,7 @@ just released (`0.3.0-SNAPSHOT` after 0.3.0), which the brick no longer publishe
 brick then never reached a consumer's local build, and the skew cost a hand-bump of 14 repositories
 after 0.3.0 ([Vidocq/ci#19](https://codefloe.com/Vidocq/ci/issues/19)).
 
-The last step of the action, `bump-consumers.sh`, runs after the release is visible on Central and
+A step of the action, `bump-consumers.sh`, runs after the release is visible on Central and
 the `refresh-downstream-release-yml` cascade, **on a real run only**:
 
 1. reads `graph/inverted.json` (`Vidocq/dep-graph`) and takes the **direct** consumers of every
@@ -205,6 +205,17 @@ forge or Central cannot be read. Blocking (`--strict`, the `strict` input of the
 available but off: between the release of a brick and the merge of its consumers' bump pull
 requests, every consumer legitimately sits on the superseded line for a while, and a mid-release
 state must not turn a pull request red.
+
+
+## The Forgejo release (Publications tab)
+
+The pipeline pushes the tag `v<release-version>` and the branch `release/<release-version>`, which
+is all the forge showed: no entry in the Publications tab. The last step of the action,
+`create-forgejo-release.sh`, creates it **on a real run only**: a release named
+`<brick> <release-version>` on that tag, flagged as a pre-release when the version has a suffix
+(`0.4.0-RC2`), with a body that points at Maven Central. It is idempotent (a tag that already has a
+release is left alone) and never fails the job: a forge error is a `::warning`, and the release can
+be created by hand. Test: `bash release-maven/create-forgejo-release-test.sh`.
 
 ## Required `vidocq-parent` configuration
 

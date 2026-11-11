@@ -382,7 +382,7 @@ EOF
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: vidocq-runner
     steps:
       - uses: actions/checkout@v4
         with:

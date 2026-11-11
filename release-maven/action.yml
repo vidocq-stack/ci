@@ -208,3 +208,15 @@ runs:
         GIT_SIGNING_KEY_ID:      ${{ inputs.git-signing-key-id }}
         DRY_RUN:                 ${{ inputs.dry-run }}
       run: bash "${{ github.action_path }}/bump-consumers.sh"
+
+    # The tag is on the forge, the bundle is uploaded: create the release (Publications tab) for it.
+    # Never fails the job (the script reports a forge error as a warning); idempotent.
+    - name: Create the Forgejo release
+      if: success() && inputs.dry-run != 'true'
+      shell: bash
+      env:
+        PRODUCER_SLUG:   ${{ github.repository }}
+        RELEASE_VERSION: ${{ inputs.release-version }}
+        BOT_TOKEN:       ${{ inputs.bot-token }}
+        DRY_RUN:         ${{ inputs.dry-run }}
+      run: bash "${{ github.action_path }}/create-forgejo-release.sh"

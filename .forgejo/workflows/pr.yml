@@ -79,5 +79,6 @@ jobs:
           bash scripts/train-merge-test.sh
           bash setup-maven/install-maven-test.sh
           bash release-maven/bump-consumers-test.sh
+          bash release-maven/create-forgejo-release-test.sh
           bash check-brick-versions/check-brick-versions-test.sh
           bash check-brick-versions/fetch-and-check-test.sh
