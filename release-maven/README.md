@@ -180,7 +180,7 @@ step already holds the bot token and signing key, and a sweep would need a secon
 what "the dev line" is.
 
 A consumer pull request is opened right after the producer's post-release commit: the
-`<next-dev>-SNAPSHOT` must have been published to `central-snapshots` by the producer's `main` build
+`<next-dev>-SNAPSHOT` must have been published to `maven.vidocq.dev` by the producer's `main` build
 before pr-validate can resolve it. If that job fails on resolution, re-run it a few minutes later.
 `vidocq-parent` has no `<dependency>` consumers in the graph (a `<parent>` is not tracked): it gets
 no bump pull requests.

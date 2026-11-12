@@ -81,12 +81,14 @@ runs:
         bash "${{ github.action_path }}/install-maven.sh" "$MAVEN_VERSION" /opt
         echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
-    - name: Configure settings.xml (resolve SNAPSHOT deps from maven.vidocq.dev and central-snapshots)
+    - name: Configure settings.xml (resolve SNAPSHOT deps from maven.vidocq.dev)
       shell: bash
-      # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream
-      # io.vidocq.* SNAPSHOTs: maven.vidocq.dev first, where main publishes them, maven.bak.vidocq.dev (a copy of it,
-      # synchronised every 10 minutes) when it is down, then central-snapshots
-      # for the other projects' SNAPSHOTs. Both are publicly readable (no credentials).
+      # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream io.vidocq.* SNAPSHOTs:
+      # maven.vidocq.dev, where main publishes them, then maven.bak.vidocq.dev (a copy of it, synchronised every
+      # 10 minutes) when it is down. Both are publicly readable (no credentials). Sonatype's central-snapshots is
+      # not read: for a SNAPSHOT Maven asks every declared repository for its maven-metadata.xml, so having it here
+      # hit Sonatype for each artifact and failed on HTTP 429 (Mansart pull requests, 2026-11-12). The SNAPSHOTs are
+      # still published there (deploy-maven), for people.
       # deploy-maven later overwrites this file with the same repos + the deploy servers.
       run: |
         set -euo pipefail
@@ -110,15 +112,6 @@ runs:
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
                 </repository>
-                <repository>
-                  <id>central-snapshots</id>
-                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
-                  <releases><enabled>false</enabled></releases>
-                  <!-- always: PR runners restore a cached ~/.m2, and Maven's default
-                       daily policy would keep a stale upstream SNAPSHOT for 24h
-                       (seen on cassini PR #15 racing a freshly merged chappe). -->
-                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
-                </repository>
               </repositories>
               <pluginRepositories>
                 <pluginRepository>
@@ -130,12 +123,6 @@ runs:
                 <pluginRepository>
                   <id>vidocq-snapshots-bak</id>
                   <url>https://maven.bak.vidocq.dev/snapshots</url>
-                  <releases><enabled>false</enabled></releases>
-                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
-                </pluginRepository>
-                <pluginRepository>
-                  <id>central-snapshots</id>
-                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
                 </pluginRepository>
