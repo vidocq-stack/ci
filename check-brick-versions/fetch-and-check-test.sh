@@ -20,11 +20,14 @@ case "\$url" in */archive/*) cp "$TMP/archive.tgz" "\$out" ;; *) exit 22 ;; esac
 S
 chmod +x "$TMP/bin/curl"
 
-# The graph is read by python on a dead local port: the script must reach it and skip politely.
-out=$(PATH="$TMP/bin:$PATH" CHECK_REPO=Vidocq/foy CHECK_REF=abc123 BASE_URL=http://127.0.0.1:9 bash "$HERE/fetch-and-check.sh" 2>&1); rc=$?
+# The graph is read by python on a dead local port: the script must reach it and skip politely. A proxy of the
+# runner's environment must not stand between python and that port (urllib honours it), so the call ignores them.
+NOPROXY=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy NO_PROXY=127.0.0.1 no_proxy=127.0.0.1)
+out=$("${NOPROXY[@]}" PATH="$TMP/bin:$PATH" CHECK_REPO=Vidocq/foy CHECK_REF=abc123 BASE_URL=http://127.0.0.1:9 bash "$HERE/fetch-and-check.sh" 2>&1); rc=$?
 check "exit 0 in report mode" "0" "$rc"
 check "the archive of the right repository and commit is requested" "1" "$(grep -c 'api/v1/repos/Vidocq/foy/archive/abc123.tar.gz' "$TMP/urls")"
 check "the poms were extracted and the guard ran (graph unreadable: skipped)" "1" "$(grep -c 'dependency graph unreadable' <<<"$out")"
+[[ "$out" == *"dependency graph unreadable"* ]] || { echo "---- output of fetch-and-check.sh:"; echo "$out" | head -20; echo "----"; }
 
 rm "$TMP/archive.tgz"
 out=$(PATH="$TMP/bin:$PATH" CHECK_REPO=Vidocq/foy CHECK_REF=abc123 BASE_URL=http://127.0.0.1:9 bash "$HERE/fetch-and-check.sh" 2>&1); rc=$?
