@@ -58,8 +58,9 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p ~/.m2
-        # The build reads SNAPSHOTs from maven.vidocq.dev and its copy only; central-snapshots is a deploy target
-        # (Maven would otherwise ask Sonatype for each artifact's metadata and fail on HTTP 429, 2026-11-12).
+        # The build reads io.vidocq SNAPSHOTs from maven.vidocq.dev and its copy; central-snapshots is a deploy
+        # target, and a dependency repository only for the third-party groupIds of an allow-list below (Maven
+        # would otherwise ask Sonatype for each artifact's metadata and fail on HTTP 429, 2026-11-12).
         # Without maven.vidocq.dev credentials, the SNAPSHOTs still go to central-snapshots, which needs the token.
         if [ -n "$SNAPSHOT_PASSWORD" ]; then
           # The Central token sits under a deploy-only id, so a refused token can only fail the Central copy.
@@ -94,6 +95,12 @@ runs:
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled></snapshots>
                 </repository>
+                <repository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled></snapshots>
+                </repository>
               </repositories>
               <pluginRepositories>
                 <pluginRepository>
@@ -116,6 +123,15 @@ runs:
           </activeProfiles>
         </settings>
         EOF
+        # Sonatype's central-snapshots answers only for the third-party SNAPSHOTs that exist nowhere else
+        # (dev.langchain4j.cdi.mcp): Maven's remote repository filter, a groupId allow-list (Maven 3.9+), keeps
+        # io.vidocq away from it. The list is named after the repository id.
+        mkdir -p ~/.m2/rrf
+        cat > ~/.m2/rrf/groupId-central-snapshots.txt <<'RRF'
+        dev.langchain4j.cdi
+        dev.langchain4j.cdi.mcp
+        RRF
+        echo "MAVEN_ARGS=${MAVEN_ARGS:+$MAVEN_ARGS }-Daether.remoteRepositoryFilter.groupId=true -Daether.remoteRepositoryFilter.groupId.basedir=$HOME/.m2/rrf" >> "$GITHUB_ENV"
 
     - name: Import GPG signing key
       shell: bash

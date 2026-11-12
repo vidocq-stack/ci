@@ -85,10 +85,11 @@ runs:
       shell: bash
       # Needed so Maven can resolve the vidocq-parent SNAPSHOT parent and any upstream io.vidocq.* SNAPSHOTs:
       # maven.vidocq.dev, where main publishes them, then maven.bak.vidocq.dev (a copy of it, synchronised every
-      # 10 minutes) when it is down. Both are publicly readable (no credentials). Sonatype's central-snapshots is
-      # not read: for a SNAPSHOT Maven asks every declared repository for its maven-metadata.xml, so having it here
-      # hit Sonatype for each artifact and failed on HTTP 429 (Mansart pull requests, 2026-11-12). The SNAPSHOTs are
-      # still published there (deploy-maven), for people.
+      # 10 minutes) when it is down. Both are publicly readable (no credentials). For a SNAPSHOT Maven asks every
+      # declared repository for its maven-metadata.xml, so Sonatype's central-snapshots, declared without a filter,
+      # was hit for each io.vidocq artifact and failed on HTTP 429 (Mansart pull requests, 2026-11-12); it stays
+      # declared for the dependencies, behind a groupId allow-list, because a few third-party SNAPSHOTs exist only
+      # there. No Sonatype among the plugin repositories. The SNAPSHOTs are still published there (deploy-maven).
       # deploy-maven later overwrites this file with the same repos + the deploy servers.
       run: |
         set -euo pipefail
@@ -109,6 +110,12 @@ runs:
                 <repository>
                   <id>vidocq-snapshots-bak</id>
                   <url>https://maven.bak.vidocq.dev/snapshots</url>
+                  <releases><enabled>false</enabled></releases>
+                  <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+                </repository>
+                <repository>
+                  <id>central-snapshots</id>
+                  <url>https://central.sonatype.com/repository/maven-snapshots/</url>
                   <releases><enabled>false</enabled></releases>
                   <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
                 </repository>
@@ -134,3 +141,12 @@ runs:
           </activeProfiles>
         </settings>
         EOF
+        # Sonatype's central-snapshots answers only for the third-party SNAPSHOTs that exist nowhere else
+        # (dev.langchain4j.cdi.mcp): Maven's remote repository filter, a groupId allow-list (Maven 3.9+), keeps
+        # io.vidocq away from it. The list is named after the repository id.
+        mkdir -p ~/.m2/rrf
+        cat > ~/.m2/rrf/groupId-central-snapshots.txt <<'RRF'
+        dev.langchain4j.cdi
+        dev.langchain4j.cdi.mcp
+        RRF
+        echo "MAVEN_ARGS=${MAVEN_ARGS:+$MAVEN_ARGS }-Daether.remoteRepositoryFilter.groupId=true -Daether.remoteRepositoryFilter.groupId.basedir=$HOME/.m2/rrf" >> "$GITHUB_ENV"
