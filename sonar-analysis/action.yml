@@ -48,7 +48,7 @@ inputs:
       tests that cover them. Any doubt runs every test. 'false' (default): every test.
     default: 'false'
   infer:
-    description: "'true' also runs Infer's RacerD (data races) over the main sources of the build's modules and imports its findings as reliability issues (Vidocq/vidocq#269); opt-in: it downloads Infer (276 MB) on every run. Never stops the analysis"
+    description: "'true' also runs Infer's RacerD (data races) over the main sources of the build's modules and imports its findings as reliability issues (Vidocq/vidocq#269); opt-in: it downloads Infer (276 MB) on every run. Never stops the analysis. Infer's Linux release is x86_64 only and needs glibc 2.38 or later: on another runner it gives no result, and the pull-request comment says so"
     default: 'false'
 
 runs:
@@ -224,12 +224,14 @@ runs:
           fi
         fi
         # 4. Infer's RacerD, when the repository asks for it: data races, as reliability issues of high
-        #    severity, through the generic format too.
+        #    severity, through the generic format too. The script ends with another status than 0 when
+        #    Infer gave no result, and says so in SONAR_INFER_NOT_RUN, for the quality-gate step.
         if [ "${INFER}" = "true" ]; then
           if infer_report=$(bash "${ACTION_PATH}/infer.sh"); then
             if [ -n "${infer_report}" ]; then generic+=("${infer_report}"); fi
           else
-            echo "::warning::Infer failed."
+            echo "::warning::Infer gave no result."
+            echo "SONAR_INFER_NOT_RUN=true" >> "$GITHUB_ENV"
           fi
         fi
         if [ "${#reports[@]}" -gt 0 ]; then
@@ -281,6 +283,8 @@ runs:
         unreachable = os.environ.get("SONAR_UNREACHABLE") == "true"
         # The security scans of this run that gave no result (security-scans.sh): "OSV-Scanner, OpenGrep", or empty.
         not_run = os.environ.get("SONAR_SCANS_NOT_RUN", "").strip()
+        # Whether Infer, asked for, gave no result in this run (infer.sh).
+        infer_not_run = os.environ.get("SONAR_INFER_NOT_RUN") == "true"
         head = os.environ.get("HEAD_SHA", "")[:8]
         q = urllib.parse.quote
 
@@ -351,9 +355,10 @@ runs:
                 sys.exit(1 if blocking else 0)
             gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
             key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
-            if is_pr and not not_run:
+            if is_pr and not not_run and not infer_not_run:
                 # Recorded with the code tree: a later run reuses this analysis only while it is the pull request's last.
-                # An analysis whose security scans gave no result is not recorded: the next run of that code scans again.
+                # An analysis whose security scans, or Infer, gave no result is not recorded: the next run of that code
+                # runs them again.
                 prs = sonar("/api/project_pull_requests/list?project=" + q(key)).get("pullRequests") or []
                 date = next((p.get("analysisDate", "") for p in prs if p.get("key") == pr), "")
                 with open(os.environ["GITHUB_OUTPUT"], "a") as out:
@@ -367,6 +372,8 @@ runs:
         print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
         if not_run:
             print("::warning::Security scans without a result: %s. The quality gate says nothing about them." % not_run)
+        if infer_not_run:
+            print("::warning::Infer without a result. The quality gate says nothing about data races.")
 
         verdict = {"OK": "✅ passed", "ERROR": "❌ failed", "WARN": "⚠️ warning"}.get(status, "➖ " + status.lower())
         lines = ["### SonarQube quality gate: " + verdict, "",
@@ -375,6 +382,11 @@ runs:
             # Said on the pull request: a green comment read as "the scans found nothing" when none had run (BUG-20261116-01).
             lines += ["", "⚠️ Security scans without a result: **%s**. This quality gate says nothing about what they look "
                           "for: read the warnings of the sonar job, then re-run it." % not_run]
+        if infer_not_run:
+            # Said on the pull request too: Infer runs on some runners only (BUG-20261116-02).
+            lines += ["", "⚠️ Infer without a result. This quality gate says nothing about data races: read the warnings "
+                          "of the sonar job, then re-run it. Infer runs on an x86_64 runner whose job image has glibc "
+                          "2.38 or later."]
         if failed:
             lines += ["", "Failed conditions:"] + [
                 "- `%s`: %s (must be %s %s)" % (c.get("metricKey"), c.get("actualValue", "?"),

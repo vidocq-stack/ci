@@ -5,6 +5,35 @@ Vidocq workspace convention: short id, date, symptom, minimal repro, cause hypot
 
 ---
 
+## BUG-20261116-02 — Infer gives no result on three runners out of five, and the pull request's SonarQube comment does not say so
+
+- **Date**: 2026-11-16
+- **Status**: FIXED on `fix/infer-without-result` (Vidocq/ci#120; found while checking what BUG-20261116-01 left as
+  is). The runners themselves are not changed: see "Left as is".
+- **Symptom**: Chappe and Foy ask for Infer (`infer: 'true'`). Vidocq/chappe pull request run 729 (runner `ababeffb`,
+  job image `node:20-bookworm`, `linux/amd64`) logs `::warning::Infer does not run here: [...] version
+  `GLIBC_2.38' not found`, ends green, and its comment has no word of Infer. The push analysis of the same commit (run
+  733, runner `6c935f1a`, job image `node:24.22.1-trixie`) logs `Infer: 7 module(s), 0 finding(s), 0 kept`.
+- **Minimal repro**: `bash sonar-analysis/infer.sh` where the release cannot start (a glibc older than 2.38, or an
+  arm64 machine): one warning, exit status 0. Offline: `bash sonar-analysis/infer-test.sh` on the script before the
+  fix (22 checks fail).
+- **Cause**: `infer.sh` ended with status 0 on every path where Infer gave no result, so the action had nothing to
+  tell the quality-gate step. And Infer cannot run on three of the five runners seen on 2026-11-16: `ababeffb` and
+  `9d388c1b` run their jobs in `node:20-bookworm` (glibc 2.36; observed on the first, same image on the second), and
+  `f924a289` is arm64, for which Infer 1.3.0, its latest release, has no Linux asset (`infer-linux-x86_64` and
+  `infer-osx-arm64` only; not observed in a log, no sonar job of Chappe or Foy was found on that runner).
+- **Fix**: `infer.sh` ends with status 3 when Infer gave no result and writes `SONAR_INFER_NOT_RUN=true` for the
+  quality-gate step: the pull-request comment says "Infer without a result", the log holds one warning, and that
+  analysis is not recorded for reuse. The architecture is asked before the download: nothing is downloaded (276 MB)
+  where no release exists. A reactor without a main source is still status 0. Tests `sonar-analysis/infer-test.sh`
+  (offline: `uname`, `curl`, `sha256sum`, `mvn` and Infer are stubs).
+- **Left as is**: the runners. Until they run their jobs in one image, a pull request of Chappe or Foy gets an Infer
+  result from two runners out of five, and the comment asks for a re-run on the others (Vidocq/ci#121). The push
+  analysis of `main` has no comment: only the warning of its log says that Infer did not run. Whether SonarQube closes
+  Infer's issues of `main` after such an analysis, and opens them again after the next one, was not checked.
+
+---
+
 ## BUG-20261116-01 — No security scan runs on the arm64 runner, and the pull request's SonarQube comment stays green
 
 - **Date**: 2026-11-16
@@ -30,9 +59,9 @@ Vidocq workspace convention: short id, date, symptom, minimal repro, cause hypot
   script hands the scans without a result to the quality-gate step (`SONAR_SCANS_NOT_RUN`): the pull-request comment
   names them, the log holds one warning, and that analysis is not recorded for reuse, so the next run of the same code
   scans again. Tests `sonar-analysis/security-scans-test.sh` (offline: `uname`, `curl` and `sha256sum` are stubs).
-- **Left as is**: `sonar-analysis/infer.sh` pins `infer-linux-x86_64` too; it is opt-in and already says "Infer does
-  not run here". An analysis recorded before the fix by a run whose scans did not execute can still be reused by a
-  later push of the same code tree; a re-run of the job always analyses again.
+- **Left as is**: `sonar-analysis/infer.sh` pinned `infer-linux-x86_64` too and only said "Infer does not run here"
+  in the log: BUG-20261116-02 since. An analysis recorded before the fix by a run whose scans did not execute can
+  still be reused by a later push of the same code tree; a re-run of the job always analyses again.
 
 ---
 
