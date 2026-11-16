@@ -36,7 +36,7 @@ inputs:
     description: "'true' fails the job when the analysis fails or the quality gate is not passed (the blocking waves of the rollout plan, Vidocq/vidocq#284); 'false' only reports"
     default: 'false'
   security-scans:
-    description: "'true' also runs OSV-Scanner (dependency vulnerabilities), OpenGrep (security patterns) and Trivy (secrets, Dockerfile misconfigurations) and imports their SARIF reports into SonarQube as external issues (Vidocq/vidocq#269); they never stop the analysis"
+    description: "'true' also runs OSV-Scanner (dependency vulnerabilities), OpenGrep (security patterns) and Trivy (secrets, Dockerfile misconfigurations) and imports their SARIF reports into SonarQube as external issues (Vidocq/vidocq#269); they never stop the analysis, and the pull-request comment names a scan that gave no result"
     default: 'true'
   targeted-tests:
     description: >
@@ -195,9 +195,13 @@ runs:
           exit 0
         fi
         reports=()
-        # 2. Security scans: their reports become external issues; they never stop the analysis.
+        # 2. Security scans: their reports become external issues; they never stop the analysis. The script names the
+        #    scans without a result in SONAR_SCANS_NOT_RUN, for the quality-gate step.
         if [ "${SECURITY_SCANS}" = "true" ]; then
-          bash "${ACTION_PATH}/security-scans.sh" || echo "::warning::The security scans failed."
+          if ! bash "${ACTION_PATH}/security-scans.sh"; then
+            echo "::warning::The security scans failed."
+            echo "SONAR_SCANS_NOT_RUN=OSV-Scanner, OpenGrep, Trivy" >> "$GITHUB_ENV"
+          fi
           sarif=$(cat "${RUNNER_TEMP:-/tmp}/vidocq-security/sarif-paths" 2>/dev/null || true)
           if [ -n "${sarif}" ]; then reports+=("${sarif}"); fi
         fi
@@ -275,6 +279,8 @@ runs:
         pr = os.environ.get("PR_NUMBER", "")
         reused = os.environ.get("REUSED") == "true"
         unreachable = os.environ.get("SONAR_UNREACHABLE") == "true"
+        # The security scans of this run that gave no result (security-scans.sh): "OSV-Scanner, OpenGrep", or empty.
+        not_run = os.environ.get("SONAR_SCANS_NOT_RUN", "").strip()
         head = os.environ.get("HEAD_SHA", "")[:8]
         q = urllib.parse.quote
 
@@ -345,8 +351,9 @@ runs:
                 sys.exit(1 if blocking else 0)
             gate = sonar("/api/qualitygates/project_status?analysisId=" + q(ce["analysisId"]))["projectStatus"]
             key, dashboard = task.get("projectKey", ""), task.get("dashboardUrl", host)
-            if is_pr:
+            if is_pr and not not_run:
                 # Recorded with the code tree: a later run reuses this analysis only while it is the pull request's last.
+                # An analysis whose security scans gave no result is not recorded: the next run of that code scans again.
                 prs = sonar("/api/project_pull_requests/list?project=" + q(key)).get("pullRequests") or []
                 date = next((p.get("analysisDate", "") for p in prs if p.get("key") == pr), "")
                 with open(os.environ["GITHUB_OUTPUT"], "a") as out:
@@ -358,10 +365,16 @@ runs:
         issues = sonar("/api/issues/search?components=%s%s&resolved=false&ps=1" % (q(key), scope))["total"]
         hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
         print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
+        if not_run:
+            print("::warning::Security scans without a result: %s. The quality gate says nothing about them." % not_run)
 
         verdict = {"OK": "✅ passed", "ERROR": "❌ failed", "WARN": "⚠️ warning"}.get(status, "➖ " + status.lower())
         lines = ["### SonarQube quality gate: " + verdict, "",
                  "New issues: **%s** · security hotspots to review: **%s**" % (issues, hotspots)]
+        if not_run:
+            # Said on the pull request: a green comment read as "the scans found nothing" when none had run (BUG-20261116-01).
+            lines += ["", "⚠️ Security scans without a result: **%s**. This quality gate says nothing about what they look "
+                          "for: read the warnings of the sonar job, then re-run it." % not_run]
         if failed:
             lines += ["", "Failed conditions:"] + [
                 "- `%s`: %s (must be %s %s)" % (c.get("metricKey"), c.get("actualValue", "?"),

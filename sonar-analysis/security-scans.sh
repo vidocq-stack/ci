@@ -10,14 +10,17 @@
 # None of them sends a request to Maven Central: dependency resolution by the scanners themselves
 # got a runner's address rate-limited (HTTP 429, blocked for 30 minutes) during the trial.
 #
-# Each tool is a pinned release, at least two weeks old when it was chosen, and its SHA-256 is
-# checked before it runs. The SARIF reports get paths relative to the repository and stable rule
-# ids, and lose the findings of modules SonarQube does not analyse (normalize-sarif.py); the
-# analysis then imports them through sonar.sarifReportPaths, as external issues. A tool that cannot
-# be downloaded or fails is reported and skipped: the scans never stop the analysis.
+# Each tool is a pinned release, at least two weeks old when it was chosen: the asset of the
+# machine's architecture (amd64 or arm64), whose SHA-256 is checked before it runs. The SARIF
+# reports get paths relative to the repository and stable rule ids, and lose the findings of modules
+# SonarQube does not analyse (normalize-sarif.py); the analysis then imports them through
+# sonar.sarifReportPaths, as external issues. A tool that cannot be downloaded or fails is reported
+# and skipped: the scans never stop the analysis. Its name is handed to the quality-gate step, which
+# says on the pull request that the scan gave no result (BUG-20261116-01).
 #
 # Writes the comma-separated report list (possibly empty) to $RUNNER_TEMP/vidocq-security/sarif-paths
-# and to SONAR_SARIF_PATHS in $GITHUB_ENV.
+# and to SONAR_SARIF_PATHS in $GITHUB_ENV, and the scans without a result ("OSV-Scanner, OpenGrep",
+# empty when the three gave one) to SONAR_SCANS_NOT_RUN in $GITHUB_ENV.
 set -uo pipefail
 
 ROOT="${GITHUB_WORKSPACE:-$PWD}"
@@ -25,17 +28,6 @@ WORK="${RUNNER_TEMP:-/tmp}/vidocq-security"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rm -rf "$WORK"
 mkdir -p "$WORK/bin" "$WORK/reports"
-
-OSV_VERSION=2.6.0
-OSV_SHA256=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
-OPENGREP_VERSION=1.30.1
-OPENGREP_SHA256=d3195b9d8d5ae93179f6aa5f5daaba6a920a5a09d38c5d5ae5e60924050210c4
-# opengrep-rules: the community rules, forked from semgrep-rules before its 2025 licence change
-# (LGPL-2.1 with the Commons Clause, which forbids selling them; scanning our own code is fine).
-RULES_COMMIT=f1d2b562b414783763fd02a6ed2736eaed622efa
-RULES_SHA256=9a5f1cd5c625418cc1c776120123e2d4371df9bb66e099426b17c3488e13619d
-TRIVY_VERSION=0.75.0
-TRIVY_SHA256=c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
 
 # fetch <url> <file> <sha256>: downloads and checks; returns non-zero, with a warning, otherwise.
 fetch() {
@@ -51,6 +43,8 @@ fetch() {
 }
 
 reports=()
+# The tools whose report was read, between spaces: the others gave no result.
+scanned=" "
 
 # keep <tool> <raw-sarif>: normalises a report and keeps it when it holds at least one result.
 keep() {
@@ -62,17 +56,75 @@ keep() {
     local count
     if count=$(python3 "$HERE/normalize-sarif.py" "$ROOT" "$2" "$out" "$1"); then
         echo "$1: $count finding(s)"
+        scanned="$scanned$1 "
         [ "$count" -gt 0 ] && reports+=("$out")
     else
         echo "::warning::security scans: cannot read the $1 report"
     fi
 }
 
+# hand_over: the kept reports go to the analysis, and the names of the scans without a result to the
+# quality-gate step. A pull request's green comment read as "the scans found nothing" when none of
+# them had run (BUG-20261116-01).
+hand_over() {
+    local paths scan missing=""
+    paths=$(IFS=,; echo "${reports[*]:-}")
+    for scan in osv-scanner:OSV-Scanner opengrep:OpenGrep trivy:Trivy; do
+        case "$scanned" in
+            *" ${scan%%:*} "*) ;;
+            *) missing="${missing:+$missing, }${scan#*:}" ;;
+        esac
+    done
+    printf '%s' "$paths" > "$WORK/sarif-paths"
+    {
+        echo "SONAR_SARIF_PATHS=$paths"
+        echo "SONAR_SCANS_NOT_RUN=$missing"
+    } >> "${GITHUB_ENV:-/dev/null}"
+    echo "Reports handed to SonarQube: ${paths:-none}"
+    if [ -n "$missing" ]; then echo "Security scans without a result: $missing"; fi
+}
+
+OSV_VERSION=2.6.0
+OPENGREP_VERSION=1.30.1
+# opengrep-rules: the community rules, forked from semgrep-rules before its 2025 licence change
+# (LGPL-2.1 with the Commons Clause, which forbids selling them; scanning our own code is fine).
+RULES_COMMIT=f1d2b562b414783763fd02a6ed2736eaed622efa
+RULES_SHA256=9a5f1cd5c625418cc1c776120123e2d4371df9bb66e099426b17c3488e13619d
+TRIVY_VERSION=0.75.0
+
+# The release asset of each tool and its SHA-256, by the machine's architecture: the shared runners
+# are amd64 or arm64, and a binary of the other architecture does not execute (exit 126,
+# BUG-20261116-01). The rules are sources: one archive for both.
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64 | amd64)
+        OSV_ASSET=osv-scanner_linux_amd64
+        OSV_SHA256=ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        OPENGREP_ASSET=opengrep_manylinux_x86
+        OPENGREP_SHA256=d3195b9d8d5ae93179f6aa5f5daaba6a920a5a09d38c5d5ae5e60924050210c4
+        TRIVY_ASSET="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+        TRIVY_SHA256=c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+        ;;
+    aarch64 | arm64)
+        OSV_ASSET=osv-scanner_linux_arm64
+        OSV_SHA256=2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4
+        OPENGREP_ASSET=opengrep_manylinux_aarch64
+        OPENGREP_SHA256=a730f6fdce1e978ea29e610a2e0503bfe1ec31fce08979a9a84e3699f03e16ee
+        TRIVY_ASSET="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+        TRIVY_SHA256=a1ee9f6ffb7d112b64ff726a2a0717c21175c1114361391f4a132956751a13b3
+        ;;
+    *)
+        echo "::warning::security scans: no pinned release for the architecture $ARCH, no scan runs"
+        hand_over
+        exit 0
+        ;;
+esac
+
 echo "::group::OSV-Scanner $OSV_VERSION (dependencies)"
 SBOM="${SBOM_PATH:-$ROOT/target/bom.json}"
 if [ ! -s "$SBOM" ]; then
     echo "::warning::security scans: no SBOM at $SBOM, OSV-Scanner skipped"
-elif fetch "https://github.com/google/osv-scanner/releases/download/v$OSV_VERSION/osv-scanner_linux_amd64" "$WORK/bin/osv-scanner" "$OSV_SHA256"; then
+elif fetch "https://github.com/google/osv-scanner/releases/download/v$OSV_VERSION/$OSV_ASSET" "$WORK/bin/osv-scanner" "$OSV_SHA256"; then
     chmod +x "$WORK/bin/osv-scanner"
     # The file name tells OSV-Scanner it is a CycloneDX SBOM (bom.json, per the specification).
     "$WORK/bin/osv-scanner" scan source -L "$SBOM" --format sarif --output-file "$WORK/osv.sarif"
@@ -83,7 +135,7 @@ fi
 echo "::endgroup::"
 
 echo "::group::OpenGrep $OPENGREP_VERSION (security patterns)"
-if fetch "https://github.com/opengrep/opengrep/releases/download/v$OPENGREP_VERSION/opengrep_manylinux_x86" "$WORK/bin/opengrep" "$OPENGREP_SHA256" \
+if fetch "https://github.com/opengrep/opengrep/releases/download/v$OPENGREP_VERSION/$OPENGREP_ASSET" "$WORK/bin/opengrep" "$OPENGREP_SHA256" \
     && fetch "https://codeload.github.com/opengrep/opengrep-rules/tar.gz/$RULES_COMMIT" "$WORK/rules.tar.gz" "$RULES_SHA256"; then
     chmod +x "$WORK/bin/opengrep"
     mkdir -p "$WORK/rules" && tar -xzf "$WORK/rules.tar.gz" -C "$WORK/rules" --strip-components=1
@@ -103,7 +155,7 @@ fi
 echo "::endgroup::"
 
 echo "::group::Trivy $TRIVY_VERSION (secrets, Dockerfiles)"
-if fetch "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "$WORK/trivy.tar.gz" "$TRIVY_SHA256"; then
+if fetch "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/$TRIVY_ASSET" "$WORK/trivy.tar.gz" "$TRIVY_SHA256"; then
     tar -xzf "$WORK/trivy.tar.gz" -C "$WORK/bin" trivy
     # Offline: without --offline-scan Trivy resolves the pom.xml dependencies on Maven Central even
     # when the vulnerability scanner is off; the misconfiguration checks embedded in the release
@@ -117,7 +169,4 @@ if fetch "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSIO
 fi
 echo "::endgroup::"
 
-paths=$(IFS=,; echo "${reports[*]:-}")
-printf '%s' "$paths" > "$WORK/sarif-paths"
-echo "SONAR_SARIF_PATHS=$paths" >> "${GITHUB_ENV:-/dev/null}"
-echo "Reports handed to SonarQube: ${paths:-none}"
+hand_over

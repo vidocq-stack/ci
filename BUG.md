@@ -5,6 +5,37 @@ Vidocq workspace convention: short id, date, symptom, minimal repro, cause hypot
 
 ---
 
+## BUG-20261116-01 — No security scan runs on the arm64 runner, and the pull request's SonarQube comment stays green
+
+- **Date**: 2026-11-16
+- **Status**: FIXED on `fix/security-scans-arm64` (Vidocq/ci#118; found while reading why `main` of Vidocq/vidocq
+  turned red right after a pull request with a green SonarQube comment)
+- **Symptom**: Vidocq/vidocq#625 got "✅ passed, New issues: 0" (sonar run 4771) and was merged; the push analyses of
+  `main` that followed (runs 4783 and 4814) have a quality gate in error, on two OpenGrep findings in the code that
+  pull request added. The log of run 4771 says, for each of the three tools, `security-scans.sh: line 78:
+  /tmp/vidocq-security/bin/osv-scanner: cannot execute binary file: Exec format error` then `::warning::OSV-Scanner
+  failed (exit 126)`, and ends on `Reports handed to SonarQube: none`. The same lines are in Vidocq/vidocq run 4832 and
+  Vidocq/vauban run 2204. The job container of those three runs is `platform=linux/arm64`; runs 4783, 4814 and 4825, on
+  `platform=linux/amd64`, scan (`opengrep: 21 finding(s)`).
+- **Minimal repro**: `bash sonar-analysis/security-scans.sh` on an arm64 Linux machine: the three tools end with exit
+  126 and the script hands no report over. Offline: `bash sonar-analysis/security-scans-test.sh` on the script before
+  the fix asks for the amd64 assets under `uname -m` = `aarch64`.
+- **Cause**: `security-scans.sh` downloaded the amd64 asset of each tool on every runner (`osv-scanner_linux_amd64`,
+  `opengrep_manylinux_x86`, `trivy_<version>_Linux-64bit.tar.gz`), and one shared runner is arm64. A scan that fails is
+  reported in the log and skipped, by design, so the analysis went on; nothing of it reached the quality-gate step,
+  whose comment read the same as when the scans ran and found nothing.
+- **Fix**: the asset and its SHA-256 by the machine's architecture (`uname -m`: amd64 or arm64; any other runs no scan
+  and says so). The arm64 checksums are those GitHub computes for the release assets, equal to the ones OSV-Scanner
+  and Trivy publish (`osv-scanner_SHA256SUMS`, `trivy_0.75.0_checksums.txt`); OpenGrep publishes signatures only. The
+  script hands the scans without a result to the quality-gate step (`SONAR_SCANS_NOT_RUN`): the pull-request comment
+  names them, the log holds one warning, and that analysis is not recorded for reuse, so the next run of the same code
+  scans again. Tests `sonar-analysis/security-scans-test.sh` (offline: `uname`, `curl` and `sha256sum` are stubs).
+- **Left as is**: `sonar-analysis/infer.sh` pins `infer-linux-x86_64` too; it is opt-in and already says "Infer does
+  not run here". An analysis recorded before the fix by a run whose scans did not execute can still be reused by a
+  later push of the same code tree; a re-run of the job always analyses again.
+
+---
+
 ## BUG-20261105-01 — setup-maven reads Maven from a host that drops old versions, and never checks the archive
 
 - **Date**: 2026-11-05

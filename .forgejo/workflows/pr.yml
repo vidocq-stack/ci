@@ -67,6 +67,7 @@ jobs:
           bash build-one-consumer/targeted/targeted-test.sh
           bash targeted-producer-tests/producer-tests-test.sh
           bash sonar-analysis/targeted-build-test.sh
+          bash sonar-analysis/security-scans-test.sh
           bash select-tck/select-tck-test.sh
           bash validated-tree/validated-tree-test.sh
           bash docs-only-changes/changes-test.sh
