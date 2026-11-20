@@ -368,7 +368,15 @@ runs:
         failed = [c for c in gate.get("conditions", []) if c.get("status") == "ERROR"]
         scope = "&pullRequest=" + q(pr) if is_pr else ""
         issues = sonar("/api/issues/search?components=%s%s&resolved=false&ps=1" % (q(key), scope))["total"]
-        hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
+        # An analysis token may run the analysis and read issues but not search hotspots (HTTP 403, the VCU token):
+        # the report then says so instead of failing a job whose analysis succeeded.
+        try:
+            hotspots = sonar("/api/hotspots/search?projectKey=%s%s&status=TO_REVIEW&ps=1" % (q(key), scope))["paging"]["total"]
+        except urllib.error.HTTPError as e:
+            if e.code != 403:
+                raise
+            hotspots = "unknown (the token cannot read hotspots)"
+            print("::warning::The SonarQube token cannot search security hotspots (HTTP 403): count not reported.")
         print("Quality gate: %s | %s issues | %s hotspots to review | %s" % (status, issues, hotspots, dashboard))
         if not_run:
             print("::warning::Security scans without a result: %s. The quality gate says nothing about them." % not_run)
